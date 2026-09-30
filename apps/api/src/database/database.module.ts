@@ -20,6 +20,6 @@ export class DatabaseModule implements OnApplicationShutdown {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   async onApplicationShutdown(): Promise<void> {
-    await this.db.destroy();
+    await this.db.close();
   }
 }

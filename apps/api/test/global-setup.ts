@@ -17,6 +17,6 @@ export default async function setup(): Promise<void> {
   try {
     await migrateToLatest(db);
   } finally {
-    await db.destroy();
+    await db.close();
   }
 }

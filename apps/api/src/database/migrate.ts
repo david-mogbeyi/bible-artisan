@@ -3,17 +3,19 @@ import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadEnv } from '../config/env';
 import { createDatabase } from './database';
-import { createMigrator, MIGRATIONS_DIR, toError } from './migrator';
+import { createMigrator, MIGRATIONS_DIR } from './migrator';
 
-const TEMPLATE = `import { sql, type Kysely } from 'kysely';
+const TEMPLATE = `import type { MigrationContext } from '../src/database/migrator';
 
 // Write SQL-first DDL: CHECK constraints, composite FKs and partial indexes are expected (PRD §23).
-export async function up(db: Kysely<unknown>): Promise<void> {
-  await sql\`\`.execute(db);
+// Use raw queryInterface.sequelize.query(...) for anything the query-interface DSL can't express
+// (composite FKs in particular — see ADR 0001's amendment).
+export async function up({ context }: { context: MigrationContext }): Promise<void> {
+  await context.sequelize.query(\`\`);
 }
 
-export async function down(db: Kysely<unknown>): Promise<void> {
-  await sql\`\`.execute(db);
+export async function down({ context }: { context: MigrationContext }): Promise<void> {
+  await context.sequelize.query(\`\`);
 }
 `;
 
@@ -32,14 +34,12 @@ async function main(): Promise<void> {
   const db = createDatabase(loadEnv().DATABASE_URL);
   const migrator = createMigrator(db);
   try {
-    const { error, results } =
-      command === 'down' ? await migrator.migrateDown() : await migrator.migrateToLatest();
-    for (const r of results ?? [])
-      console.log(`${r.status.padEnd(8)} ${r.direction} ${r.migrationName}`);
-    if (!results?.length) console.log('No migrations to run.');
-    if (error) throw toError(error);
+    // "down" reverts one step, matching the previous Kysely migrator's migrateDown() semantics.
+    const results = command === 'down' ? await migrator.down() : await migrator.up();
+    for (const r of results) console.log(`applied ${r.name}`);
+    if (!results.length) console.log('No migrations to run.');
   } finally {
-    await db.destroy();
+    await db.close();
   }
 }
 

@@ -1,6 +1,5 @@
 import { Controller, Get, Inject } from '@nestjs/common';
 import type { HealthResponse } from '@bible-artisan/contracts';
-import { sql } from 'kysely';
 import { DATABASE } from '../database/database.module';
 import type { Database } from '../database/database';
 
@@ -10,8 +9,8 @@ export class HealthController {
 
   @Get()
   async check(): Promise<HealthResponse> {
-    const database = await sql`select 1`
-      .execute(this.db)
+    const database = await this.db
+      .query('select 1')
       .then(() => 'up' as const)
       .catch(() => 'down' as const);
     return {

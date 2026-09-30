@@ -19,17 +19,17 @@ packages/contracts  Zod DTO schemas + inferred types shared by API and web. No D
 
 ## Commands (run from the repo root)
 
-| Command                                                              | What it does                                                            |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `pnpm install`                                                       | Install everything (pnpm 10 via corepack, Node 24)                      |
-| `pnpm db:setup`                                                      | Create `.env`, create the dev + test databases, migrate both            |
-| `pnpm dev`                                                           | contracts watch + API (:4000) + web (:3000)                             |
-| `pnpm --filter @bible-artisan/api dev:worker`                        | Run the worker                                                          |
-| `pnpm test`                                                          | Unit tests (all packages)                                               |
-| `pnpm test:integration`                                              | API integration tests on `DATABASE_URL_TEST` (migrated automatically)   |
-| `pnpm check`                                                         | Everything CI runs. Must pass before opening a PR                       |
-| `pnpm --filter @bible-artisan/api db:migrate:make <snake_name>`      | New migration file                                                      |
-| `pnpm db:migrate`                                                    | Apply pending migrations (hand-written Sequelize model classes stay in sync by hand — no codegen step) |
+| Command                                                         | What it does                                                                                           |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm install`                                                  | Install everything (pnpm 10 via corepack, Node 24)                                                     |
+| `pnpm db:setup`                                                 | Create `.env`, create the dev + test databases, migrate both                                           |
+| `pnpm dev`                                                      | contracts watch + API (:4000) + web (:3000)                                                            |
+| `pnpm --filter @bible-artisan/api dev:worker`                   | Run the worker                                                                                         |
+| `pnpm test`                                                     | Unit tests (all packages)                                                                              |
+| `pnpm test:integration`                                         | API integration tests on `DATABASE_URL_TEST` (migrated automatically)                                  |
+| `pnpm check`                                                    | Everything CI runs. Must pass before opening a PR                                                      |
+| `pnpm --filter @bible-artisan/api db:migrate:make <snake_name>` | New migration file                                                                                     |
+| `pnpm db:migrate`                                               | Apply pending migrations (hand-written Sequelize model classes stay in sync by hand — no codegen step) |
 
 `packages/contracts` compiles to `dist/`. If the API or web can't resolve a new export, run `pnpm --filter @bible-artisan/contracts build`. `pnpm dev` keeps it in watch mode.
 

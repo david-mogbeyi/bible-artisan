@@ -15,8 +15,7 @@
     "test:watch": "vitest --project unit",
     "db:migrate": "tsx src/database/migrate.ts latest",
     "db:migrate:down": "tsx src/database/migrate.ts down",
-    "db:migrate:make": "tsx src/database/migrate.ts make",
-    "db:codegen": "kysely-codegen --dialect postgres --out-file src/database/schema.generated.ts --exclude-pattern 'kysely_*'"
+    "db:migrate:make": "tsx src/database/migrate.ts make"
   },
   "dependencies": {
     "@bible-artisan/contracts": "workspace:*",
@@ -25,7 +24,9 @@
     "@nestjs/platform-express": "12.1.2",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
-    "kysely": "0.29.6",
+    "sequelize": "6.37.8",
+    "sequelize-typescript": "2.1.6",
+    "umzug": "3.8.3",
     "pg": "8.23.1",
     "zod": "4.6.5"
   },
@@ -34,7 +35,7 @@
     "@nestjs/cli": "12.0.8",
     "@nestjs/schematics": "12.0.6",
     "@types/pg": "8.23.1",
-    "kysely-codegen": "0.20.0",
+    "@types/validator": "13.15.10",
     "tsx": "4.23.15",
     "@swc/core": "1.16.13",
     "@swc/cli": "0.8.1",
