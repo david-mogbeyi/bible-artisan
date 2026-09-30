@@ -1,7 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
-import { type ArgumentsHost, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  type ArgumentsHost,
+  BadRequestException,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import type { ErrorEnvelope } from '@bible-artisan/contracts';
-import { ConnectionError, ConnectionRefusedError } from 'sequelize';
+import {
+  ConnectionAcquireTimeoutError,
+  ConnectionError,
+  ConnectionRefusedError,
+  DatabaseError,
+  TimeoutError,
+} from 'sequelize';
 import { AllExceptionsFilter, resolveCorrelationId } from './all-exceptions.filter';
 import {
   NotFoundError,
@@ -20,7 +31,7 @@ function run(
   const status = vi.fn<(code: number) => { json: typeof json }>().mockReturnValue({ json });
   const host = {
     switchToHttp: () => ({
-      getResponse: () => ({ status }),
+      getResponse: () => ({ headersSent: false, status, destroy: vi.fn() }),
       getRequest: () => ({ headers }),
     }),
   } as unknown as ArgumentsHost;
@@ -30,6 +41,26 @@ function run(
   if (code === undefined || body === undefined) throw new Error('filter did not respond');
   return { status: code, body };
 }
+
+/** A driver error as node-postgres raises it (SQLSTATE or socket code on `code`). */
+function pgError(code: string): Error & { code: string; sql: string } {
+  return Object.assign(new Error('driver detail'), { code, sql: 'SELECT 1' });
+}
+
+/** An error shaped like body-parser's http-errors instances. */
+function httpLayerError(status: number, message: string): Error {
+  return Object.assign(new Error(message), { status, statusCode: status, expose: true });
+}
+
+const DEPENDENCY_UNAVAILABLE = {
+  status: 503,
+  body: {
+    code: 'DEPENDENCY_UNAVAILABLE',
+    message: 'A required service is temporarily unavailable',
+    retryable: true,
+    correlationId: expect.stringMatching(UUID),
+  },
+};
 
 let logSpy: MockInstance<Logger['error']>;
 
@@ -102,6 +133,73 @@ describe('AllExceptionsFilter', () => {
         code: 'DEPENDENCY_UNAVAILABLE',
         message: 'A required service is temporarily unavailable',
         retryable: true,
+        correlationId: expect.stringMatching(UUID),
+      },
+    });
+  });
+
+  it.each([
+    ['ConnectionAcquireTimeoutError', new ConnectionAcquireTimeoutError(new Error('pool'))],
+    ['TimeoutError', new TimeoutError(pgError('57014'))],
+    ['admin shutdown (57P01)', new DatabaseError(pgError('57P01'))],
+    ['crash shutdown (57P02)', new DatabaseError(pgError('57P02'))],
+    ['cannot connect now (57P03)', new DatabaseError(pgError('57P03'))],
+    ['connection failure (08006)', new DatabaseError(pgError('08006'))],
+    ['connection does not exist (08003)', new DatabaseError(pgError('08003'))],
+    ['socket reset mid-query (ECONNRESET)', new DatabaseError(pgError('ECONNRESET'))],
+    ['an unwrapped driver error (57P01)', pgError('57P01')],
+  ])('maps %s to 503 DEPENDENCY_UNAVAILABLE, retryable', (_name, error) => {
+    expect(run(error)).toStrictEqual(DEPENDENCY_UNAVAILABLE);
+  });
+
+  it('does not map an ordinary query error (e.g. unique violation 23505) to 503', () => {
+    expect(run(new DatabaseError(pgError('23505'))).status).toBe(500);
+  });
+
+  it.each([
+    [413, 'PAYLOAD_TOO_LARGE', 'Payload Too Large'],
+    [415, 'UNSUPPORTED_MEDIA_TYPE', 'Unsupported Media Type'],
+    [400, 'BAD_REQUEST', 'Bad Request'],
+  ])('maps an http-errors %i to its status with a content-free message', (status, code, msg) => {
+    expect(run(httpLayerError(status, 'Unexpected token in "Romans 8:28 note"'))).toStrictEqual({
+      status,
+      body: { code, message: msg, retryable: false, correlationId: expect.stringMatching(UUID) },
+    });
+  });
+
+  it('ignores a status on an error that is not marked expose: true', () => {
+    expect(run(Object.assign(new Error('x'), { status: 404 })).status).toBe(500);
+  });
+
+  it('destroys the response instead of writing an envelope once headers are sent', () => {
+    const status = vi.fn();
+    const destroy = vi.fn();
+    const correlationId = '0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60';
+    const host = {
+      switchToHttp: () => ({
+        getResponse: () => ({ headersSent: true, status, destroy }),
+        getRequest: () => ({ headers: { 'x-correlation-id': correlationId } }),
+      }),
+    } as unknown as ArgumentsHost;
+
+    new AllExceptionsFilter().catch(new TypeError('private note text'), host);
+
+    expect(status).not.toHaveBeenCalled();
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(logSpy.mock.calls).toStrictEqual([
+      [
+        `INTERNAL_ERROR status=500 correlationId=${correlationId} errorType=TypeError headersSent=true`,
+      ],
+    ]);
+  });
+
+  it('replaces a Nest HttpException message with the reason phrase', () => {
+    expect(run(new BadRequestException('Unexpected token in "Romans 8:28 note"'))).toStrictEqual({
+      status: 400,
+      body: {
+        code: 'BAD_REQUEST',
+        message: 'Bad Request',
+        retryable: false,
         correlationId: expect.stringMatching(UUID),
       },
     });

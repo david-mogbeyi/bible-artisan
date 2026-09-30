@@ -2,10 +2,54 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildOpenApiDocument } from './openapi';
 
 describe('buildOpenApiDocument', () => {
-  it('generates a document containing the error envelope and health schemas', () => {
+  it('documents every path with its success response and the ErrorEnvelope as default', () => {
+    const errorResponse = {
+      description: 'Error (shared error envelope, PRD section 24)',
+      content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
+    };
     const doc = buildOpenApiDocument();
-    expect(doc.openapi).toBe('3.0.0');
-    expect(doc.paths).toHaveProperty('/health');
+    expect({ openapi: doc.openapi, servers: doc.servers, paths: doc.paths }).toStrictEqual({
+      openapi: '3.0.0',
+      servers: [{ url: '/v1' }],
+      paths: {
+        '/health': {
+          get: {
+            description: 'Reports API and database liveness.',
+            responses: {
+              200: {
+                description: 'OK',
+                content: {
+                  'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } },
+                },
+              },
+              default: errorResponse,
+            },
+          },
+        },
+        '/openapi.json': {
+          get: {
+            description: 'Returns this OpenAPI document.',
+            responses: {
+              200: {
+                description: 'OpenAPI 3.0 document for /v1',
+                content: { 'application/json': { schema: { type: 'object' } } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it('builds the document once and returns the same frozen object', () => {
+    const doc = buildOpenApiDocument();
+    expect(buildOpenApiDocument()).toBe(doc);
+    expect(Object.isFrozen(doc.components.schemas)).toBe(true);
+  });
+
+  it('generates the error envelope and health schemas', () => {
+    const doc = buildOpenApiDocument();
     expect(doc.components.schemas).toStrictEqual({
       HealthResponse: {
         type: 'object',

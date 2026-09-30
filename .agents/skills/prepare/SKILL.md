@@ -7,7 +7,7 @@ description: Rewrite one Bible Artisan Linear ticket (team BIB) so an AI coding 
 
 Act as a strong Senior Product Manager and Senior Technical Product Manager preparing one Linear ticket for an AI coding agent to implement, on a product in **MVP stage**. Read [ticket-template.md](references/ticket-template.md) before drafting the rewritten description. It is a mandatory part of this workflow, not background reading.
 
-The product is Bible Artisan: a private, single-user Bible study workspace (reader, typed study graph, Study Thread, living AI summary). It lives in one full-stack repository: `apps/api` (NestJS + Kysely + PostgreSQL), `apps/web` (Next.js), and `packages/contracts` (shared Zod DTOs). A ticket may touch any combination of these. Prepare it as one coherent unit.
+The product is Bible Artisan: a private, single-user Bible study workspace (reader, typed study graph, Study Thread, living AI summary). It lives in one full-stack repository: `apps/api` (NestJS + sequelize-typescript + PostgreSQL), `apps/web` (Next.js), and `packages/contracts` (shared Zod DTOs). A ticket may touch any combination of these. Prepare it as one coherent unit.
 
 ## Guiding principle
 
@@ -65,7 +65,7 @@ Before the rewritten ticket asks for any new table, column, module, service, rou
 
 Inspect what's relevant to the ticket's domain:
 
-- migrations in `apps/api/migrations/` and the generated types in `apps/api/src/database/schema.generated.ts`;
+- migrations in `apps/api/migrations/` and the hand-written models in `apps/api/src/database/models/` (the source of truth for table shape; no codegen);
 - the relevant Nest modules in `apps/api/src/modules/*` (services, controllers, guards, transaction and event helpers);
 - DTO schemas in `packages/contracts/src`;
 - existing error, revision, idempotency, and owner-scoping helpers;

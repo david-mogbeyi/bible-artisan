@@ -80,4 +80,51 @@ describe('migration reversibility', () => {
     expect(await publicTables(db, ['migration_rollback_probe'])).toStrictEqual([]);
     expect(await recordedMigrations(db)).toStrictEqual(before);
   });
+
+  it('runs a create-then-index migration on its own transaction via context.query', async () => {
+    const before = await recordedMigrations(db);
+    const migrator = createMigrator(db, {
+      glob: path.join(__dirname, 'fixtures/create-and-index-migration/*.ts'),
+    });
+    try {
+      const applied = await migrator.up();
+      expect(applied.map((m) => m.name)).toStrictEqual(['29990102000000_create_then_index.ts']);
+      const indexes = await db.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes
+         WHERE schemaname = 'public' AND tablename = 'migration_index_probe'
+         ORDER BY indexname`,
+        { type: QueryTypes.SELECT },
+      );
+      expect(indexes.map((i) => i.indexname)).toStrictEqual([
+        'migration_index_probe_label_idx',
+        'migration_index_probe_pkey',
+      ]);
+      expect(await recordedMigrations(db)).toStrictEqual(
+        [...before, '29990102000000_create_then_index.ts'].sort(),
+      );
+    } finally {
+      await migrator.down({ to: 0 });
+    }
+    expect(await publicTables(db, ['migration_index_probe'])).toStrictEqual([]);
+    expect(await recordedMigrations(db)).toStrictEqual(before);
+  });
+
+  it('refuses to revert a migration without down() and keeps its SequelizeMeta row', async () => {
+    const before = await recordedMigrations(db);
+    const name = '29990103000000_no_down.ts';
+    const migrator = createMigrator(db, {
+      glob: path.join(__dirname, 'fixtures/missing-down-migration/*.ts'),
+    });
+    try {
+      await migrator.up();
+      await expect(migrator.down()).rejects.toThrow(/does not export down\(\)/);
+      expect(await recordedMigrations(db)).toStrictEqual([...before, name].sort());
+      expect(await publicTables(db, ['migration_no_down_probe'])).toStrictEqual([
+        'migration_no_down_probe',
+      ]);
+    } finally {
+      await db.query(`DROP TABLE IF EXISTS migration_no_down_probe`);
+      await db.query(`DELETE FROM "SequelizeMeta" WHERE name = $1`, { bind: [name] });
+    }
+  });
 });

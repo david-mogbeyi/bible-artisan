@@ -12,7 +12,7 @@ Apply only the relevant gates, but decide applicability explicitly. Prefer integ
 - In `apps/api`, use normal imports (not `import type`) for injected classes; Nest DI needs runtime metadata. Use `@Inject(TOKEN)` for symbol tokens.
 - DTOs are Zod schemas in `packages/contracts`, validated at the API boundary and parsed again in the web client.
 - Test naming: unit `*.spec.ts` beside the source; API integration `apps/api/test/**/*.int-spec.ts` (supertest against the real `AppModule` via `test/app.ts`); web `*.test.tsx`.
-- Commands (verify against `package.json` at execution time): `pnpm check`, `pnpm test`, `pnpm test:integration`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm format`, `pnpm db:migrate`, `pnpm --filter @bible-artisan/api db:migrate:make <name>`, `pnpm --filter @bible-artisan/api db:codegen`.
+- Commands (verify against `package.json` at execution time): `pnpm check`, `pnpm test`, `pnpm test:integration`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm format`, `pnpm db:migrate`, `pnpm --filter @bible-artisan/api db:migrate:make <name>`, `pnpm --filter @bible-artisan/api db:migrate:down`.
 
 ## API correctness
 
@@ -20,19 +20,19 @@ Apply only the relevant gates, but decide applicability explicitly. Prefer integ
 - Routes live under `/v1`. Private responses are not cacheable by intermediaries.
 - Status codes per PRD section 24: 400 malformed DTO, 401 unauthenticated, 404 absent **or** another owner's resource, 409 revision/uniqueness conflict, 413 too large, 422 invalid reference or state transition, 428 missing revision, 429 with `Retry-After`, 503 dependency unavailable.
 - Every error uses the shared envelope. Error text never reveals whether another user's entity exists.
-- Response DTOs carry only what the contract specifies. Never return Kysely rows directly, and never leak `owner_id` of other users, internal flags, or AI prompt data.
+- Response DTOs carry only what the contract specifies. Never return Sequelize model instances or raw rows directly, and never leak `owner_id` of other users, internal flags, or AI prompt data.
 - Once OpenAPI generation exists (BIB-9), regenerate the committed artifact and confirm it matches the contract.
 - Test: success, invalid input, unauthenticated, **cross-user 404**, missing resource, conflict, and the error body.
 
 ## Database and migration safety
 
-- Kysely migrations only, written SQL-first. Each is reversible, or states honestly why it isn't.
+- Migrations only through the repo's Umzug-based migrator (`db:migrate:make`, `pnpm db:migrate`), never model `sync()`. Written SQL-first via `context.query(...)`, which is bound to the migration's transaction. Each exports both `up` and `down` and is reversible, or states honestly why it isn't.
 - UUID PKs, `timestamptz`, and explicit CHECK constraints for enumerated values.
 - Study-scoped tables: `study_id` + `owner_id` with composite FK to `study (owner_id, id)`, so a mismatched owner/study can't be written.
 - Partial unique indexes for "one live X" invariants (e.g. live canonical Scripture node per study/reference/edition; live edge per study/source/target/type).
 - Add indexes only for demonstrated access patterns (PRD section 23 lists the expected ones).
 - Verify forward migration on an empty database (CI does this) and on the current dev schema; verify `down` when supported.
-- After schema changes, run `db:codegen` and commit `schema.generated.ts`.
+- After schema changes, update the hand-written sequelize-typescript models in `apps/api/src/database/models/` to match (models are the source of truth for table shape; there is no codegen or drift check) and add a model-level integration test that creates rows through the model. Raw-SQL-only tests have missed broken models before.
 - Test that the database rejects invalid data, e.g. a CHECK violation or cross-owner FK.
 
 ## PRD invariants

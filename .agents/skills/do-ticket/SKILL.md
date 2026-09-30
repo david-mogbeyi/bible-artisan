@@ -185,7 +185,7 @@ Inspect enough to implement safely and consistently, then stop. No broad archite
 The plan describes the smallest implementation that satisfies every acceptance criterion. It is not a checklist showing how many concerns were considered. Map every acceptance criterion to:
 
 - code changes by layer: `packages/contracts` → migration → `apps/api` module → `apps/web`;
-- migration and `db:codegen` output, only if the ticket requires persistence changes;
+- migration, matching hand-written model changes, and a model-level integration test, only if the ticket requires persistence changes;
 - API/DTO/OpenAPI changes, only if the ticket requires them;
 - the planned tests for each criterion (integration-first for API, Testing Library for web);
 - exact verification commands;
@@ -222,13 +222,13 @@ The invocation authorizes ticket-scoped file changes, a ticket branch, ticket-sc
 Implement every acceptance criterion and nothing beyond it. Preserve the conventions in `AGENTS.md`. Typical order:
 
 1. **Contracts.** Add Zod request and response schemas in `packages/contracts/src`, export them, and rebuild (`pnpm --filter @bible-artisan/contracts build`).
-2. **Migration.** Run `pnpm --filter @bible-artisan/api db:migrate:make <snake_name>` and write SQL-first DDL with the constraints that protect real invariants (CHECK, composite FKs, partial unique indexes). Make it reversible. Apply it (`pnpm db:migrate`), regenerate types (`pnpm --filter @bible-artisan/api db:codegen`), and commit the generated file.
+2. **Migration.** Run `pnpm --filter @bible-artisan/api db:migrate:make <snake_name>` and write SQL-first DDL with the constraints that protect real invariants (CHECK, composite FKs, partial unique indexes). Run every statement through `context.query(...)` (bound to the migration's transaction) and implement both `up` and `down`, so it's reversible. Apply it (`pnpm db:migrate`). Then update or add the sequelize-typescript model in `apps/api/src/database/models/` by hand (models are the source of truth for table shape and there is no codegen, so keep models and migrations in sync), register a new model in `createDatabase`, and add a model-level integration test that creates rows through the model, since raw-SQL-only tests miss broken models.
 3. **API.** Keep domain logic in module services, not controllers. Validate every untrusted input with the contract schema. Derive the owner from the session. Write mutation and event in one transaction through the Thread service. Use the shared revision, idempotency, and error-envelope helpers. Keep AI and provider calls outside transactions. Update OpenAPI once it exists.
 4. **Web.** Put server state in TanStack Query through `apiFetch` and contract schemas. Put local interaction state in the lightweight client store. Use semantic HTML and accessible names. Make everything keyboard-reachable with visible focus. Provide List View or dialog equivalents for canvas actions. Implement the save indicator semantics. Never render AI content as user-established. Keep private content out of `localStorage`. Browser persistence follows the PRD section 27 IndexedDB rules only when the ticket owns offline behavior.
 
 Bible Artisan defaults, after the repository's own rules and newer authoritative decisions:
 
-- Node 24 and TypeScript strict; NestJS modular monolith; Kysely + `pg`; PostgreSQL 16+ as the single source of truth.
+- Node 24 and TypeScript strict; NestJS modular monolith; sequelize-typescript + `pg` with SQL-first migrations run by the repo's Umzug-based migrator; PostgreSQL 16+ as the single source of truth.
 - UUID primary keys (`gen_random_uuid()`), `timestamptz` in UTC, snake_case columns and camelCase TypeScript, integer revisions.
 - Put enumerated values in `text` columns with explicit CHECK constraints, as PRD section 23 specifies ("explicit enum/check validation"), unless the repository has since standardized differently.
 - Keep identity, status, and relationships in real columns; JSONB is only for typed payloads and rich text.

@@ -8,8 +8,9 @@ import { createMigrator, MIGRATIONS_DIR } from './migrator';
 const TEMPLATE = `import type { MigrationContext } from '../src/database/migrator';
 
 // Write SQL-first DDL: CHECK constraints, composite FKs and partial indexes are expected (PRD §23).
-// Use raw queryInterface.sequelize.query(...) for anything the query-interface DSL can't express
-// (composite FKs in particular — see ADR 0001's amendment).
+// Run every statement through context.query(...): it is bound to this migration's transaction, so
+// the whole migration (and its SequelizeMeta row) commits or rolls back as one unit.
+// Both up and down are required; the migrator refuses to run a missing step.
 export async function up({ context }: { context: MigrationContext }): Promise<void> {
   await context.query(\`\`);
 }
@@ -34,9 +35,10 @@ async function main(): Promise<void> {
   const db = createDatabase(loadEnv().DATABASE_URL);
   const migrator = createMigrator(db);
   try {
-    // "down" reverts one step, matching the previous Kysely migrator's migrateDown() semantics.
+    // "down" reverts exactly one step (the most recently applied migration).
     const results = command === 'down' ? await migrator.down() : await migrator.up();
-    for (const r of results) console.log(`applied ${r.name}`);
+    const verb = command === 'down' ? 'reverted' : 'applied';
+    for (const r of results) console.log(`${verb} ${r.name}`);
     if (!results.length) console.log('No migrations to run.');
   } finally {
     await db.close();

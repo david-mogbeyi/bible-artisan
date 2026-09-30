@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { Controller, Get, INestApplication, Module } from '@nestjs/common';
+import { Body, Controller, Get, INestApplication, Module, Post } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { errorEnvelopeSchema } from '@bible-artisan/contracts';
 import { ConnectionRefusedError } from 'sequelize';
@@ -46,6 +46,11 @@ class TestErrorsController {
   @Get('db-down')
   dbDown(): never {
     throw new ConnectionRefusedError(new Error('connect ECONNREFUSED'));
+  }
+
+  @Post('echo')
+  echo(@Body() body: unknown): unknown {
+    return body;
   }
 
   @Get('unexpected')
@@ -136,6 +141,45 @@ describe('global exception filter → error envelope', () => {
     expect(errorEnvelopeSchema.parse(res.body)).toStrictEqual({
       code: 'INTERNAL_ERROR',
       message: 'An unexpected error occurred',
+      retryable: false,
+      correlationId: expect.stringMatching(UUID),
+    });
+  });
+
+  it('maps an over-limit JSON body (body-parser 413) to the envelope without echoing it', async () => {
+    const oversized = JSON.stringify({ note: 'x'.repeat(200 * 1024) });
+    const res = await request(app.getHttpServer())
+      .post('/v1/__test-errors/echo')
+      .set('content-type', 'application/json')
+      .send(oversized)
+      .expect(413);
+    expect(res.body).toStrictEqual({
+      code: 'PAYLOAD_TOO_LARGE',
+      message: 'Payload Too Large',
+      retryable: false,
+      correlationId: expect.stringMatching(UUID),
+    });
+  });
+
+  it('maps a malformed JSON body (body-parser 400) to the envelope without echoing it', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/v1/__test-errors/echo')
+      .set('content-type', 'application/json')
+      .send('{"note": "Romans 8:28 private')
+      .expect(400);
+    expect(res.body).toStrictEqual({
+      code: 'BAD_REQUEST',
+      message: 'Bad Request',
+      retryable: false,
+      correlationId: expect.stringMatching(UUID),
+    });
+  });
+
+  it('maps an unknown route (Nest 404) to the envelope without echoing the path', async () => {
+    const res = await request(app.getHttpServer()).get('/v1/no-such-route/romans-8-28').expect(404);
+    expect(res.body).toStrictEqual({
+      code: 'NOT_FOUND',
+      message: 'Not Found',
       retryable: false,
       correlationId: expect.stringMatching(UUID),
     });

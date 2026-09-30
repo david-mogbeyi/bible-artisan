@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import type { INestApplication } from '@nestjs/common';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
+import { buildOpenApiDocument } from '@bible-artisan/contracts/openapi';
 import { createTestApp } from './app';
 
 describe('GET /v1/openapi.json', () => {
@@ -17,9 +18,7 @@ describe('GET /v1/openapi.json', () => {
 
   it('returns a document generated from the current contracts schemas', async () => {
     const res = await request(app.getHttpServer()).get('/v1/openapi.json').expect(200);
-    const body = res.body as { openapi: string; components: { schemas: Record<string, unknown> } };
-    expect(body.openapi).toBe('3.0.0');
-    expect(body.components.schemas).toHaveProperty('HealthResponse');
-    expect(body.components.schemas).toHaveProperty('ErrorEnvelope');
+    // The whole served document, including each path's `default` ErrorEnvelope response.
+    expect(res.body).toStrictEqual(JSON.parse(JSON.stringify(buildOpenApiDocument())));
   });
 });
