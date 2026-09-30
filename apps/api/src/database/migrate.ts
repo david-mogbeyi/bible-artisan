@@ -11,11 +11,11 @@ const TEMPLATE = `import type { MigrationContext } from '../src/database/migrato
 // Use raw queryInterface.sequelize.query(...) for anything the query-interface DSL can't express
 // (composite FKs in particular — see ADR 0001's amendment).
 export async function up({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(\`\`);
+  await context.query(\`\`);
 }
 
 export async function down({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(\`\`);
+  await context.query(\`\`);
 }
 `;
 

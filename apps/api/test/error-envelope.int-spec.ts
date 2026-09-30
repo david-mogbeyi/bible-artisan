@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import { Controller, Get, INestApplication, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { errorEnvelopeSchema } from '@bible-artisan/contracts';
+import { ConnectionRefusedError } from 'sequelize';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
@@ -41,7 +42,19 @@ class TestErrorsController {
   revisionConflict(): never {
     throw new RevisionConflictError(7);
   }
+
+  @Get('db-down')
+  dbDown(): never {
+    throw new ConnectionRefusedError(new Error('connect ECONNREFUSED'));
+  }
+
+  @Get('unexpected')
+  unexpected(): never {
+    throw new TypeError('private note body must never leak');
+  }
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 @Module({ controllers: [TestErrorsController] })
 class TestErrorsModule {}
@@ -102,17 +115,52 @@ describe('global exception filter → error envelope', () => {
     expect(errorEnvelopeSchema.parse(res.body)).toStrictEqual({
       code: 'REVISION_CONFLICT',
       message: 'Revision conflict',
-      retryable: true,
+      retryable: false,
       correlationId: expect.any(String),
       currentRevision: 7,
     });
   });
 
-  it('echoes a supplied correlation ID', async () => {
+  it('maps a database connection failure to 503, retryable', async () => {
+    const res = await request(app.getHttpServer()).get('/v1/__test-errors/db-down').expect(503);
+    expect(errorEnvelopeSchema.parse(res.body)).toStrictEqual({
+      code: 'DEPENDENCY_UNAVAILABLE',
+      message: 'A required service is temporarily unavailable',
+      retryable: true,
+      correlationId: expect.stringMatching(UUID),
+    });
+  });
+
+  it('maps an unexpected error to 500, not retryable, without leaking its message', async () => {
+    const res = await request(app.getHttpServer()).get('/v1/__test-errors/unexpected').expect(500);
+    expect(errorEnvelopeSchema.parse(res.body)).toStrictEqual({
+      code: 'INTERNAL_ERROR',
+      message: 'An unexpected error occurred',
+      retryable: false,
+      correlationId: expect.stringMatching(UUID),
+    });
+  });
+
+  it('echoes a supplied UUID correlation ID', async () => {
+    const correlationId = '6f1c2b9e-8a4d-4e3f-9b21-7c5d0e8a1f42';
     const res = await request(app.getHttpServer())
       .get('/v1/__test-errors/not-found')
-      .set('x-correlation-id', 'fixed-correlation-id')
+      .set('x-correlation-id', correlationId)
       .expect(404);
-    expect(errorEnvelopeSchema.parse(res.body).correlationId).toBe('fixed-correlation-id');
+    expect(errorEnvelopeSchema.parse(res.body).correlationId).toBe(correlationId);
+  });
+
+  it.each([
+    ['empty', ''],
+    ['free text', 'fixed-correlation-id'],
+    ['oversized', 'a'.repeat(4096)],
+  ])('replaces a %s correlation ID header with a fresh UUID', async (_label, header) => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/__test-errors/not-found')
+      .set('x-correlation-id', header)
+      .expect(404);
+    const { correlationId } = errorEnvelopeSchema.parse(res.body);
+    expect(correlationId).toMatch(UUID);
+    expect(correlationId).not.toBe(header);
   });
 });

@@ -3,7 +3,7 @@ import type { MigrationContext } from '../src/database/migrator';
 // `user`: identity core only (PRD §23, this ticket's "Data changes"). Consent/analytics/default-
 // translation columns land with the tickets that read or write them (BIB-10, BIB-14+).
 export async function up({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(`
+  await context.query(`
     CREATE TABLE "user" (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       normalized_email text NOT NULL,
@@ -18,5 +18,5 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
 }
 
 export async function down({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(`DROP TABLE IF EXISTS "user";`);
+  await context.query(`DROP TABLE IF EXISTS "user";`);
 }

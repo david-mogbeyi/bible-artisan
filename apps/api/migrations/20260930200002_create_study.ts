@@ -1,11 +1,13 @@
 import type { MigrationContext } from '../src/database/migrator';
 
-// `study`: the composite `(owner_id, id)` unique key here is what every study-scoped child
-// table's composite FK points at (PRD §23, AGENTS.md rule 2 — "a mismatched owner/study must be
-// unwritable at the DB level"). `id` alone is not unique-constrained on its own on purpose: the
-// composite key is the only supported way to reference a study row.
+// `study`: `id` is the primary key; the additional composite `(owner_id, id)` unique key is what
+// every study-scoped child table's composite FK must reference (PRD §23, AGENTS.md rule 2 — "a
+// mismatched owner/study must be unwritable at the DB level"). Never add an FK to `study (id)`
+// alone: test/schema.int-spec.ts fails if any FK into `study` is not the composite one.
+// The composite unique key's btree (leading column owner_id) also serves owner-scoped lookups,
+// so no separate owner_id index is needed.
 export async function up({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(`
+  await context.query(`
     CREATE TABLE study (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       owner_id uuid NOT NULL REFERENCES "user" (id),
@@ -20,9 +22,8 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
       CONSTRAINT study_lifecycle_check CHECK (lifecycle IN ('active', 'archived', 'trashed'))
     );
   `);
-  await context.sequelize.query(`CREATE INDEX study_owner_id_idx ON study (owner_id);`);
 }
 
 export async function down({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(`DROP TABLE IF EXISTS study;`);
+  await context.query(`DROP TABLE IF EXISTS study;`);
 }

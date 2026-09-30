@@ -3,6 +3,7 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
 /**
  * Hand-written model class for `study_event`. Same composite-FK shape as `study_node`
  * (`study_id` + `owner_id` → `study(owner_id, id)`, declared in the migration's raw SQL).
+ * Nullability and defaults mirror the migration.
  *
  * This ticket keeps the table to the minimal columns that prove the append-only,
  * composite-FK, per-study `sequence` shape. The transactional sequence allocator, idempotent
@@ -12,7 +13,7 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
 @Table({ tableName: 'study_event', timestamps: false })
 export class StudyEvent extends Model {
   @PrimaryKey
-  @Column(DataType.UUID)
+  @Column({ type: DataType.UUID, allowNull: false, defaultValue: DataType.UUIDV4 })
   declare id: string;
 
   @Column({ field: 'study_id', type: DataType.UUID, allowNull: false })
@@ -21,8 +22,10 @@ export class StudyEvent extends Model {
   @Column({ field: 'owner_id', type: DataType.UUID, allowNull: false })
   declare ownerId: string;
 
+  // bigint: pg returns int8 as a decimal string. Typed `string` (not number) so values past
+  // 2^53 can never be silently rounded; convert with BigInt(sequence) where arithmetic is needed.
   @Column({ type: DataType.BIGINT, allowNull: false })
-  declare sequence: number;
+  declare sequence: string;
 
   @Column({ field: 'event_type', type: DataType.TEXT, allowNull: false })
   declare eventType: string;
@@ -35,6 +38,11 @@ export class StudyEvent extends Model {
   })
   declare payloadJson: Record<string, unknown>;
 
-  @Column({ field: 'occurred_at', type: DataType.DATE, allowNull: false })
+  @Column({
+    field: 'occurred_at',
+    type: DataType.DATE,
+    allowNull: false,
+    defaultValue: DataType.NOW,
+  })
   declare occurredAt: Date;
 }

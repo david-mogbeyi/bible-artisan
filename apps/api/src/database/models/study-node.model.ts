@@ -1,4 +1,12 @@
-import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript';
+import {
+  Column,
+  CreatedAt,
+  DataType,
+  Model,
+  PrimaryKey,
+  Table,
+  UpdatedAt,
+} from 'sequelize-typescript';
 
 /**
  * Hand-written model class for `study_node`. Carries `study_id` + `owner_id` with a composite FK
@@ -6,19 +14,15 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
  * cannot express composite FKs — ADR 0001's amendment). This ticket keeps the table to the
  * minimal columns that prove the composite-FK/type-immutability shape; subtype columns
  * (Scripture/Question/Observation/Conclusion/Source) land with the tickets that add them.
+ * Nullability and defaults mirror the migration.
  *
  * `type` is immutable after creation: enforced here by never exposing an update path for it (no
  * node-update endpoint exists yet — Graph's mutation ticket owns that and must preserve this).
  */
-@Table({
-  tableName: 'study_node',
-  timestamps: true,
-  updatedAt: 'updated_at',
-  createdAt: 'created_at',
-})
+@Table({ tableName: 'study_node', timestamps: true })
 export class StudyNode extends Model {
   @PrimaryKey
-  @Column(DataType.UUID)
+  @Column({ type: DataType.UUID, allowNull: false, defaultValue: DataType.UUIDV4 })
   declare id: string;
 
   @Column({ field: 'study_id', type: DataType.UUID, allowNull: false })
@@ -36,9 +40,11 @@ export class StudyNode extends Model {
   @Column({ field: 'deleted_at', type: DataType.DATE, allowNull: true })
   declare deletedAt: Date | null;
 
+  @CreatedAt
   @Column({ field: 'created_at', type: DataType.DATE, allowNull: false })
   declare createdAt: Date;
 
+  @UpdatedAt
   @Column({ field: 'updated_at', type: DataType.DATE, allowNull: false })
   declare updatedAt: Date;
 }

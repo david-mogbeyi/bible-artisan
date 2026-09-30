@@ -5,7 +5,7 @@ import type { MigrationContext } from '../src/database/migrator';
 // transactional sequence allocator and the rest of the event taxonomy are BIB-12's job. The
 // composite FK to study(owner_id, id) makes an owner/study mismatch unwritable at the DB level.
 export async function up({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(`
+  await context.query(`
     CREATE TABLE study_event (
       id uuid NOT NULL DEFAULT gen_random_uuid(),
       study_id uuid NOT NULL,
@@ -23,5 +23,5 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
 }
 
 export async function down({ context }: { context: MigrationContext }): Promise<void> {
-  await context.sequelize.query(`DROP TABLE IF EXISTS study_event;`);
+  await context.query(`DROP TABLE IF EXISTS study_event;`);
 }

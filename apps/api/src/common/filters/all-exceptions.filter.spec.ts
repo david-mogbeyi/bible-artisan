@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { ArgumentsHost } from '@nestjs/common';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
+import { type ArgumentsHost, Logger, ServiceUnavailableException } from '@nestjs/common';
 import type { ErrorEnvelope } from '@bible-artisan/contracts';
-import { AllExceptionsFilter } from './all-exceptions.filter';
+import { ConnectionError, ConnectionRefusedError } from 'sequelize';
+import { AllExceptionsFilter, resolveCorrelationId } from './all-exceptions.filter';
 import {
   NotFoundError,
   RevisionConflictError,
@@ -9,77 +10,145 @@ import {
   ValidationError,
 } from '../errors/domain-errors';
 
-function createHost(headers: Record<string, string> = {}): {
-  host: ArgumentsHost;
-  json: ReturnType<typeof vi.fn<(body: ErrorEnvelope) => void>>;
-  status: ReturnType<typeof vi.fn>;
-} {
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function run(
+  exception: unknown,
+  headers: Record<string, string | string[]> = {},
+): { status: number; body: ErrorEnvelope } {
   const json = vi.fn<(body: ErrorEnvelope) => void>();
-  const status = vi.fn().mockReturnValue({ json });
-  const response = { status };
-  const request = { headers };
+  const status = vi.fn<(code: number) => { json: typeof json }>().mockReturnValue({ json });
   const host = {
     switchToHttp: () => ({
-      getResponse: () => response,
-      getRequest: () => request,
+      getResponse: () => ({ status }),
+      getRequest: () => ({ headers }),
     }),
   } as unknown as ArgumentsHost;
-  return { host, json, status };
+  new AllExceptionsFilter().catch(exception, host);
+  const code = status.mock.calls[0]?.[0];
+  const body = json.mock.calls[0]?.[0];
+  if (code === undefined || body === undefined) throw new Error('filter did not respond');
+  return { status: code, body };
 }
 
+let logSpy: MockInstance<Logger['error']>;
+
+beforeEach(() => {
+  logSpy = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('AllExceptionsFilter', () => {
-  it('maps NotFoundError to 404', () => {
-    const filter = new AllExceptionsFilter();
-    const { host, json, status } = createHost();
-    filter.catch(new NotFoundError('nope'), host);
-    expect(status).toHaveBeenCalledWith(404);
-    expect(json).toHaveBeenCalledWith(
-      expect.objectContaining({ code: 'NOT_FOUND', message: 'nope', retryable: false }),
-    );
+  it('maps NotFoundError to 404, not retryable', () => {
+    expect(run(new NotFoundError('nope'))).toStrictEqual({
+      status: 404,
+      body: {
+        code: 'NOT_FOUND',
+        message: 'nope',
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+      },
+    });
   });
 
   it('maps ValidationError to 400 and includes fieldErrors', () => {
-    const filter = new AllExceptionsFilter();
-    const { host, json, status } = createHost();
-    filter.catch(new ValidationError('bad', { title: ['required'] }), host);
-    expect(status).toHaveBeenCalledWith(400);
-    expect(json).toHaveBeenCalledWith(
-      expect.objectContaining({ code: 'VALIDATION', fieldErrors: { title: ['required'] } }),
-    );
-  });
-
-  it('maps RevisionMissingError to 428', () => {
-    const filter = new AllExceptionsFilter();
-    const { host, status } = createHost();
-    filter.catch(new RevisionMissingError(), host);
-    expect(status).toHaveBeenCalledWith(428);
-  });
-
-  it('maps RevisionConflictError to 409 with currentRevision', () => {
-    const filter = new AllExceptionsFilter();
-    const { host, json, status } = createHost();
-    filter.catch(new RevisionConflictError(3), host);
-    expect(status).toHaveBeenCalledWith(409);
-    expect(json).toHaveBeenCalledWith(expect.objectContaining({ currentRevision: 3 }));
-  });
-
-  it('maps an unrecognized error to 500', () => {
-    const filter = new AllExceptionsFilter();
-    const { host, status } = createHost();
-    filter.catch(new Error('boom'), host);
-    expect(status).toHaveBeenCalledWith(500);
-  });
-
-  it('generates a correlation ID when none is supplied, and echoes one when supplied', () => {
-    const filter = new AllExceptionsFilter();
-    const { host: hostNoHeader, json: jsonNoHeader } = createHost();
-    filter.catch(new NotFoundError(), hostNoHeader);
-    expect(jsonNoHeader.mock.calls[0]?.[0]?.correlationId).toBeTypeOf('string');
-
-    const { host: hostWithHeader, json: jsonWithHeader } = createHost({
-      'x-correlation-id': 'abc-123',
+    expect(run(new ValidationError('bad', { title: ['required'] }))).toStrictEqual({
+      status: 400,
+      body: {
+        code: 'VALIDATION',
+        message: 'bad',
+        fieldErrors: { title: ['required'] },
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+      },
     });
-    filter.catch(new NotFoundError(), hostWithHeader);
-    expect(jsonWithHeader.mock.calls[0]?.[0]?.correlationId).toBe('abc-123');
+  });
+
+  it('maps RevisionMissingError to 428, not retryable', () => {
+    expect(run(new RevisionMissingError())).toStrictEqual({
+      status: 428,
+      body: {
+        code: 'REVISION_MISSING',
+        message: 'expectedRevision is required',
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+      },
+    });
+  });
+
+  it('maps RevisionConflictError to 409 with currentRevision, not retryable (PRD §24)', () => {
+    expect(run(new RevisionConflictError(3))).toStrictEqual({
+      status: 409,
+      body: {
+        code: 'REVISION_CONFLICT',
+        message: 'Revision conflict',
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+        currentRevision: 3,
+      },
+    });
+  });
+
+  it.each([
+    ['ConnectionError', new ConnectionError(new Error('down'))],
+    ['ConnectionRefusedError', new ConnectionRefusedError(new Error('refused'))],
+  ])('maps a database %s to 503, retryable', (_name, error) => {
+    expect(run(error)).toStrictEqual({
+      status: 503,
+      body: {
+        code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'A required service is temporarily unavailable',
+        retryable: true,
+        correlationId: expect.stringMatching(UUID),
+      },
+    });
+  });
+
+  it('maps a Nest 503 HttpException to retryable', () => {
+    expect(run(new ServiceUnavailableException()).body.retryable).toBe(true);
+  });
+
+  it('maps an unrecognized error to 500, not retryable', () => {
+    expect(run(new Error('boom'))).toStrictEqual({
+      status: 500,
+      body: {
+        code: 'INTERNAL_ERROR',
+        message: 'An unexpected error occurred',
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+      },
+    });
+  });
+
+  it('logs code, status, correlation ID and error class name, never the message', () => {
+    const correlationId = '0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60';
+    run(new TypeError('Romans 14:23 private note text'), { 'x-correlation-id': correlationId });
+    expect(logSpy.mock.calls).toStrictEqual([
+      [`INTERNAL_ERROR status=500 correlationId=${correlationId} errorType=TypeError`],
+    ]);
+  });
+});
+
+describe('resolveCorrelationId', () => {
+  it('echoes a well-formed UUID', () => {
+    const id = '0B7C0A8E-5D7B-4C1E-9A3F-2F7E1C9D4B60';
+    expect(resolveCorrelationId(id)).toBe(id);
+    expect(run(new NotFoundError(), { 'x-correlation-id': id }).body.correlationId).toBe(id);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['empty', ''],
+    ['free text', 'abc-123'],
+    ['log injection', '0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60\nforged line'],
+    ['oversized', 'a'.repeat(10_000)],
+    ['repeated header', ['0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60']],
+  ])('generates a fresh UUID when the header is %s', (_label, header) => {
+    const id = resolveCorrelationId(header);
+    expect(id).toMatch(UUID);
+    expect(id).not.toBe(header);
   });
 });
