@@ -9,4 +9,4 @@ Rules (see /AGENTS.md for the full list):
   and never write another module's tables directly.
 - Graph and Notes write their StudyEvents through Thread **inside the same transaction**.
 - AI reads read-models and creates suggestions/derived artifacts only. It never updates user conclusions.
-- Controllers speak DTOs from `@bible-artisan/contracts`. Never return Kysely rows directly.
+- Controllers speak DTOs from `@bible-artisan/contracts`. Never return Sequelize model instances directly.

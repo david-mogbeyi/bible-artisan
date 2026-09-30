@@ -11,7 +11,7 @@ A private, single-user Bible study workspace: reader + typed study graph + chron
 ```
 apps/api         NestJS modular monolith. src/main.ts = REST API (/v1), src/worker.ts = background worker
   src/modules/   one folder per bounded context (identity, study, bible-content, graph, thread, notes, ai, exports, observability)
-  migrations/    Sequelize (sequelize-cli) migrations, SQL-first
+  migrations/    SQL-first migrations run by our Umzug-based migrator (src/database/migrator.ts)
   test/          integration tests (*.int-spec.ts) against real PostgreSQL
 apps/web         Next.js App Router + React + Tailwind + TanStack Query (React Flow and Tiptap get added with their tickets)
 packages/contracts  Zod DTO schemas + inferred types shared by API and web. No DB models in here.
@@ -19,17 +19,17 @@ packages/contracts  Zod DTO schemas + inferred types shared by API and web. No D
 
 ## Commands (run from the repo root)
 
-| Command                                                              | What it does                                                            |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `pnpm install`                                                       | Install everything (pnpm 10 via corepack, Node 24)                      |
-| `pnpm db:setup`                                                      | Create `.env`, create the dev + test databases, migrate both            |
-| `pnpm dev`                                                           | contracts watch + API (:4000) + web (:3000)                             |
-| `pnpm --filter @bible-artisan/api dev:worker`                        | Run the worker                                                          |
-| `pnpm test`                                                          | Unit tests (all packages)                                               |
-| `pnpm test:integration`                                              | API integration tests on `DATABASE_URL_TEST` (migrated automatically)   |
-| `pnpm check`                                                         | Everything CI runs. Must pass before opening a PR                       |
-| `pnpm --filter @bible-artisan/api db:migrate:make <snake_name>`      | New migration file                                                      |
-| `pnpm db:migrate`                                                    | Apply pending migrations (hand-written Sequelize model classes stay in sync by hand — no codegen step) |
+| Command                                                         | What it does                                                                                           |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm install`                                                  | Install everything (pnpm 10 via corepack, Node 24)                                                     |
+| `pnpm db:setup`                                                 | Create `.env`, create the dev + test databases, migrate both                                           |
+| `pnpm dev`                                                      | contracts watch + API (:4000) + web (:3000)                                                            |
+| `pnpm --filter @bible-artisan/api dev:worker`                   | Run the worker                                                                                         |
+| `pnpm test`                                                     | Unit tests (all packages)                                                                              |
+| `pnpm test:integration`                                         | API integration tests on `DATABASE_URL_TEST` (migrated automatically)                                  |
+| `pnpm check`                                                    | Everything CI runs. Must pass before opening a PR                                                      |
+| `pnpm --filter @bible-artisan/api db:migrate:make <snake_name>` | New migration file                                                                                     |
+| `pnpm db:migrate`                                               | Apply pending migrations (hand-written Sequelize model classes stay in sync by hand — no codegen step) |
 
 `packages/contracts` compiles to `dist/`. If the API or web can't resolve a new export, run `pnpm --filter @bible-artisan/contracts build`. `pnpm dev` keeps it in watch mode.
 
@@ -50,7 +50,7 @@ packages/contracts  Zod DTO schemas + inferred types shared by API and web. No D
 ## Code conventions
 
 - TypeScript strict everywhere. Validate DTOs with Zod schemas from `@bible-artisan/contracts`, the same schema on both sides of the wire.
-- DB access goes through sequelize-typescript (`DATABASE` injection token for the `Sequelize` instance). Write DDL as raw SQL in migrations (`sequelize-cli`, `queryInterface.sequelize.query(...)` where the query-interface DSL can't express it), since CHECK constraints, partial unique indexes, and composite FKs are expected. Migrations must be reversible. Keep model classes as the single source of truth for a table's shape; there is no generated-types codegen step, so migrations and models must be kept in sync by hand. See ADR 0001's amendment for the tradeoffs this accepts versus Kysely.
+- DB access goes through sequelize-typescript (`DATABASE` injection token for the `Sequelize` instance). Write DDL as raw SQL in migrations, since CHECK constraints, partial unique indexes, and composite FKs are expected. Migrations run through this repo's Umzug-based migrator (`pnpm db:migrate`, `db:migrate:make`, `db:migrate:down`; not `sequelize-cli`), which gives each one a `MigrationContext` whose `context.query(sql)` is bound to that migration's transaction. Use only that, never a separate `sequelize`/`queryInterface` handle. Migrations must export `up` and `down` and be reversible. Keep model classes as the single source of truth for a table's shape; there is no generated-types codegen step, so migrations and models must be kept in sync by hand, and every new model needs a model-level integration test that creates rows through the model. See ADR 0001's amendment for the tradeoffs this accepts versus Kysely.
 - Modules own their tables. Cross-module calls go through exported services, never another module's tables.
 - In `apps/api` use normal imports, not `import type`, for anything injected, because Nest DI needs runtime metadata. Use `@Inject(TOKEN)` for symbol tokens.
 - Tests: unit `*.spec.ts` next to the code. API integration `test/**/*.int-spec.ts` against real Postgres, never a mocked DB, preferred over units for behavior. Web `*.test.tsx` with Testing Library, queried by role/label. Assert whole API response bodies with a single `toStrictEqual` (use `expect.any(...)` only for genuinely dynamic values). Test behavior, not snapshots.

@@ -57,7 +57,7 @@ Include every acceptance criterion exactly once, or clearly split composite crit
 - **Tables/columns:** Changes
 - **Constraints:** Composite FKs, CHECKs, partial unique indexes, and the invariant each protects
 - **Indexes:** Access pattern and reason
-- **Generated types:** `schema.generated.ts` regenerated
+- **Models:** Hand-written sequelize-typescript model changes kept in sync with the migration, plus the model-level integration test
 - **Existing data:** Backfill or compatibility handling
 - **Rollback:** `down` behavior and honest limitations
 
