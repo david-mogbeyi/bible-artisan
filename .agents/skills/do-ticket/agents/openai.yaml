@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Do Ticket'
+  short_description: 'Deliver a BIB Linear ticket as a reviewed PR'
+  default_prompt: 'Use $do-ticket to implement this Bible Artisan Linear ticket through a tested, review-ready pull request.'

@@ -1,0 +1,24 @@
+@import 'tailwindcss';
+
+/* Design tokens. Core screens target WCAG 2.2 AA (NFR-ACCESS-001): keep text/background contrast >= 4.5:1. */
+@theme {
+  --color-canvas: #fbfaf7;
+  --color-ink: #1c1b19;
+  --color-muted: #5c5a55;
+  --color-accent: #7a3e12;
+  --font-serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}

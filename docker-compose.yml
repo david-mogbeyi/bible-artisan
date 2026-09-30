@@ -1,0 +1,15 @@
+# Optional: local PostgreSQL if you don't run one natively.
+# `docker compose up -d` then use DATABASE_URL=postgres://postgres:postgres@localhost:5432/bible_artisan_dev
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/docker-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+volumes:
+  pgdata:
