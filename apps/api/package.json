@@ -19,27 +19,29 @@
     "db:codegen": "kysely-codegen --dialect postgres --out-file src/database/schema.generated.ts --exclude-pattern 'kysely_*'"
   },
   "dependencies": {
+    "@asteasolutions/zod-to-openapi": "9.1.0",
     "@bible-artisan/contracts": "workspace:*",
-    "@nestjs/core": "12.1.2",
     "@nestjs/common": "12.1.2",
+    "@nestjs/core": "12.1.2",
     "@nestjs/platform-express": "12.1.2",
+    "kysely": "0.29.6",
+    "openapi3-ts": "4.6.1",
+    "pg": "8.23.1",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2",
-    "kysely": "0.29.6",
-    "pg": "8.23.1",
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@nestjs/testing": "12.1.2",
     "@nestjs/cli": "12.0.8",
     "@nestjs/schematics": "12.0.6",
-    "@types/pg": "8.23.1",
-    "kysely-codegen": "0.20.0",
-    "tsx": "4.23.15",
-    "@swc/core": "1.16.13",
+    "@nestjs/testing": "12.1.2",
     "@swc/cli": "0.8.1",
-    "unplugin-swc": "2.0.0",
+    "@swc/core": "1.16.13",
+    "@types/pg": "8.23.1",
+    "@types/supertest": "7.2.1",
+    "kysely-codegen": "0.20.0",
     "supertest": "7.3.0",
-    "@types/supertest": "7.2.1"
+    "tsx": "4.23.15",
+    "unplugin-swc": "2.0.0"
   }
 }

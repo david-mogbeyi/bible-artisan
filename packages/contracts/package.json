@@ -5,6 +5,16 @@
   "description": "Shared REST DTO schemas (Zod) and types for the API and web client. No database models.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./openapi": {
+      "types": "./dist/openapi.d.ts",
+      "default": "./dist/openapi.js"
+    }
+  },
   "files": [
     "dist"
   ],
@@ -15,6 +25,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@asteasolutions/zod-to-openapi": "9.1.0",
     "zod": "4.6.5"
   }
 }

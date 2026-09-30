@@ -3,6 +3,74 @@
  * Please do not edit it manually.
  */
 
-// No tables yet: the first domain migration lands with BIB-9.
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface DB {}
+import type { ColumnType } from 'kysely';
+
+export type Generated<T> =
+  T extends ColumnType<infer S, infer I, infer U>
+    ? ColumnType<S, I | undefined, U>
+    : ColumnType<T, T | undefined, T>;
+
+export type Int8 = ColumnType<string, bigint | number | string, bigint | number | string>;
+
+export type Json = JsonValue;
+
+export type JsonArray = JsonValue[];
+
+export type JsonObject = {
+  [x: string]: JsonValue | undefined;
+};
+
+export type JsonPrimitive = boolean | number | string | null;
+
+export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
+
+export type Timestamp = ColumnType<Date, Date | string, Date | string>;
+
+export interface Study {
+  content_revision: Generated<number>;
+  created_at: Generated<Timestamp>;
+  description: string | null;
+  id: Generated<string>;
+  lifecycle: Generated<string>;
+  owner_id: string;
+  revision: Generated<number>;
+  title: string;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface StudyEvent {
+  event_type: string;
+  id: Generated<string>;
+  occurred_at: Generated<Timestamp>;
+  owner_id: string;
+  payload_json: Generated<Json>;
+  sequence: Int8;
+  study_id: string;
+}
+
+export interface StudyNode {
+  created_at: Generated<Timestamp>;
+  deleted_at: Timestamp | null;
+  id: Generated<string>;
+  owner_id: string;
+  revision: Generated<number>;
+  study_id: string;
+  type: string;
+  updated_at: Generated<Timestamp>;
+}
+
+export interface User {
+  auth_subject: string | null;
+  created_at: Generated<Timestamp>;
+  display_name: string | null;
+  id: Generated<string>;
+  normalized_email: string;
+  timezone: Generated<string>;
+}
+
+export interface DB {
+  study: Study;
+  study_event: StudyEvent;
+  study_node: StudyNode;
+  user: User;
+}
