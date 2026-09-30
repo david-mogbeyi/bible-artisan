@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Prepare'
+  short_description: 'Make a BIB Linear ticket implementation-ready for an AI agent'
+  default_prompt: 'Use $prepare to rewrite this Bible Artisan Linear ticket so an AI coding agent can implement it with minimal ambiguity.'

@@ -1,0 +1,34 @@
+{
+  "name": "bible-artisan",
+  "private": true,
+  "packageManager": "pnpm@10.18.0",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter \"./packages/*\" --filter \"./apps/*\" dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm -r test",
+    "test:integration": "pnpm --filter @bible-artisan/api test:integration",
+    "db:setup": "./scripts/db-setup.sh",
+    "db:migrate": "pnpm --filter @bible-artisan/api db:migrate",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "eslint": "10.11.0",
+    "@eslint/js": "10.0.1",
+    "typescript-eslint": "8.71.0",
+    "prettier": "3.9.9",
+    "vitest": "5.0.3",
+    "@types/node": "24.19.0",
+    "globals": "17.12.0",
+    "eslint-config-prettier": "10.1.8",
+    "@next/eslint-plugin-next": "16.3.8",
+    "eslint-plugin-react-hooks": "7.1.1"
+  }
+}
