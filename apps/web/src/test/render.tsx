@@ -23,3 +23,8 @@ export function jsonResponse(
     headers: { 'content-type': 'application/json', ...headers },
   });
 }
+
+/** An element's text with whitespace collapsed, as a user reads it (a plain-assertion helper). */
+export function textOf(element: Element | null | undefined): string {
+  return (element?.textContent ?? '').replace(/\s+/g, ' ').trim();
+}

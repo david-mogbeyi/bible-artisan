@@ -86,6 +86,18 @@ export class BookIndex {
     return this.books.find((book) => book.code === code);
   }
 
+  /** Every book of the edition, in canon order. */
+  all(): readonly IndexBook[] {
+    return this.books;
+  }
+
+  /** The deterministic display label of a range in one of this edition's books. */
+  label(range: ReferenceRange): string {
+    const book = this.book(range.bookCode);
+    if (!book) throw new Error('BookIndex: range names a book not in this edition');
+    return referenceLabel(book, range);
+  }
+
   /**
    * Every book the token could mean, in canon order: exact key matches plus (for a token of at
    * least two letters) books whose normalized name starts with it. Book-only input never matches

@@ -1,11 +1,16 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { ResolveReferenceResponse, SearchReferenceSuggestion } from '@bible-artisan/contracts';
+import type {
+  ResolveReferenceResponse,
+  ScriptureReference as ScriptureReferenceDto,
+  SearchReferenceSuggestion,
+} from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import { NotFoundError, ReferenceInvalidError } from '../../../common/errors/domain-errors';
 import { DATABASE } from '../../../database/database.module';
 import type { Database } from '../../../database/database';
 import { BibleBook } from '../../../database/models/bible-book.model';
 import { BibleEdition } from '../../../database/models/bible-edition.model';
+import { ScriptureReference } from '../../../database/models/scripture-reference.model';
 import {
   BookIndex,
   type IndexBook,
@@ -62,6 +67,24 @@ export class ReferenceService {
       case 'resolved':
         return this.outcome(editionId, resolution);
     }
+  }
+
+  /**
+   * A stored reference of this active edition, with its label. Unknown edition, unknown id, or a
+   * reference bound to another edition: the same 404.
+   */
+  async findReference(editionId: string, referenceId: string): Promise<ScriptureReferenceDto> {
+    const index = await this.indexFor(editionId);
+    const row = await ScriptureReference.findOne({ where: { id: referenceId, editionId } });
+    if (!row) throw new NotFoundError();
+    const range: ReferenceRange = {
+      bookCode: row.bookCode,
+      startChapter: row.startChapter,
+      startVerse: row.startVerse,
+      endChapter: row.endChapter,
+      endVerse: row.endVerse,
+    };
+    return { id: row.id, editionId, ...range, label: index.label(range) };
   }
 
   /** The active edition's book index (cached). Unknown or not-yet-active edition: 404. */

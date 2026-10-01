@@ -6,6 +6,8 @@ import {
   otpVerifyRequestSchema,
 } from './auth';
 import {
+  biblePassageResponseSchema,
+  bibleTranslationsResponseSchema,
   DEFAULT_SEARCH_LIMIT,
   MAX_SEARCH_CURSOR_LENGTH,
   MAX_SEARCH_LIMIT,
@@ -202,6 +204,32 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/bible/translations': {
+        get: {
+          description:
+            "Lists the active Bible editions with their attribution and books (canon order, chapter counts), for the reader's translation and book/chapter selectors.",
+          security: sessionCookie,
+          responses: {
+            200: jsonResponse('Active editions', 'BibleTranslationsResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/bible/passages': {
+        get: {
+          description:
+            "Returns one chapter of an active edition, the reading context: every verse exactly as stored (a verse the edition gives no text for has empty text), the publisher's superscriptions separately, the edition attribution, and the neighboring chapters across books. The chapter is the one holding the reference's start (resolve a chapter or verse with POST /bible/resolve first), so only opaque IDs travel in the URL. An unknown reference, or one of another edition, is 404.",
+          security: sessionCookie,
+          parameters: [
+            queryParam('editionId', true, { type: 'string', format: 'uuid' }),
+            queryParam('referenceId', true, { type: 'string', format: 'uuid' }),
+          ],
+          responses: {
+            200: jsonResponse('One chapter', 'BiblePassageResponse'),
+            default: errorResponse,
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {
@@ -218,6 +246,8 @@ function buildDocument(): OpenApiDocument {
         ResolveReferenceRequest: toSchema(resolveReferenceRequestSchema),
         ResolveReferenceResponse: toSchema(resolveReferenceResponseSchema),
         SearchBibleResponse: toSchema(searchBibleResponseSchema),
+        BibleTranslationsResponse: toSchema(bibleTranslationsResponseSchema),
+        BiblePassageResponse: toSchema(biblePassageResponseSchema),
       },
     },
   };

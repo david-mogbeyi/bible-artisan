@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  biblePassageQuerySchema,
   resolveReferenceRequestSchema,
   resolveReferenceResponseSchema,
   searchBibleQuerySchema,
@@ -158,6 +159,24 @@ describe('searchBibleResponseSchema', () => {
       page,
     ]) {
       expect(searchBibleResponseSchema.safeParse(body).success).toBe(false);
+    }
+  });
+});
+
+describe('biblePassageQuerySchema', () => {
+  it('requires an edition and an opaque reference id, nothing else', () => {
+    const referenceId = '00000000-0000-4000-8000-000000000003';
+    expect(biblePassageQuerySchema.parse({ editionId, referenceId })).toStrictEqual({
+      editionId,
+      referenceId,
+    });
+    for (const query of [
+      { editionId },
+      { referenceId },
+      { editionId, referenceId: 'rom-9-1' },
+      { editionId: 'webp', referenceId },
+    ]) {
+      expect(biblePassageQuerySchema.safeParse(query).success).toBe(false);
     }
   });
 });

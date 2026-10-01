@@ -187,6 +187,48 @@ describe('buildOpenApiDocument', () => {
             },
           },
         },
+        '/bible/translations': {
+          get: {
+            description:
+              "Lists the active Bible editions with their attribution and books (canon order, chapter counts), for the reader's translation and book/chapter selectors.",
+            security: [{ sessionCookie: [] }],
+            responses: {
+              200: {
+                description: 'Active editions',
+                content: { 'application/json': { schema: ref('BibleTranslationsResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
+        '/bible/passages': {
+          get: {
+            description:
+              "Returns one chapter of an active edition, the reading context: every verse exactly as stored (a verse the edition gives no text for has empty text), the publisher's superscriptions separately, the edition attribution, and the neighboring chapters across books. The chapter is the one holding the reference's start (resolve a chapter or verse with POST /bible/resolve first), so only opaque IDs travel in the URL. An unknown reference, or one of another edition, is 404.",
+            security: [{ sessionCookie: [] }],
+            parameters: [
+              {
+                name: 'editionId',
+                in: 'query',
+                required: true,
+                schema: { type: 'string', format: 'uuid' },
+              },
+              {
+                name: 'referenceId',
+                in: 'query',
+                required: true,
+                schema: { type: 'string', format: 'uuid' },
+              },
+            ],
+            responses: {
+              200: {
+                description: 'One chapter',
+                content: { 'application/json': { schema: ref('BiblePassageResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
       },
     });
     expect(doc.components.securitySchemes).toStrictEqual({
@@ -263,6 +305,8 @@ describe('buildOpenApiDocument', () => {
       'ResolveReferenceRequest',
       'ResolveReferenceResponse',
       'SearchBibleResponse',
+      'BibleTranslationsResponse',
+      'BiblePassageResponse',
     ]);
   });
 });
