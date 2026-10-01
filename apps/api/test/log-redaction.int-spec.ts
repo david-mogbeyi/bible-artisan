@@ -1027,6 +1027,159 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs notes (BIB-23) without note text, link targets, previews, labels, searches, ids, or keys', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ question: track(`SENTINEL-note-question-${randomUUID()}`) })
+      .expect(201);
+    const studyBody = created.body as { studyId: string; questionNodeId: string };
+    const noteStudyId = track(studyBody.studyId);
+    const questionNodeId = track(studyBody.questionNodeId);
+    // Note text and links the owner's own reads return: tracked for the log check only.
+    const paragraph = (text: string, href?: string): unknown => ({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'text',
+              text,
+              ...(href ? { marks: [{ type: 'link', attrs: { href } }] } : {}),
+            },
+          ],
+        },
+      ],
+    });
+    const word = track(`sentinelnoteword${randomUUID().replace(/-/g, '')}`);
+    const content = paragraph(
+      `${word} ${track(`SENTINEL-note-text-${randomUUID()}`)}`,
+      `https://example.test/${track(`SENTINEL-note-link-${randomUUID()}`)}`,
+    );
+    const notesRoute = '/v1/studies/:studyId/notes';
+    const noteRoute = '/v1/studies/:studyId/notes/:noteId';
+    const send = (
+      method: 'get' | 'post' | 'patch' | 'delete',
+      path: string,
+      body?: object,
+    ): Test => {
+      // The note list's query string is strict (`state` only), so it gets no decoy parameters.
+      const search = method === 'get' && path === '' ? '' : query();
+      const req = withPrivateChannels(
+        http()[method](`/v1/studies/${noteStudyId}/notes${path}${search}`),
+        cookie,
+      ).set('Idempotency-Key', track(randomUUID()));
+      return body ? req.send(body) : req;
+    };
+
+    const note = await send('post', '', {
+      expectedRevision: 1,
+      content,
+      targetNodeId: questionNodeId,
+    });
+    await expectLogged(note, { method: 'POST', route: notesRoute, status: 201 });
+    const noteId = track((note.body as { id: string }).id);
+
+    const saved = await send('patch', `/${noteId}`, {
+      expectedRevision: 1,
+      content: paragraph(`${word} ${track(`SENTINEL-note-edit-${randomUUID()}`)}`),
+      checkpoint: true,
+    });
+    await expectLogged(saved, { method: 'PATCH', route: noteRoute, status: 200 });
+    const stale = await send('patch', `/${noteId}`, {
+      expectedRevision: 1,
+      content: paragraph(secret('note-stale')),
+    });
+    await expectLogged(
+      stale,
+      { method: 'PATCH', route: noteRoute, status: 409 },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 2,
+        }),
+      },
+    );
+    const hostile = await send('patch', `/${noteId}`, {
+      expectedRevision: 2,
+      content: paragraph('x', `javascript:alert('${secret('note-script')}')`),
+    });
+    await expectLogged(
+      hostile,
+      { method: 'PATCH', route: noteRoute, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: {
+            'content.content.0.content.0.marks.0.attrs.href': [
+              'must be an http or https URL without credentials',
+            ],
+          },
+        }),
+      },
+    );
+    const tooLong = await send('patch', `/${noteId}`, {
+      expectedRevision: 2,
+      content: paragraph(`${secret('note-long')}${'a'.repeat(50_000)}`),
+    });
+    await expectLogged(
+      tooLong,
+      { method: 'PATCH', route: noteRoute, status: 413 },
+      {
+        errorType: 'NoteTooLongError',
+        body: envelope({
+          code: 'NOTE_TOO_LONG',
+          message: 'A note can have at most 50,000 characters',
+        }),
+      },
+    );
+    const restoredLive = await send('post', `/${noteId}/restore`, { expectedRevision: 2 });
+    await expectLogged(
+      restoredLive,
+      { method: 'POST', route: `${noteRoute}/restore`, status: 422 },
+      {
+        errorType: 'NoteRuleError',
+        body: envelope({ code: 'NOTE_NOT_TRASHED', message: 'This note is not in the trash' }),
+      },
+    );
+
+    // Reads return the owner's own text and labels; the logs still carry only patterns.
+    await expectLogged(await send('get', ''), { method: 'GET', route: notesRoute, status: 200 });
+    await expectLogged(await send('get', `/${noteId}`), {
+      method: 'GET',
+      route: noteRoute,
+      status: 200,
+    });
+    const versions = await send('get', `/${noteId}/versions`);
+    await expectLogged(versions, { method: 'GET', route: `${noteRoute}/versions`, status: 200 });
+    const versionId = track((versions.body as { items: { id: string }[] }).items[0]?.id ?? '');
+    await expectLogged(await send('get', `/${noteId}/versions/${versionId}`), {
+      method: 'GET',
+      route: `${noteRoute}/versions/:versionId`,
+      status: 200,
+    });
+    // The library finds the study by the note's text; the search word is never logged.
+    const found = await withPrivateChannels(http().get('/v1/studies').query({ q: word }), cookie);
+    expect((found.body as { items: { matchedInNotes: boolean }[] }).items).toMatchObject([
+      { matchedInNotes: true },
+    ]);
+    await expectLogged(found, { method: 'GET', route: '/v1/studies', status: 200 });
+
+    const trashed = await send('delete', `/${noteId}`, { expectedRevision: 2 });
+    await expectLogged(trashed, { method: 'DELETE', route: noteRoute, status: 200 });
+    const restored = await send('post', `/${noteId}/restore`, { expectedRevision: 3 });
+    await expectLogged(restored, { method: 'POST', route: `${noteRoute}/restore`, status: 200 });
+    const absent = await send('get', `/${track(randomUUID())}`);
+    await expectLogged(
+      absent,
+      { method: 'GET', route: noteRoute, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+  });
+
   it('logs a request the client aborted with no status, never a default 200', async () => {
     const correlationId = randomUUID();
     // The probe holds its transaction for 1 s; the client gives up after 200 ms.

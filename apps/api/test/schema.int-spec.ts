@@ -75,6 +75,12 @@ describe('schema (composite-key owner isolation)', () => {
 
     expect(fks).toStrictEqual([
       {
+        name: 'note_study_owner_fk',
+        table: 'note',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'study_branch_study_owner_fk',
         table: 'study_branch',
         columns: ['owner_id', 'study_id'],

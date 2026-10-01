@@ -3,6 +3,7 @@ import {
   DatabaseError,
   ForeignKeyConstraintError,
   Op,
+  QueryTypes,
   type Transaction,
   UniqueConstraintError,
 } from 'sequelize';
@@ -16,6 +17,8 @@ import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { BibleSuperscription } from '../src/database/models/bible-superscription.model';
 import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
+import { NoteVersion } from '../src/database/models/note-version.model';
+import { Note } from '../src/database/models/note.model';
 import { ScriptureReference } from '../src/database/models/scripture-reference.model';
 import { StudyBranch } from '../src/database/models/study-branch.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
@@ -454,6 +457,126 @@ describe('Sequelize models against the real schema', () => {
       }),
     ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
     expect(await StudyEvent.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('creates a Note and a NoteVersion with only required fields and reads them back with DB defaults (BIB-23)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const target = await StudyNode.create({
+      studyId: study.id,
+      ownerId: owner.id,
+      type: 'thought',
+    });
+    const content = { type: 'doc', content: [{ type: 'paragraph' }] } as const;
+    const note = await Note.create({
+      studyId: study.id,
+      ownerId: owner.id,
+      targetNodeId: target.id,
+      richTextJson: content,
+      plainText: '',
+      searchText: '',
+    });
+    const [dbNow] = await db.query<{ now: Date }>('SELECT now() AS now', {
+      type: QueryTypes.SELECT,
+    });
+    const version = await NoteVersion.create({
+      noteId: note.id,
+      studyId: study.id,
+      ownerId: owner.id,
+      versionNumber: 1,
+      richTextJson: content,
+      plainText: '',
+    });
+    expect(
+      (await Note.findByPk(note.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      studyId: study.id,
+      ownerId: owner.id,
+      targetNodeId: target.id,
+      richTextJson: content,
+      plainText: '',
+      searchText: '',
+      schemaVersion: 1,
+      revision: 1,
+      latestVersionNumber: 1,
+      deletedAt: null,
+      createdAt: expect.any(Date),
+      updatedAt: expect.any(Date),
+    });
+    const stored = await NoteVersion.findByPk(version.id, { rejectOnEmpty: true });
+    expect(stored.get({ plain: true })).toStrictEqual({
+      id: version.id,
+      noteId: note.id,
+      studyId: study.id,
+      ownerId: owner.id,
+      versionNumber: 1,
+      richTextJson: content,
+      plainText: '',
+      schemaVersion: 1,
+      createdAt: expect.any(Date),
+    });
+    // created_at is the database clock (its column default), read back from the insert.
+    expect(version.createdAt).toStrictEqual(stored.createdAt);
+    expect(Math.abs(stored.createdAt.getTime() - (dbNow?.now.getTime() ?? 0))).toBeLessThan(5_000);
+  });
+
+  it('rejects model-level notes and versions that cross owner, study or target, break their CHECKs, or update a version (BIB-23)', async () => {
+    const owner = await createUser();
+    const otherOwner = await createUser();
+    const study = await createStudy(owner.id);
+    const otherStudy = await createStudy(owner.id);
+    const foreignNode = await StudyNode.create({
+      studyId: otherStudy.id,
+      ownerId: owner.id,
+      type: 'thought',
+    });
+    const content = { type: 'doc', content: [{ type: 'paragraph' }] } as const;
+    const base = { studyId: study.id, ownerId: owner.id, richTextJson: content, searchText: '' };
+    await expect(
+      Note.create({ ...base, ownerId: otherOwner.id, plainText: '' }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(
+      Note.create({ ...base, targetNodeId: foreignNode.id, plainText: '' }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(Note.create({ ...base, plainText: 'x'.repeat(50_001) })).rejects.toBeInstanceOf(
+      DatabaseError,
+    );
+    await expect(
+      Note.create({ ...base, plainText: '', richTextJson: { type: 'paragraph' } }),
+    ).rejects.toBeInstanceOf(DatabaseError);
+    const note = await Note.create({ ...base, plainText: '' });
+    const versionOf = (fields: object) =>
+      NoteVersion.create({
+        noteId: note.id,
+        studyId: study.id,
+        ownerId: owner.id,
+        versionNumber: 1,
+        richTextJson: content,
+        plainText: '',
+        ...fields,
+      });
+    await expect(versionOf({ studyId: otherStudy.id })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+    await expect(versionOf({ ownerId: otherOwner.id })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+    const version = await versionOf({});
+    await expect(versionOf({})).rejects.toBeInstanceOf(UniqueConstraintError);
+    const updated = await NoteVersion.update(
+      { plainText: 'rewritten' },
+      { where: { id: version.id } },
+    ).catch((e: unknown) => e);
+    expect(updated).toBeInstanceOf(DatabaseError);
+    expect((updated as DatabaseError).parent).toMatchObject({
+      code: '23000',
+      message: 'note versions are immutable',
+    });
+    // A study delete cascades through notes to their versions.
+    await Study.destroy({ where: { id: study.id } });
+    expect(await NoteVersion.count({ where: { noteId: note.id } })).toBe(0);
+    expect(await Note.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('creates an AuthChallenge with only required fields and reads it back with defaults', async () => {

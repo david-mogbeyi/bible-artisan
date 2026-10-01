@@ -168,6 +168,64 @@ const ROUTES: Record<string, Access> = {
       test: 'POST /v1/studies/:studyId/restore gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  // Notes (BIB-23): Bob's calls on Alice's notes, absent and malformed ids, and Alice's note under
+  // Bob's own study all answer the same 404, and nothing of either user changes.
+  'POST /v1/studies/:studyId/notes': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/notes gives another user the same neutral 404 as an absent or malformed study, writing nothing',
+    },
+  },
+  'GET /v1/studies/:studyId/notes': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: "GET /v1/studies/:studyId/notes lists nothing of another user's: their study is the same 404 as an absent one",
+    },
+  },
+  'GET /v1/studies/:studyId/notes/:noteId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/notes/:noteId gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
+  'PATCH /v1/studies/:studyId/notes/:noteId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: 'PATCH /v1/studies/:studyId/notes/:noteId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'DELETE /v1/studies/:studyId/notes/:noteId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: 'DELETE /v1/studies/:studyId/notes/:noteId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'POST /v1/studies/:studyId/notes/:noteId/restore': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/notes/:noteId/restore gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'GET /v1/studies/:studyId/notes/:noteId/versions': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/notes/:noteId/versions gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
+  'GET /v1/studies/:studyId/notes/:noteId/versions/:versionId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'notes.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/notes/:noteId/versions/:versionId gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */
