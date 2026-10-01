@@ -1,0 +1,109 @@
+'use client';
+
+import type { StudyResponse } from '@bible-artisan/contracts';
+import { useQuery } from '@tanstack/react-query';
+import Link from 'next/link';
+import { useParams } from 'next/navigation';
+import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { RequireAuth } from '@/components/require-auth';
+import { classifyError } from '@/lib/api-errors';
+import { bibleHref } from '@/lib/bible';
+import { fetchStudy, studyQueryKey } from '@/lib/studies';
+
+const LOAD_COPY: ProblemCopy = {
+  notFound: "This study isn't available.",
+  refused: "Couldn't load this study.",
+  unavailable: "Couldn't load this study.",
+};
+
+/**
+ * `/studies/:id` (BIB-19): a minimal page that reads back what creation saved, so a new study can
+ * be opened and reloaded. The workspace (graph, thread, reader, summary) arrives with later
+ * tickets. A missing or another user's study shows the same neutral unavailable state.
+ */
+export function StudyPage() {
+  const params = useParams<{ studyId: string }>();
+  const studyId = params.studyId;
+  return <RequireAuth>{() => <StudyView studyId={studyId} />}</RequireAuth>;
+}
+
+function StudyView({ studyId }: { studyId: string }) {
+  const study = useQuery({
+    queryKey: studyQueryKey(studyId),
+    queryFn: () => fetchStudy(studyId),
+    retry: false,
+  });
+
+  if (study.data) return <StudyDetails study={study.data} />;
+
+  if (study.isError) {
+    const notFound = classifyError(study.error).kind === 'not_found';
+    return (
+      <main className="mx-auto flex max-w-2xl flex-col gap-4 px-4 py-12">
+        {notFound ? (
+          <>
+            <h1 className="font-serif text-3xl">This study isn&apos;t available.</h1>
+            <p className="text-muted">It may have been removed, or the link may be wrong.</p>
+          </>
+        ) : (
+          <ProblemAlert error={study.error} copy={LOAD_COPY} onRetry={() => void study.refetch()} />
+        )}
+        <Link href="/" className="text-accent underline">
+          Go home
+        </Link>
+      </main>
+    );
+  }
+
+  return (
+    <main aria-busy="true" className="mx-auto flex max-w-2xl flex-col gap-4 px-4 py-12">
+      <p role="status" className="text-muted">
+        Loading the study…
+      </p>
+    </main>
+  );
+}
+
+function StudyDetails({ study }: { study: StudyResponse }) {
+  return (
+    <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
+      <h1 className="font-serif text-4xl break-words">{study.title}</h1>
+      <dl className="flex flex-col gap-4">
+        <div>
+          <dt className="font-medium">Starting passage</dt>
+          <dd>
+            {study.startingReference ? (
+              <Link href={bibleHref(study.startingReference.id)} className="text-accent underline">
+                {study.startingReference.label}
+              </Link>
+            ) : (
+              <span className="text-muted">None yet</span>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium">Main question</dt>
+          <dd className="break-words whitespace-pre-wrap">
+            {study.mainQuestion ? (
+              study.mainQuestion.text
+            ) : (
+              <span className="text-muted">None yet</span>
+            )}
+          </dd>
+        </div>
+      </dl>
+      <p className="text-muted">
+        The study is saved. The workspace for its graph, thread and summary arrives in a later
+        release.
+      </p>
+      <nav aria-label="Study" className="flex flex-wrap gap-4">
+        <Link href="/" className="text-accent underline">
+          Home
+        </Link>
+        <Link href="/studies/new" className="text-accent underline">
+          New study
+        </Link>
+      </nav>
+    </main>
+  );
+}
