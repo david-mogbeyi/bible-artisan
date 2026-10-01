@@ -105,18 +105,49 @@ export function phraseFromRange(
  * One Range from the earliest start to the latest end of `ranges`, or null when there are none.
  * Firefox splits a pointer selection into several ranges around `user-select: none` nodes (the
  * verse checkbox and number), in no guaranteed order; the selection the user made spans them all.
+ *
+ * Ranges are merged only when nothing between them is verse text (the gaps hold only verse
+ * numbers, checkboxes, headings, notes and whitespace under `root`). A gap that skips verse text
+ * is a deliberate multi-selection (Ctrl-drag), not one passage: `not_continuous`, never a guess.
  */
-export function spanOfRanges(ranges: readonly Range[]): Range | null {
-  let first: Range | null = null;
-  let last: Range | null = null;
-  for (const r of ranges) {
-    if (!first || r.compareBoundaryPoints(Range.START_TO_START, first) < 0) first = r;
-    if (!last || r.compareBoundaryPoints(Range.END_TO_END, last) > 0) last = r;
+export function spanOfRanges(
+  ranges: readonly Range[],
+  root: Element,
+): Range | 'not_continuous' | null {
+  const ordered = [...ranges].sort((a, b) => a.compareBoundaryPoints(Range.START_TO_START, b));
+  const first = ordered[0];
+  if (!first) return null;
+  let last = first;
+  for (const next of ordered.slice(1)) {
+    if (next.compareBoundaryPoints(Range.END_TO_START, last) > 0) {
+      const gap = first.cloneRange();
+      gap.setStart(last.endContainer, last.endOffset);
+      gap.setEnd(next.startContainer, next.startOffset);
+      if (holdsVerseText(gap, root)) return 'not_continuous';
+    }
+    if (next.compareBoundaryPoints(Range.END_TO_END, last) > 0) last = next;
   }
-  if (!first || !last) return null;
   const span = first.cloneRange();
   span.setEnd(last.endContainer, last.endOffset);
   return span;
+}
+
+/** Whether `range` covers at least one character of any verse's text under `root`. */
+function holdsVerseText(range: Range, root: Element): boolean {
+  for (const element of root.querySelectorAll(`[${VERSE_TEXT_ATTRIBUTE}]`)) {
+    if (!range.intersectsNode(element)) continue;
+    const part = range.cloneRange();
+    const whole = element.ownerDocument.createRange();
+    whole.selectNodeContents(element);
+    if (part.compareBoundaryPoints(Range.START_TO_START, whole) < 0) {
+      part.setStart(whole.startContainer, whole.startOffset);
+    }
+    if (part.compareBoundaryPoints(Range.END_TO_END, whole) > 0) {
+      part.setEnd(whole.endContainer, whole.endOffset);
+    }
+    if (part.toString().length > 0) return true;
+  }
+  return false;
 }
 
 /** The ranges of a native selection, as a list (one in most browsers, several in Firefox). */

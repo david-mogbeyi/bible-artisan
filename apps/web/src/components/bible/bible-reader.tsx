@@ -79,6 +79,8 @@ interface BibleReaderProps {
   focusRequest: FocusRequest | null;
 }
 
+const NOT_CONTINUOUS_TEXT = 'Select one continuous passage.';
+
 const PASSAGE_COPY = {
   notFound: 'That passage is not available.',
   refused: 'That passage could not be opened.',
@@ -144,15 +146,16 @@ export function BibleReader({
   const captureButtonRef = useRef<HTMLButtonElement>(null);
   const phraseToggleRef = useRef<HTMLButtonElement>(null);
   const [picked, setPicked] = useState<{ key: string; value: ReaderSelection } | null>(null);
-  // The passage on which Clear was last used, so the live region can say so.
-  const [clearedOn, setClearedOn] = useState<string | null>(null);
+  // What the live region says about a selection that ended with nothing selected (Clear, or a
+  // selection that is not one passage), and the passage it was said on.
+  const [notice, setNotice] = useState<{ on: string; text: string } | null>(null);
   const [phraseFormOpen, setPhraseFormOpen] = useState<string | null>(null);
   const passageKey = shown ? passageKeyOf(shown) : null;
   const selection = picked && picked.key === passageKey ? picked.value : null;
   const payload = shown && selection ? selectionPayload(shown, selection) : null;
   const choose = (value: ReaderSelection | null) => {
     setPicked(value && passageKey ? { key: passageKey, value } : null);
-    setClearedOn(null);
+    setNotice(null);
   };
   /** Drops the browser's text selection, but only one made in this reader. */
   const clearNativeSelection = () => {
@@ -180,13 +183,20 @@ export function BibleReader({
     if (!shown) return;
     const key = passageKeyOf(shown);
     return watchNativeSelection(listRef, lastBoundaries, shown, (phrase) => {
+      if (phrase === 'not_continuous') {
+        // Separate stretches of verse text (Ctrl-drag): not one passage, so nothing stays armed,
+        // and the live region says why (no reference).
+        setPicked(null);
+        setNotice({ on: key, text: NOT_CONTINUOUS_TEXT });
+        return;
+      }
       if (!phrase) {
         // Text selected in the verses that is no verse text (a heading, a "no text" note): no
         // phrase and no ticked verses stay armed from before.
         setPicked(null);
         return;
       }
-      setClearedOn(null);
+      setNotice(null);
       setPicked((prev) =>
         prev?.key === key &&
         prev.value.kind === 'phrase' &&
@@ -233,6 +243,9 @@ export function BibleReader({
   const selectPhrase = (phrase: AnchorSelection) => {
     choose({ kind: 'phrase', selection: phrase });
     setPhraseFormOpen(null);
+    // The chosen phrase replaces any text selected in the reader; its highlight would otherwise
+    // still show.
+    clearNativeSelection();
     // The Selection bar renders with this state; move to its first action once it exists.
     requestAnimationFrame(() => captureButtonRef.current?.focus());
   };
@@ -251,8 +264,8 @@ export function BibleReader({
   const selectionStatus =
     shown && payload !== null
       ? selectionAnnouncement(shown, payload)
-      : passageKey !== null && clearedOn === passageKey
-        ? 'Selection cleared.'
+      : passageKey !== null && notice?.on === passageKey
+        ? notice.text
         : '';
   const status = progress || selectionStatus;
 
@@ -346,7 +359,7 @@ export function BibleReader({
                 // Focus stays on Clear (aria-disabled now, still focusable); the live region
                 // says what happened.
                 choose(null);
-                setClearedOn(passageKey);
+                if (passageKey) setNotice({ on: passageKey, text: 'Selection cleared.' });
                 clearNativeSelection();
               }}
               captureButtonRef={captureButtonRef}
@@ -383,13 +396,14 @@ function selectionIsIn(native: Selection, root: Element | null): boolean {
  *
  * `onPhrase` gets the phrase, or null for a selection inside the list that holds no verse text.
  * A collapsed selection, or one outside the list, leaves the reader's selection alone (so
- * clicking Capture keeps it). Firefox's several ranges are mapped as one span.
+ * clicking Capture keeps it). Firefox's several ranges are mapped as one span, unless verse text
+ * lies between them (a deliberate multi-selection): then `onPhrase` gets `not_continuous`.
  */
 function watchNativeSelection(
   listRef: React.RefObject<HTMLOListElement | null>,
   last: React.RefObject<Boundaries>,
   passage: BiblePassageResponse,
-  onPhrase: (phrase: AnchorSelection | null) => void,
+  onPhrase: (phrase: AnchorSelection | 'not_continuous' | null) => void,
 ): () => void {
   let frame = 0;
   let pointerDown = false;
@@ -402,7 +416,11 @@ function watchNativeSelection(
     const boundaries = boundariesOf(ranges);
     if (sameBoundaries(boundaries, last.current)) return;
     last.current = boundaries;
-    const span = spanOfRanges(ranges);
+    const span = spanOfRanges(ranges, list);
+    if (span === 'not_continuous') {
+      onPhrase(span);
+      return;
+    }
     if (!span || span.collapsed || !span.intersectsNode(list)) return;
     onPhrase(phraseFromRange(span, list, passage));
   };

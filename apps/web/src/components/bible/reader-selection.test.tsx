@@ -298,6 +298,53 @@ describe('Capture and Clear keep keyboard focus', () => {
   });
 });
 
+describe('Retry after a failed capture keeps keyboard focus', () => {
+  it('moves focus from Retry to Capture, which keeps it while pending and after each outcome', async () => {
+    const unavailable = () =>
+      jsonResponse(503, {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'x',
+        retryable: true,
+        correlationId: 'c',
+      });
+    let reply: (response: Response) => void = () => undefined;
+    captureReply = unavailable;
+    await renderReader();
+    fireEvent.click(checkbox(1));
+    const capture = captureButton();
+    fireEvent.click(capture);
+    const retryOnce = async () => {
+      const retry = within(await within(selectionRegion()).findByRole('alert')).getByRole(
+        'button',
+        { name: 'Retry' },
+      );
+      retry.focus();
+      captureReply = () => new Promise<Response>((resolve) => (reply = resolve));
+      // Enter on a focused button is a click.
+      fireEvent.click(retry);
+      await waitFor(() => expect(textOf(status())).toBe('Capturing the selection…'));
+      // The alert (and Retry with it) is gone; focus never fell to <body>.
+      expect(retry.isConnected).toBe(false);
+      expect(isOff(capture)).toBe(true);
+      expect(document.activeElement).toBe(capture);
+    };
+
+    // Retry, and it fails again.
+    await retryOnce();
+    act(() => reply(unavailable()));
+    await within(selectionRegion()).findByRole('alert');
+    expect(document.activeElement).toBe(capture);
+
+    // Retry, and it succeeds.
+    await retryOnce();
+    const body = captured[captured.length - 1] as AnchorSelection;
+    act(() => reply(jsonResponse(200, { anchor: anchorOf(body), reference: reference(1) })));
+    await waitFor(() => expect(textOf(status())).toBe('Selection captured.'));
+    expect(document.activeElement).toBe(capture);
+    expect(captured).toHaveLength(3);
+  });
+});
+
 describe('the keyboard phrase form', () => {
   it('selects a phrase word by word across verses, then moves focus to Capture', async () => {
     await renderReader();
@@ -342,6 +389,38 @@ describe('the keyboard phrase form', () => {
         quote: 'two three four',
       },
     ]);
+  });
+
+  it('drops a text selection made in the reader when a phrase is chosen, but not one elsewhere', async () => {
+    await renderReader();
+    // jsdom drops the document selection when the form's first select takes focus, so each
+    // text selection is made with the form already open, just before Select phrase.
+    const choosePhraseAfter = async (select: () => Promise<void>) => {
+      fireEvent.click(screen.getByRole('button', { name: 'Select a phrase' }));
+      const form = screen.getByRole('form', { name: 'Select a phrase' });
+      await select();
+      fireEvent.click(within(form).getByRole('button', { name: 'Select phrase' }));
+    };
+    await choosePhraseAfter(async () => {
+      await selectText([verseText(2), 0], [verseText(2), 4]);
+      expect(textOf(selectionRegion())).toContain('“four”');
+      expect(document.getSelection()?.toString()).toBe('four');
+    });
+    expect(textOf(selectionRegion())).toContain('“one two three”');
+    // The old highlight is gone, so what is shown selected is what Capture will capture.
+    expect(document.getSelection()?.rangeCount).toBe(0);
+    await waitFor(() => expect(document.activeElement).toBe(captureButton()));
+
+    // A text selection outside the reader is the user's own and is left alone.
+    const outside = document.createElement('p');
+    outside.textContent = 'elsewhere';
+    document.body.append(outside);
+    await choosePhraseAfter(() =>
+      selectText([outside.firstChild as Node, 0], [outside.firstChild as Node, 4]),
+    );
+    expect(document.getSelection()?.toString()).toBe('else');
+    document.getSelection()?.removeAllRanges();
+    outside.remove();
   });
 
   it('says when the phrase ends before it starts, and Escape returns focus to the toggle', async () => {
@@ -422,6 +501,43 @@ describe('native text selection', () => {
     await nextFrame();
     expect(textOf(selectionRegion())).toContain('Phrase selected in Psalms 3:1–3');
     expect(textOf(selectionRegion())).toContain('“two three four five six”');
+  });
+
+  it('refuses separate stretches of verse text (Ctrl-drag) and says to select one passage', async () => {
+    await renderReader();
+    const part = (verse: number, start: number, end: number) => {
+      const r = document.createRange();
+      r.setStart(verseText(verse), start);
+      r.setEnd(verseText(verse), end);
+      return r;
+    };
+    // A phrase first, so the refusal visibly drops it rather than leaving it armed.
+    await selectText([verseText(2), 0], [verseText(2), 4]);
+    expect(textOf(selectionRegion())).toContain('“four”');
+
+    // Verse 1 and verse 5, with verses 2–4's text between them.
+    const ranges = [part(5, 0, 3), part(1, 0, 3)];
+    const multi = {
+      rangeCount: ranges.length,
+      getRangeAt: (i: number) => ranges[i],
+      isCollapsed: false,
+      anchorNode: ranges[1]?.startContainer,
+      focusNode: ranges[0]?.endContainer,
+      removeAllRanges: vi.fn(),
+    } as unknown as Selection;
+    vi.spyOn(document, 'getSelection').mockReturnValue(multi);
+    act(() => {
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await nextFrame();
+    expectNothingSelected();
+    expect(textOf(status())).toBe('Select one continuous passage.');
+    fireEvent.click(captureButton());
+    expect(captured).toStrictEqual([]);
+
+    // Ticking a verse replaces the notice with the new selection.
+    fireEvent.click(checkbox(3));
+    expect(textOf(status())).toBe('Verse selected: Psalms 3:3.');
   });
 
   it('drops a text selection when the chapter changes, so it never maps into the new one', async () => {

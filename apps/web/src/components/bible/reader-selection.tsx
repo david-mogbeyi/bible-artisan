@@ -159,7 +159,16 @@ export function SelectionBar({
         </>
       ) : null}
       {capture.status === 'error' ? (
-        <ProblemAlert error={capture.error} copy={CAPTURE_COPY} onRetry={onCapture} />
+        <ProblemAlert
+          error={capture.error}
+          copy={CAPTURE_COPY}
+          onRetry={() => {
+            // Retry sits in this alert, which unmounts once the new capture starts: move focus
+            // to Capture first (it stays mounted, inert while pending) so it never drops to <body>.
+            captureButtonRef.current?.focus();
+            onCapture();
+          }}
+        />
       ) : null}
     </section>
   );

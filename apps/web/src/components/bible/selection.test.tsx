@@ -241,15 +241,49 @@ describe('several ranges (Firefox splits a selection around user-select: none no
       [c, a, b],
       [b, c, a],
     ]) {
-      const span = spanOfRanges(order);
-      if (!span) throw new Error('no span');
+      const span = spanOfRanges(order, list);
+      if (!(span instanceof Range)) throw new Error('no span');
       expect(phraseFromRange(span, list, PASSAGE)).toStrictEqual(expected);
     }
     // The pieces themselves are untouched.
     expect([a.startOffset, c.endOffset]).toStrictEqual([4, 4]);
-    expect(spanOfRanges([])).toBeNull();
-    expect(phraseFromRange(spanOfRanges([c]) as Range, list, PASSAGE)).toStrictEqual(
+    expect(spanOfRanges([], list)).toBeNull();
+    expect(phraseFromRange(spanOfRanges([c], list) as Range, list, PASSAGE)).toStrictEqual(
       phrase([seg(4, 0, 4)], 'four'),
+    );
+  });
+
+  it('merges pieces split around a verse number and checkbox, as Firefox does', async () => {
+    const list = await renderPassage();
+    const t1 = textNode(list, 1);
+    const t2 = textNode(list, 2);
+    // Verse 1 to the end of its text, then verse 2's text: the gap is only verse 2's checkbox
+    // and number (and the whitespace between list items).
+    const span = spanOfRanges([range([t2, 0], [t2, 3]), range([t1, 8], [t1, t1.length])], list);
+    if (!(span instanceof Range)) throw new Error('no span');
+    expect(phraseFromRange(span, list, PASSAGE)).toStrictEqual(
+      phrase([seg(1, 8, 13), seg(2, 0, 2)], `three a${MATH_A}`),
+    );
+  });
+
+  it('refuses pieces with verse text between them (a deliberate multi-selection)', async () => {
+    const list = await renderPassage();
+    const t1 = textNode(list, 1);
+    const t2 = textNode(list, 2);
+    const t4 = textNode(list, 4);
+    // Verse 1 and verse 4, skipping verse 2's text: never an anchor over 1–4.
+    const skipping = [range([t1, 0], [t1, 3]), range([t4, 0], [t4, 4])];
+    expect(spanOfRanges(skipping, list)).toBe('not_continuous');
+    expect(spanOfRanges([...skipping].reverse(), list)).toBe('not_continuous');
+    // Inside one verse, a skipped word is verse text too.
+    expect(spanOfRanges([range([t1, 0], [t1, 3]), range([t1, 8], [t1, 13])], list)).toBe(
+      'not_continuous',
+    );
+    // Overlapping or touching pieces have no gap.
+    const touching = spanOfRanges([range([t1, 0], [t1, 4]), range([t1, 4], [t1, 7])], list);
+    expect(touching instanceof Range && touching.toString()).toBe('one two');
+    expect(spanOfRanges([range([t1, 0], [t2, 1]), range([t1, 8], [t2, 0])], list)).toBeInstanceOf(
+      Range,
     );
   });
 
