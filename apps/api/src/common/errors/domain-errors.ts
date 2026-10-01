@@ -1,4 +1,8 @@
-import { type ReferenceErrorCode, SEARCH_QUERY_IS_REFERENCE } from '@bible-artisan/contracts';
+import {
+  type AnchorProblemCode,
+  type ReferenceErrorCode,
+  SEARCH_QUERY_IS_REFERENCE,
+} from '@bible-artisan/contracts';
 
 /**
  * Domain exception classes the global exception filter maps to the shared error envelope
@@ -148,5 +152,28 @@ export class SearchQueryIsReferenceError extends Error {
   constructor() {
     super('This is a Bible reference. Look it up as a reference instead');
     this.name = 'SearchQueryIsReferenceError';
+  }
+}
+
+const ANCHOR_MESSAGES: Record<AnchorProblemCode, string> = {
+  ANCHOR_EDITION_UNAVAILABLE: 'That translation is not available',
+  ANCHOR_VERSE_NOT_FOUND: 'The selection names a verse this translation does not have',
+  ANCHOR_NOT_CONTIGUOUS: 'The selection must be one continuous passage',
+  ANCHOR_CHECKSUM_MISMATCH: 'The verse text has changed since this selection was made',
+  ANCHOR_OFFSET_OUT_OF_RANGE: 'The selection runs past the end of a verse',
+  ANCHOR_KIND_MISMATCH: 'A verse selection must cover whole verses',
+  ANCHOR_EMPTY: 'The selection must start and end on selected text',
+  ANCHOR_QUOTE_MISMATCH: 'The selected text does not match this translation',
+};
+
+/**
+ * A selection does not match the stored corpus text (BIB-18, PRD §14; 422). The code says which
+ * rule failed; the message is fixed per code and never echoes the quote, a reference or an
+ * offset (NFR-PRIV-001). The anchor is never adjusted to fit.
+ */
+export class AnchorInvalidError extends Error {
+  constructor(readonly code: AnchorProblemCode) {
+    super(ANCHOR_MESSAGES[code]);
+    this.name = 'AnchorInvalidError';
   }
 }

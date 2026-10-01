@@ -133,6 +133,18 @@ export class ReferenceService {
     return { id, editionId, ...result.range, label: result.label };
   }
 
+  /**
+   * The shared reference for a range the caller has already validated against this edition's
+   * corpus (an anchor's verses, BIB-18; at most 200 verses, one book): persisted exactly as
+   * `resolve` persists the same range, so both give the same id. Unknown or inactive edition: 404.
+   */
+  async rangeReference(editionId: string, range: ReferenceRange): Promise<ScriptureReferenceDto> {
+    const { index } = await this.activeEdition(editionId);
+    const label = index.label(range);
+    const id = await this.persist(editionId, range);
+    return { id, editionId, ...range, label };
+  }
+
   /** The active edition's book index (cached). Unknown or not-yet-active edition: 404. */
   async bookIndex(editionId: string): Promise<BookIndex> {
     return (await this.activeEdition(editionId)).index;

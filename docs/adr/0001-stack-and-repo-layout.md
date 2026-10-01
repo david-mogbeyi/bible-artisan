@@ -388,6 +388,37 @@ The command is a separate step, not a migration: migrations only get `context.qu
 
 - **Not in BIB-17:** the study inspector mount, `POST /studies/:id/activity` and visit events (FR-BIBLE-008; no study can exist before BIB-19, so this belongs to BIB-55 and the workspace ticket), anchors/selection (BIB-18), phone tabs (BIB-38), and offline chapters.
 
+## Addendum (2026-10-01, BIB-18): durable verse and phrase anchors
+
+`POST /v1/bible/anchors` and `POST /v1/bible/anchors/resolve` (`modules/bible-content/anchor/`) build and re-check durable Scripture anchors (FR-BIBLE-006, PRD sections 14 and 23). Both are authenticated and not owner-scoped (shared corpus), and take no `Idempotency-Key` or revision.
+
+- **An anchor is a value, not a row.** No study can exist before BIB-19, and `Annotation`/`Note` persistence (`anchor_json`) belongs to BIB-24, so this ticket adds no table, no migration, no study mutation and no StudyEvent. The only write is the idempotent upsert of the shared `scripture_reference` row for the anchor's verses (`ReferenceService.rangeReference`, the same statement `resolve` uses). BIB-24 stores the anchor and its unresolved state inside its own mutation.
+- **Model (`scriptureAnchorSchema`, version 1):** `editionId`, `bookCode`, `kind: 'verses' | 'phrase'`, `segments[]` (1 to 200, one per verse: `chapter`, `verse`, `start`, `end`, `textSha256`), and `quote`.
+  - `start`/`end` are half-open Unicode **code points** into the verse's stored text, the same unit as BIB-16 highlights. DOM and UTF-16 offsets never leave the browser.
+  - `textSha256` is the stored `bible_verse.text_sha256`. The server fills it on capture; a client never supplies it.
+  - `quote` is the non-empty slices joined by one U+0020 (`joinAnchorQuote`, shared by web and API). Verse text holds no line breaks or doubled spaces (BIB-14 rules), so the join is unambiguous.
+- **Rules** (`anchor-check.ts`, pure and unit-tested). Every failure is a fixed `ANCHOR_*` code; nothing is ever moved to nearby offsets or verses:
+  - verses exist in the edition/book (`ANCHOR_VERSE_NOT_FOUND`) and are consecutive in canon order, crossing a chapter boundary only from its last verse (`ANCHOR_NOT_CONTIGUOUS`);
+  - on resolve, each checksum equals the stored one (`ANCHOR_CHECKSUM_MISMATCH`);
+  - `end` is within the text (`ANCHOR_OFFSET_OUT_OF_RANGE`; `start > end` is a 400);
+  - `verses` covers whole verses, empty verses included (`ANCHOR_KIND_MISMATCH`);
+  - a `phrase` is contiguous text: the first segment runs to its verse's end, interior verses are whole, the last starts at 0 (`ANCHOR_NOT_CONTIGUOUS`), and it starts and ends on non-empty text (`ANCHOR_EMPTY`), so it may pass through LUK 17:36 but not stop on it;
+  - the quote equals the stored slices exactly, with no folding of quotes, dashes or U+00A0 (`ANCHOR_QUOTE_MISMATCH`).
+- **Capture** answers 422 with the code, or 404 for an unknown or inactive edition. **Resolve** always answers 200: `resolved` with the anchor unchanged, or `unresolved` with the first failing `reason`, the anchor exactly as sent (so the original quote survives), and the verses' reference when they still exist (for Reselect), else null. One primary-key range scan reads the anchor's verses.
+- **Limits.** At most 200 segments (the reference cap), so a longer anchor is a 400, not a separate 422. Offsets are capped at 2,000; the longest verse is 491 code points. The quote is capped at 40,000 characters; the longest run of 200 consecutive verses in the corpus is 35,606 characters (36,196 UTF-8 bytes), measured with a window query over `bible_verse`. Every real anchor therefore fits the API's 100 kB JSON limit, and anything larger is 413.
+- **Browser mapping** (`apps/web/src/components/bible/selection.ts`). Each verse's text is rendered alone in a `data-verse-text` element. Checkboxes, verse numbers, superscriptions and the "no text" note are outside it and `select-none`.
+  - A DOM `Range` is measured per intersecting verse element, from its start to the boundary point, with `Range.toString()`, so nested marks do not matter.
+  - The UTF-16 length is converted to code points. An offset inside a surrogate pair rounds outward.
+  - Spaces and U+00A0 at either end are trimmed by moving offsets.
+  - An element whose text is not exactly the stored verse makes the mapping return null, never a guess.
+- **Keyboard equivalent (WCAG 2.1.1).** A "Select verse N" checkbox per verse (PRD section 14's checkbox affordance), and a "Select a phrase" form with From verse / First word / To verse / Last word selects.
+  - Words are U+0020-separated runs, listed verbatim.
+  - Focus moves into the form when it opens, to Capture after Select, and back to the toggle on Cancel or Escape.
+  - The keyboard path selects whole words; partial words are pointer-only.
+- **Selection state** is component state keyed to edition + book + chapter, so a chapter or translation change clears it (PRD section 14). It is never in the URL or browser storage. The Selection region shows what is selected, Capture and Clear, and the captured anchor as returned by the server. Status is announced through the reader's persistent live region.
+- **Privacy.** Quotes, offsets and references travel only in POST bodies. `log-redaction.int-spec.ts` covers both routes on 200, 422 and unresolved.
+- **Not in BIB-18:** saving highlights or notes (BIB-24), Scripture nodes from a selection (BIB-25/26), selection activity events (BIB-55), rendering saved highlights in the reader, and phone tabs (BIB-38).
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

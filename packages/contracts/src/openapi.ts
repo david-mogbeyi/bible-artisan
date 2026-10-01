@@ -19,6 +19,12 @@ import {
   SEARCH_MODES,
   searchBibleResponseSchema,
 } from './bible';
+import {
+  anchorSelectionSchema,
+  captureAnchorResponseSchema,
+  resolveAnchorRequestSchema,
+  resolveAnchorResponseSchema,
+} from './anchor';
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema, livenessResponseSchema } from './health';
 
@@ -182,6 +188,30 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/bible/anchors': {
+        post: {
+          description:
+            "Builds a durable Scripture anchor from a reader selection: edition, book, and per verse a half-open range of Unicode code points into the stored text, plus the quote. The server checks every segment against the imported corpus (consecutive verses, offsets within the text, whole verses for kind verses, contiguous text for kind phrase, quote equal to the stored slices joined by one space) and adds each verse's text_sha256. A mismatch is 422 with an ANCHOR_* code and is never repaired; an unknown or inactive edition is 404. Also returns the shared reference for the covered verses (idempotent upsert). Persists nothing else.",
+          security: sessionCookie,
+          requestBody: jsonBody('AnchorSelection'),
+          responses: {
+            200: jsonResponse('The anchor and its reference', 'CaptureAnchorResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/bible/anchors/resolve': {
+        post: {
+          description:
+            'Re-checks a stored anchor against the imported corpus, including every verse checksum. resolved returns the anchor unchanged; unresolved returns it exactly as sent with the first failing reason, and the reference for its verses when they still exist in an active edition, so the reader can reselect. Never moves an anchor to other offsets or verses.',
+          security: sessionCookie,
+          requestBody: jsonBody('ResolveAnchorRequest'),
+          responses: {
+            200: jsonResponse('Resolution outcome', 'ResolveAnchorResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/bible/search': {
         get: {
           description:
@@ -264,6 +294,10 @@ function buildDocument(): OpenApiDocument {
         BiblePassageResponse: toSchema(biblePassageResponseSchema),
         BibleReferenceRequest: toSchema(bibleReferenceRequestSchema),
         BibleReferenceResponse: toSchema(bibleReferenceResponseSchema),
+        AnchorSelection: toSchema(anchorSelectionSchema),
+        CaptureAnchorResponse: toSchema(captureAnchorResponseSchema),
+        ResolveAnchorRequest: toSchema(resolveAnchorRequestSchema),
+        ResolveAnchorResponse: toSchema(resolveAnchorResponseSchema),
       },
     },
   };

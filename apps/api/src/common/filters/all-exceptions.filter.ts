@@ -4,6 +4,7 @@ import type { ErrorEnvelope } from '@bible-artisan/contracts';
 import { STATUS_CODES } from 'node:http';
 import { ConnectionError, TimeoutError } from 'sequelize';
 import {
+  AnchorInvalidError,
   DependencyUnavailableError,
   IdempotencyKeyReusedError,
   NotFoundError,
@@ -139,6 +140,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof OtpError ||
       exception instanceof IdempotencyKeyReusedError ||
       exception instanceof ReferenceInvalidError ||
+      exception instanceof AnchorInvalidError ||
       exception instanceof SearchQueryIsReferenceError
     ) {
       return {

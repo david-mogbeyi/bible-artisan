@@ -85,6 +85,22 @@ const ROUTES: Record<string, Access> = {
       test: 'answers 401 without a session and gives another user the same shared reference',
     },
   },
+  // Anchors are values over shared corpus data, not owner-scoped: another user gets the same
+  // anchor or resolution, and nothing user-specific (BIB-18).
+  'POST /v1/bible/anchors': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-anchors.int-spec.ts',
+      test: 'answers 401 without a session and gives another user the same shared anchor',
+    },
+  },
+  'POST /v1/bible/anchors/resolve': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-anchors.int-spec.ts',
+      test: 'gives another user the same shared resolution',
+    },
+  },
   'GET /v1/bible/translations': {
     access: 'private',
     crossUserTest: {
