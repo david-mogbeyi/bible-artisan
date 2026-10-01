@@ -24,7 +24,12 @@ import { User } from '../src/database/models/user.model';
 import { NotFoundError } from '../src/common/errors/domain-errors';
 import { SessionService } from '../src/modules/identity/session.service';
 import { StudyAccessService } from '../src/modules/study/study-access.service';
-import { StudyTrashPurgeService } from '../src/modules/study/trash/study-trash-purge.service';
+import { tagVocabularyLockKey } from '../src/modules/study/http/study-tags';
+import {
+  DUE_STUDIES_SQL,
+  PURGE_BATCH_SIZE,
+  StudyTrashPurgeService,
+} from '../src/modules/study/trash/study-trash-purge.service';
 import { StudyTrashModule } from '../src/modules/study/trash/study-trash.module';
 import { createTestApp } from './app';
 import { envelope, NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
@@ -214,12 +219,32 @@ describe('study lifecycle (BIB-22)', () => {
     };
   }
 
-  /** Moves a trashed study's `deleted_at` back by `days` (the lifecycle is untouched). */
+  /**
+   * Moves a trashed study's `deleted_at` back by `days` on the database clock, the one the window
+   * is decided on (the lifecycle is untouched).
+   */
   async function trashedDaysAgo(studyId: string, days: number, extraMs = 0): Promise<void> {
-    await db.query(`UPDATE study SET deleted_at = $2 WHERE id = $1 AND lifecycle = 'trashed'`, {
-      bind: [studyId, new Date(Date.now() - days * DAY_MS - extraMs)],
-      type: QueryTypes.UPDATE,
-    });
+    await db.query(
+      `UPDATE study SET deleted_at = now() - make_interval(secs => $2)
+        WHERE id = $1 AND lifecycle = 'trashed'`,
+      { bind: [studyId, (days * DAY_MS + extraMs) / 1000], type: QueryTypes.UPDATE },
+    );
+  }
+
+  /** Waits until `n` other backends of this database are blocked on a lock (the gate pattern). */
+  async function lockWaiters(n: number): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const [row] = await db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid()
+            AND wait_event_type = 'Lock'`,
+        { type: QueryTypes.SELECT },
+      );
+      if ((row?.n ?? 0) >= n) return;
+      if (Date.now() > deadline) throw new Error('racers never blocked on the gate');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   beforeAll(async () => {
@@ -495,18 +520,7 @@ describe('study lifecycle (BIB-22)', () => {
         patch(alice, studyId, { expectedRevision: 1, title: 'Racing edit' }),
       ];
       // Both wait on the gate's row lock, then contend.
-      const deadline = Date.now() + 10_000;
-      for (;;) {
-        const [row] = await db.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM pg_stat_activity
-            WHERE datname = current_database() AND pid <> pg_backend_pid()
-              AND wait_event_type = 'Lock'`,
-          { type: QueryTypes.SELECT },
-        );
-        if ((row?.n ?? 0) >= 2) break;
-        if (Date.now() > deadline) throw new Error('racers never blocked on the gate');
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
+      await lockWaiters(2);
       await gate.rollback();
       const [archive, edit] = await Promise.all(pending);
       // Whichever takes the study lock first wins. An edit that loses meets an archived study
@@ -674,6 +688,58 @@ describe('study lifecycle (BIB-22)', () => {
       ]);
       expect(answers.map((e) => e instanceof NotFoundError)).toStrictEqual([true, true]);
     });
+
+    it('resolves a node and its study in one statement, with the same 404 for another owner, another study of the owner, or an expired study', async () => {
+      const { studyId, questionNodeId } = await createStudy(alice);
+      const nodeId = questionNodeId ?? '';
+      const other = await createStudy(alice);
+      const access = app.get(StudyAccessService);
+      const query = vi.spyOn(db, 'query');
+      try {
+        const node = await access.requireOwnedNode(alice.user.id, studyId, nodeId);
+        expect([node.id, query.mock.calls.length]).toStrictEqual([nodeId, 1]);
+      } finally {
+        query.mockRestore();
+      }
+      // Trashed inside the window: still readable, like its study.
+      await changed(alice, 'trash', studyId, 1);
+      await trashedDaysAgo(studyId, 29);
+      expect((await access.requireOwnedNode(alice.user.id, studyId, nodeId)).id).toBe(nodeId);
+      const misses = [
+        await access.requireOwnedNode(bob.user.id, studyId, nodeId).catch((e: unknown) => e),
+        await access
+          .requireOwnedNode(alice.user.id, other.studyId, nodeId)
+          .catch((e: unknown) => e),
+      ];
+      await trashedDaysAgo(studyId, 30, 1000);
+      misses.push(
+        await access.requireOwnedNode(alice.user.id, studyId, nodeId).catch((e: unknown) => e),
+      );
+      expect(misses.map((e) => e instanceof NotFoundError)).toStrictEqual([true, true, true]);
+    });
+
+    it('decides the window on the database clock, never the API clock: an API clock days ahead neither hides nor purges a study inside it', async () => {
+      const dana = await signedInUser();
+      const { studyId, questionNodeId } = await createStudy(dana);
+      await changed(dana, 'trash', studyId, 1);
+      await trashedDaysAgo(studyId, 29);
+      const access = app.get(StudyAccessService);
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2 * DAY_MS });
+      try {
+        // 31 days by the API clock, 29 by the database's: inside the window.
+        const study = await access.requireOwnedStudy(dana.user.id, studyId);
+        const node = await access.requireOwnedNode(dana.user.id, studyId, questionNodeId ?? '');
+        await app.get(StudyTrashPurgeService).purgeExpired();
+        expect([study.id, node.id, await Study.count({ where: { id: studyId } })]).toStrictEqual([
+          studyId,
+          questionNodeId,
+          1,
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await library(dana, 'trashed')).toStrictEqual([studyId]);
+    });
   });
 
   describe('purge', () => {
@@ -752,6 +818,93 @@ describe('study lifecycle (BIB-22)', () => {
 
       // Idempotent: nothing more is due.
       expect(await app.get(StudyTrashPurgeService).purgeExpired()).toBe(0);
+    });
+
+    it("takes the owner's tag-vocabulary lock before touching tag rows, so it and a concurrent tag change on the owner's live study both commit without a deadlock", async () => {
+      const erin = await signedInUser();
+      const [tagA, tagB] = [`a-${randomUUID()}`, `b-${randomUUID()}`];
+      const doomed = await createStudy(erin, { question: 'Doomed study' });
+      const tagged = await patch(erin, doomed.studyId, {
+        expectedRevision: 1,
+        tags: { add: [tagA, tagB] },
+      });
+      expect(tagged.status).toBe(200);
+      await changed(erin, 'trash', doomed.studyId, 2);
+      await trashedDaysAgo(doomed.studyId, 31);
+      const live = await createStudy(erin, { question: 'Live study' });
+
+      // The gate holds Erin's vocabulary lock: both the purge (after locking its due studies) and
+      // the tag change (after its study lock) must queue on it before any tag row.
+      const gate = await db.transaction();
+      await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', {
+        bind: [tagVocabularyLockKey(erin.user.id)],
+        transaction: gate,
+      });
+      const purging = app
+        .get(StudyTrashPurgeService)
+        .purgeExpired()
+        .catch((e: unknown) => e);
+      // Same tags, opposite order: their tag-row locks would otherwise cross the purge's.
+      const tagging = patch(erin, live.studyId, {
+        expectedRevision: 1,
+        tags: { add: [tagB, tagA] },
+      });
+      try {
+        await lockWaiters(2);
+      } finally {
+        await gate.rollback();
+      }
+      const [purged, added] = await Promise.all([purging, tagging]);
+      expect([typeof purged, added.status]).toStrictEqual(['number', 200]);
+      expect(await Study.count({ where: { id: doomed.studyId } })).toBe(0);
+      // Whichever went first, the live study ends up with both tags, each stored once.
+      const tags = await Tag.findAll({ where: { ownerId: erin.user.id }, raw: true });
+      expect(tags.map((tag) => tag.name).sort()).toStrictEqual([tagA, tagB].sort());
+      expect(await StudyTag.count({ where: { studyId: live.studyId } })).toBe(2);
+    });
+
+    it('never deletes a receipt the database clock still holds live, even with the purging process clock days ahead', async () => {
+      const fay = await signedInUser();
+      const due = await createStudy(fay, { question: 'Due study' });
+      await changed(fay, 'trash', due.studyId, 1);
+      await trashedDaysAgo(due.studyId, 31);
+      const live = await createStudy(fay, { question: 'Live study' });
+      const key = randomUUID();
+      expect(
+        (await patch(fay, live.studyId, { expectedRevision: 1, pinned: true }, key)).status,
+      ).toBe(200);
+      // Expires in a day by the database clock.
+      await db.query(
+        `UPDATE mutation_receipt SET expires_at = now() + interval '1 day'
+          WHERE owner_id = $1 AND idempotency_key = $2`,
+        { bind: [fay.user.id, key], type: QueryTypes.UPDATE },
+      );
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2 * DAY_MS });
+      try {
+        await app.get(StudyTrashPurgeService).purgeExpired();
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await Study.count({ where: { id: due.studyId } })).toBe(0);
+      expect(
+        (await MutationReceipt.findAll({ where: { ownerId: fay.user.id }, raw: true })).map(
+          (receipt) => receipt.idempotencyKey,
+        ),
+      ).toStrictEqual([key]);
+    });
+
+    it('selects due studies through the partial index study_trash_purge_idx', async () => {
+      const plan = await db.transaction(async (transaction) => {
+        // A tiny test table may be cheaper to scan; the point is that the index serves the query.
+        await db.query('SET LOCAL enable_seqscan = off', { transaction });
+        const rows = await db.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${DUE_STUDIES_SQL}`, {
+          bind: [PURGE_BATCH_SIZE],
+          transaction,
+          type: QueryTypes.SELECT,
+        });
+        return rows.map((row) => row['QUERY PLAN']).join('\n');
+      });
+      expect(plan).toContain('study_trash_purge_idx');
     });
   });
 });

@@ -74,6 +74,11 @@ export class StudyMutation {
     return this.lock.studyId;
   }
 
+  /** The study's `archived_at` as locked, before this mutation's work (BIB-22). */
+  get lockedArchivedAt(): Date | null {
+    return this.lock.archivedAt;
+  }
+
   /** The study `content_revision` this mutation commits (already bumped when declared). */
   get contentRevision(): number {
     return this.lock.contentRevision;

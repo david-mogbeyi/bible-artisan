@@ -5,7 +5,7 @@ import {
   type StudyLifecycle,
   type StudyLifecycleTransition,
   studyPurgeAt,
-  trashExpiryCutoff,
+  withinRecoveryWindowSql,
 } from './study-lifecycle';
 
 /** What the guard answers: 'ok' or the 422 code. */
@@ -42,6 +42,9 @@ describe('study lifecycle guard (BIB-22)', () => {
   it('purges 30 days after trashing, and treats exactly that age as past the window', () => {
     const deletedAt = new Date('2026-10-01T12:00:00.000Z');
     expect(studyPurgeAt(deletedAt).toISOString()).toBe('2026-10-31T12:00:00.000Z');
-    expect(trashExpiryCutoff(studyPurgeAt(deletedAt)).getTime()).toBe(deletedAt.getTime());
+    // The database decides the window with the same fixed span, on its own clock.
+    expect(withinRecoveryWindowSql('s')).toBe(
+      "(s.deleted_at IS NULL OR s.deleted_at > (now() - interval '720 hours'))",
+    );
   });
 });

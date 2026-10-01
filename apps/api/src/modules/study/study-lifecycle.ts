@@ -4,7 +4,7 @@ import {
   STUDY_TRASH_RETENTION_DAYS,
   STUDY_TRASHED,
 } from '@bible-artisan/contracts';
-import { Op, type WhereOptions } from 'sequelize';
+import { literal, Op, type WhereOptions } from 'sequelize';
 import { StudyLifecycleError } from '../../common/errors/domain-errors';
 import type { Study } from '../../database/models/study.model';
 
@@ -52,24 +52,41 @@ export function assertLifecycleAllows(
   throw new StudyLifecycleError(LIFECYCLE_TRANSITION_INVALID);
 }
 
-/** When a study trashed at `deletedAt` is permanently deleted (and from when it reads as absent). */
+/**
+ * When a study trashed at `deletedAt` is permanently deleted (and from when it reads as absent).
+ * Display only (`purgeAt` in DTOs): `deletedAt` is a database timestamp, and this is the same
+ * fixed span `RECOVERY_CUTOFF_SQL` subtracts, so the date shown is the instant the database
+ * clock ends the window.
+ */
 export function studyPurgeAt(deletedAt: Date): Date {
   return new Date(deletedAt.getTime() + RETENTION_MS);
 }
 
-/** Studies trashed at or before this instant are past their recovery window at `now`. */
-export function trashExpiryCutoff(now: Date): Date {
-  return new Date(now.getTime() - RETENTION_MS);
-}
+/**
+ * The recovery window's cutoff as a SQL expression on the DATABASE clock: a study trashed at or
+ * before it is past its window. The single clock source for the lifecycle (BIB-22): `archived_at`
+ * and `deleted_at` are written as the database's `now()` (`StudiesService.changeLifecycle`), and
+ * every window decision (study reads, the study lock, the Trash listing, the purge) compares them
+ * with the database's `now()` through this expression, never with the API's clock, so a skewed
+ * app server can neither hide a study early nor purge one late or early.
+ *
+ * Exact hours, not `interval '30 days'`: day arithmetic on `timestamptz` follows the session's
+ * time zone across DST changes, which would drift from `studyPurgeAt` by an hour.
+ */
+export const RECOVERY_CUTOFF_SQL = `(now() - interval '${STUDY_TRASH_RETENTION_DAYS * 24} hours')`;
 
 /**
- * The WHERE fragment that makes a study past its recovery window absent: every study read and the
- * study lock add it, so such a study is the same 404 as one that never existed, even before the
- * purge has removed it. `deleted_at` is set exactly while a study is trashed (CHECK), so this is
- * "not trashed, or trashed after the cutoff".
+ * THE rule that makes a study past its recovery window absent, as SQL over the study row aliased
+ * `alias` (a fixed identifier, never user input). Every study-scoped read resolves its study
+ * through it (`StudyAccessService`, the study lock, the library), so such a study is the same 404
+ * as one that never existed, even before the purge has removed it. `deleted_at` is set exactly
+ * while a study is trashed (CHECK), so this is "not trashed, or trashed after the cutoff".
  */
-export function withinRecoveryWindow(now: Date = new Date()): WhereOptions<Study> {
-  return {
-    [Op.or]: [{ deletedAt: null }, { deletedAt: { [Op.gt]: trashExpiryCutoff(now) } }],
-  };
+export function withinRecoveryWindowSql(alias: string): string {
+  return `(${alias}.deleted_at IS NULL OR ${alias}.deleted_at > ${RECOVERY_CUTOFF_SQL})`;
+}
+
+/** `withinRecoveryWindowSql` for a Sequelize query on the `Study` model (aliased `"Study"`). */
+export function withinRecoveryWindow(): WhereOptions<Study> {
+  return { [Op.and]: [literal(withinRecoveryWindowSql('"Study"'))] };
 }

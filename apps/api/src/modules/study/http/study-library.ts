@@ -10,7 +10,7 @@ import {
 import { QueryTypes, type Sequelize } from 'sequelize';
 import { ValidationError } from '../../../common/errors/domain-errors';
 import { Study } from '../../../database/models/study.model';
-import { studyPurgeAt, trashExpiryCutoff } from '../study-lifecycle';
+import { studyPurgeAt, withinRecoveryWindowSql } from '../study-lifecycle';
 import {
   decodeLibraryCursor,
   encodeLibraryCursor,
@@ -180,14 +180,14 @@ export async function listStudies(
  * User input reaches the SQL only as bind parameters; the interpolated pieces are fixed column
  * names, fixed expressions and `$n` placeholders.
  *
- * `state=trashed` (the Trash view, BIB-22) lists only studies inside their recovery window at
- * `now`; one trashed 30 or more days ago reads as absent everywhere, here too.
+ * `state=trashed` (the Trash view, BIB-22) lists only studies inside their recovery window by
+ * the database clock (`withinRecoveryWindowSql`); one trashed 30 or more days ago reads as absent
+ * everywhere, here too.
  */
 export function libraryQuery(
   listing: LibraryListing,
   after: LibraryPosition | null,
   rowLimit: number,
-  now: Date = new Date(),
 ): { sql: string; bind: unknown[] } {
   const bind: unknown[] = [listing.ownerId, listing.state];
   const param = (value: unknown): string => {
@@ -196,7 +196,7 @@ export function libraryQuery(
   };
   const filters: string[] = [];
   if (listing.state === 'trashed') {
-    filters.push(`s.deleted_at > ${param(trashExpiryCutoff(now))}::timestamptz`);
+    filters.push(withinRecoveryWindowSql('s'));
   }
   if (listing.tag !== null) {
     filters.push(

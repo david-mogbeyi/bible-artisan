@@ -7,6 +7,7 @@ import {
   ARCHIVED_BANNER,
   CHANGED_ELSEWHERE,
   STATE_CHANGED_ELSEWHERE,
+  UNSAVED_EDITS_BLOCK,
 } from './study-lifecycle-actions';
 import { StudyPage } from './study-page';
 
@@ -116,6 +117,67 @@ const status = () =>
   within(screen.getByRole('region', { name: 'Study status' })).getByRole('status');
 
 describe('study lifecycle actions (BIB-22)', () => {
+  /** Archive and Move to trash are blocked, described by the visible unsaved-changes note. */
+  function expectBlocked(blocked: boolean) {
+    for (const name of ['Archive', 'Move to trash']) {
+      const button = screen.getByRole('button', { name });
+      expect([
+        button.getAttribute('aria-disabled'),
+        button.getAttribute('aria-describedby'),
+      ]).toStrictEqual(blocked ? ['true', expect.any(String)] : [null, null]);
+      if (blocked) {
+        expect(
+          document.getElementById(button.getAttribute('aria-describedby') ?? '')?.textContent,
+        ).toBe(UNSAVED_EDITS_BLOCK);
+      }
+    }
+    expect(screen.queryByText(UNSAVED_EDITS_BLOCK) !== null).toBe(blocked);
+  }
+
+  it('never discards unsaved editor changes: Archive and Move to trash are blocked with an explanation until they are saved or discarded', async () => {
+    await renderStudy(ACTIVE);
+    expectBlocked(false);
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A better title' } });
+    expectBlocked(true);
+
+    // Presses do nothing: no request, no dialog, and the draft is still there.
+    fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Move to trash' }));
+    expect(screen.getByRole('dialog', { hidden: true }).hasAttribute('open')).toBe(false);
+    expect(sent).toStrictEqual([]);
+    expect(screen.getByLabelText<HTMLInputElement>('Title').value).toBe('A better title');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+    expectBlocked(false);
+
+    // Saving clears it too, once the server has the change.
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'A better title' } });
+    expectBlocked(true);
+    writes.push(
+      jsonResponse(200, { ...changed({ ...ACTIVE, title: 'A better title', revision: 2 }) }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expectBlocked(false));
+    expect(screen.getByRole('heading', { level: 1, name: 'A better title' })).toBeTruthy();
+  });
+
+  it('stays blocked while a save whose outcome is unknown could still be retried, and clears once it is confirmed', async () => {
+    await renderStudy(ACTIVE);
+    writes.push(new TypeError('Failed to fetch'));
+    fireEvent.click(screen.getByRole('button', { name: 'Pin study' }));
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeTruthy();
+    // The form itself is unchanged; the frozen pin is the unsaved work.
+    expectBlocked(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
+    expect(sent.map((s) => s.path)).toStrictEqual([`/studies/${STUDY_ID}`]);
+
+    writes.push(jsonResponse(200, changed({ ...ACTIVE, pinned: true, revision: 2 })));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expectBlocked(false));
+    // Retry resent the identical request, key included.
+    expect(sent[1]).toStrictEqual(sent[0]);
+  });
+
   it('archives an active study after the server answers: banner, no editor, Unarchive focused, library marked stale', async () => {
     const { queryClient } = await renderStudy(ACTIVE);
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries');

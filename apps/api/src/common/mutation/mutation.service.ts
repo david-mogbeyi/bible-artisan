@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Op, QueryTypes, Transaction } from 'sequelize';
+import { fn, Op, QueryTypes, Transaction } from 'sequelize';
 import { DATABASE } from '../../database/database.module';
 import type { Database } from '../../database/database';
 import { MutationReceipt } from '../../database/models/mutation-receipt.model';
@@ -250,7 +250,10 @@ export class MutationService {
     }
     if (ownerIds.length === 0) return 0;
     return MutationReceipt.destroy({
-      where: { ownerId: [...ownerIds], expiresAt: { [Op.lte]: new Date() } },
+      // The database clock, as the claim's own `expires_at <= now()` takeover test: a receipt
+      // the database still holds live (it would replay) is never deleted, whatever the clock of
+      // the process running the purge says.
+      where: { ownerId: [...ownerIds], expiresAt: { [Op.lte]: fn('now') } },
     });
   }
 

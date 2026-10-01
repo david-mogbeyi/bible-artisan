@@ -3,6 +3,7 @@
 import type { StudyResponse } from '@bible-artisan/contracts';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
+import { useState } from 'react';
 import { useParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { RequireAuth } from '@/components/require-auth';
@@ -80,12 +81,14 @@ function StudyDetails({
   study: StudyResponse;
   onReload: () => Promise<unknown>;
 }) {
+  // The editor's unsaved work, so archiving or trashing never silently discards it (BIB-22).
+  const [unsavedEdits, setUnsavedEdits] = useState(false);
   const showOriginal =
     study.originalQuestion !== null && study.originalQuestion.nodeId !== study.mainQuestion?.nodeId;
   return (
     <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
       <h1 className="font-serif text-4xl break-words">{study.title}</h1>
-      <StudyLifecycleActions study={study} onReload={onReload} />
+      <StudyLifecycleActions study={study} onReload={onReload} unsavedEdits={unsavedEdits} />
       {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
       {study.description ? (
         <p className="break-words whitespace-pre-wrap">{study.description}</p>
@@ -130,8 +133,11 @@ function StudyDetails({
           </dd>
         </div>
       </dl>
-      {/* Read-only while archived or in the trash: the server refuses edits then anyway. */}
-      {study.lifecycle === 'active' ? <StudyEditor study={study} onReload={onReload} /> : null}
+      {/* Read-only while archived or in the trash: the server refuses edits then anyway. Archive
+          and Move to trash wait while the editor holds unsaved work. */}
+      {study.lifecycle === 'active' ? (
+        <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
+      ) : null}
       <p className="text-muted">
         The study is saved. The workspace for its graph, thread and summary arrives in a later
         release.

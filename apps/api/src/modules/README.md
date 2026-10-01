@@ -13,6 +13,14 @@ Rules (see /AGENTS.md for the full list):
   (owner from `@CurrentUserId()`, IDs through `ParseResourceIdPipe`); absent and foreign IDs
   are the same 404. Children are queried by `id` + `study_id` + `owner_id`, never by ID alone.
   Every new route goes into `test/route-inventory.int-spec.ts` with its cross-user test.
+- All child access goes through `StudyAccessService` (or, inside a mutation, the study the
+  pipeline already locked). Never query a study-scoped table by `study_id` alone to resolve a
+  study: that skips the owner check and the 30-day trash rule (BIB-22). That rule lives in one
+  place, `withinRecoveryWindowSql` in `study/study-lifecycle.ts` (`withinRecoveryWindow()` for a
+  `Study` model query): a study trashed 30 or more days ago is the same 404 as an absent one.
+  Every study resolution uses it (`requireOwnedStudy`, `requireOwnedNode` in the same single
+  statement as the child, the study lock, the library). Window decisions use the database clock
+  (`now()` in SQL), never `new Date()`, and `archived_at` / `deleted_at` are written with it too.
 - Every study mutation follows the mutation contract below. See ADR 0001's BIB-12 addendum.
 - Controllers speak DTOs from `@bible-artisan/contracts`. Never return Sequelize model instances directly.
 - Logging (BIB-13): every request already gets a correlation ID and one access line

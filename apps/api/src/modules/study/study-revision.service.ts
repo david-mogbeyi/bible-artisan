@@ -38,6 +38,11 @@ export class StudyLock {
      * under this mutation except through this mutation's own work.
      */
     readonly lifecycle: StudyLifecycle,
+    /**
+     * `study.archived_at` when the lock was taken (BIB-22): restore returns a trashed study to
+     * archived exactly when it is set. Locked like `lifecycle`.
+     */
+    readonly archivedAt: Date | null,
   ) {
     this.eventSequence = lockedEventSequence;
   }
@@ -116,7 +121,7 @@ export class StudyRevisionService {
     if (!isResourceId(studyId)) throw new NotFoundError();
     const study = await Study.findOne({
       where: { id: studyId, ownerId, ...withinRecoveryWindow() },
-      attributes: ['contentRevision', 'lastEventSequence', 'lifecycle'],
+      attributes: ['contentRevision', 'lastEventSequence', 'lifecycle', 'archivedAt'],
       transaction,
       lock: Transaction.LOCK.UPDATE,
     });
@@ -128,6 +133,7 @@ export class StudyRevisionService {
       study.contentRevision,
       BigInt(study.lastEventSequence),
       study.lifecycle,
+      study.archivedAt,
     );
   }
 
@@ -160,6 +166,7 @@ export class StudyRevisionService {
       study.contentRevision,
       BigInt(study.lastEventSequence),
       study.lifecycle,
+      study.archivedAt,
     );
   }
 

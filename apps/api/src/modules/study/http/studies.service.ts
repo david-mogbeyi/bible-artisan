@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { fn } from 'sequelize';
 import {
   type CreateStudyResponse,
   createStudyRequestSchema,
@@ -359,7 +360,8 @@ export class StudiesService {
    * the lifecycle is organizational, not study content. Nothing else about the study changes, so
    * restore returns its nodes, events, branches, pin and tags exactly as they were.
    *
-   * The new state's dates follow `study_lifecycle_timestamps_check`:
+   * The new state's dates follow `study_lifecycle_timestamps_check`, written with the database
+   * clock (`now()`) so the recovery window is decided on one clock:
    * - archive: `archived_at` = now;
    * - unarchive: `archived_at` = null;
    * - trash: `deleted_at` = now, `archived_at` kept (it records that the study was archived);
@@ -378,13 +380,10 @@ export class StudiesService {
       bumpsContentRevision: false,
       lifecycleTransition: transition,
       work: async (m) => {
-        // Locked by the pipeline (receipt -> study); this read joins the transaction.
-        const current = await Study.findOne({
-          where: { id: m.studyId, ownerId: m.ownerId },
-          attributes: ['archivedAt'],
-          rejectOnEmpty: true,
-        });
-        const now = new Date();
+        // The database clock (`now()`, the transaction's start), the one clock every recovery
+        // window decision compares these dates with (`RECOVERY_CUTOFF_SQL`). Typed as a Date for
+        // the column; Sequelize writes the fn as SQL, and RETURNING reads back the stored instant.
+        const now = fn('now') as unknown as Date;
         const values: Partial<Pick<Study, 'lifecycle' | 'archivedAt' | 'deletedAt'>> =
           transition === 'archive'
             ? { lifecycle: 'archived', archivedAt: now }
@@ -393,7 +392,8 @@ export class StudiesService {
               : transition === 'trash'
                 ? { lifecycle: 'trashed', deletedAt: now }
                 : {
-                    lifecycle: current.archivedAt === null ? 'active' : 'archived',
+                    // `archived_at` as the pipeline locked it: no second read of the study.
+                    lifecycle: m.lockedArchivedAt === null ? 'active' : 'archived',
                     deletedAt: null,
                   };
         const updated = await m.updateWithExpectedRevision(Study, {

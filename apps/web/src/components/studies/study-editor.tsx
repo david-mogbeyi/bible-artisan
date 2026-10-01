@@ -254,14 +254,22 @@ interface Attempt {
  *   background refetch brought in meanwhile. Editing the draft discards it: the next save is a new
  *   request, with a new key, from the current base.
  * - Buttons stay focusable while a save runs (`aria-disabled`), so focus never jumps.
+ * - Reports unsaved work through `onUnsavedChange`, so the page can keep Archive and Move to
+ *   trash from discarding it (BIB-22).
  */
 export function StudyEditor({
   study,
   onReload,
+  onUnsavedChange,
 }: {
   study: StudyResponse;
   /** Refetches the study into the query cache (after a conflict). */
   onReload: () => Promise<unknown>;
+  /**
+   * Told whether the editor holds unsaved work (BIB-22): a changed draft, or a save in flight or
+   * whose outcome is unknown. False once it unmounts.
+   */
+  onUnsavedChange?: (unsaved: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const ids = {
@@ -284,8 +292,14 @@ export function StudyEditor({
   const [saved, setSaved] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [alerts, setAlerts] = useState(0);
-  // The request in flight, or the last one whose outcome is unknown. See `Attempt`.
+  // The request in flight, or the last one whose outcome is unknown. See `Attempt`. Mirrored in
+  // state (`hasFrozen`) so the page can tell it is outstanding; always set through `freeze`.
   const frozen = useRef<Attempt | null>(null);
+  const [hasFrozen, setHasFrozen] = useState(false);
+  const freeze = (attempt: Attempt | null) => {
+    frozen.current = attempt;
+    setHasFrozen(attempt !== null);
+  };
   // The current base, for mutation callbacks that settle the draft against it.
   const latestBase = useRef(base);
   useEffect(() => {
@@ -302,7 +316,7 @@ export function StudyEditor({
   const save = useMutation({
     mutationFn: (attempt: Attempt) => updateStudy(study.id, attempt.body, attempt.key),
     onSuccess: (edited: UpdateStudyResponse, attempt) => {
-      if (frozen.current === attempt) frozen.current = null;
+      if (frozen.current === attempt) freeze(null);
       const { lastEventSequence: _sequence, ...state } = edited;
       // A replayed 200 can be older than what a background refetch already showed.
       queryClient.setQueryData<StudyResponse>(studyQueryKey(study.id), (old) =>
@@ -323,7 +337,7 @@ export function StudyEditor({
       const definite =
         error instanceof ApiError && [400, 404, 409, 422, 428].includes(error.status);
       // A definite refusal wrote nothing, so there is nothing to replay.
-      if (definite && frozen.current === attempt) frozen.current = null;
+      if (definite && frozen.current === attempt) freeze(null);
       if (error instanceof ApiError && error.status === 409) {
         setConflict(CONFLICT);
       } else if (
@@ -368,6 +382,15 @@ export function StudyEditor({
   });
   const pending = save.isPending || reloading;
 
+  // Work the page must not throw away (archiving or trashing unmounts this editor): edits not yet
+  // saved, a typed tag not yet added, or a save in flight or with an unknown outcome.
+  const unsaved =
+    save.isPending || hasFrozen || draftEdit(base, draft) !== null || tagInput.trim() !== '';
+  useEffect(() => {
+    onUnsavedChange?.(unsaved);
+  }, [unsaved, onUnsavedChange]);
+  useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
+
   useEffect(() => {
     if (alerts > 0) alertRef.current?.focus();
   }, [alerts]);
@@ -389,14 +412,14 @@ export function StudyEditor({
   /** Sends `attempt` (new or frozen) and keeps it frozen until its outcome is known. */
   function dispatch(attempt: Attempt) {
     clearMessages();
-    frozen.current = attempt;
+    freeze(attempt);
     save.mutate(attempt);
   }
 
   /** The draft discards a frozen form save once the user edits it. */
   function draftEdited() {
     setSaved(false);
-    if (frozen.current?.kind === 'draft') frozen.current = null;
+    if (frozen.current?.kind === 'draft') freeze(null);
   }
 
   function saveDraft() {
@@ -452,7 +475,7 @@ export function StudyEditor({
         latestBase.current = fresh;
         setBase(fresh);
       }
-      frozen.current = null;
+      freeze(null);
       clearMessages();
       setNotice(RELOADED);
     } catch (error) {
@@ -761,7 +784,7 @@ export function StudyEditor({
             onClick={() => {
               if (pending) return;
               clearMessages();
-              frozen.current = null;
+              freeze(null);
               latestBase.current = study;
               setBase(study);
               setDraft(draftOf(study));

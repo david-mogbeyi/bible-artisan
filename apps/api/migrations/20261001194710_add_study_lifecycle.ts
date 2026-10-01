@@ -27,12 +27,15 @@ import type { MigrationContext } from '../src/database/migrator';
 // It fires only when `lifecycle` itself changes (`WHEN OLD IS DISTINCT FROM NEW`), so ordinary
 // edits never reach it. Fixed, content-free message, SQLSTATE 23000, like the other study
 // triggers. The 30-day recovery window is enforced by the API (the study lock and every read
-// treat an expired trashed study as absent) and the purge, not here.
+// treat an expired trashed study as absent, comparing `deleted_at` with the database clock) and
+// the purge, not here.
 //
 // Existing archived/trashed rows (development only: nothing writes those states before this
 // migration) are backfilled from `updated_at`.
 //
-// `down` drops the columns, constraint and trigger. It refuses while any study exists unless
+// `study_trash_purge_idx` (partial, trashed rows only) serves the purge's due-study selection.
+//
+// `down` drops the index, columns, constraint and trigger. It refuses while any study exists unless
 // ALLOW_STUDY_DATA_DROP=1 (ADR 0001, BIB-19 addendum): the dates are user data, and each `down`
 // commits on its own, so an unguarded step here would commit before BIB-21's guard refuses,
 // leaving a half-reverted database.
@@ -52,6 +55,11 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
       OR (lifecycle = 'archived' AND archived_at IS NOT NULL AND deleted_at IS NULL)
       OR (lifecycle = 'trashed' AND deleted_at IS NOT NULL)
     );
+  `);
+  // The trash purge's selection (`lifecycle = 'trashed' AND deleted_at <= cutoff ORDER BY
+  // deleted_at, id`): a range scan over trashed studies only, already in purge order.
+  await context.query(`
+    CREATE INDEX study_trash_purge_idx ON study (deleted_at, id) WHERE lifecycle = 'trashed';
   `);
   await context.query(`
     CREATE FUNCTION study_lifecycle_transition() RETURNS trigger
@@ -94,6 +102,7 @@ export async function down({ context }: { context: MigrationContext }): Promise<
       $$;
     `);
   }
+  await context.query(`DROP INDEX IF EXISTS study_trash_purge_idx;`);
   await context.query(`DROP TRIGGER IF EXISTS study_lifecycle_transition ON study;`);
   await context.query(`DROP FUNCTION IF EXISTS study_lifecycle_transition();`);
   await context.query(`

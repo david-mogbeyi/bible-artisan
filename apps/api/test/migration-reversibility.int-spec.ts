@@ -239,7 +239,7 @@ describe('migration reversibility', () => {
     }
   });
 
-  it('reverts and re-applies the study lifecycle (BIB-22): states survive, dates are backfilled, and the constraint and trigger come back', async () => {
+  it('reverts and re-applies the study lifecycle (BIB-22): states survive, dates are backfilled, and the constraint, trigger and purge index come back', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
     const lifecycles = async () =>
@@ -260,9 +260,21 @@ describe('migration reversibility', () => {
          VALUES ($1, 'Trashed', 'trashed', now())`,
         { bind: [userId] },
       );
+      const purgeIndex = async () =>
+        db.query<{ indexdef: string }>(
+          `SELECT indexdef FROM pg_indexes WHERE indexname = 'study_trash_purge_idx'`,
+          { type: QueryTypes.SELECT },
+        );
       await withStudyDataDropAllowed(() => migrator.down({ to: LIFECYCLE_MIGRATION }));
       expect(await columns(['study'])).not.toContain('study.archived_at');
+      expect(await purgeIndex()).toStrictEqual([]);
       await migrator.up();
+      expect(await purgeIndex()).toStrictEqual([
+        {
+          indexdef:
+            "CREATE INDEX study_trash_purge_idx ON public.study USING btree (deleted_at, id) WHERE (lifecycle = 'trashed'::text)",
+        },
+      ]);
       expect(await lifecycles()).toStrictEqual([
         { lifecycle: 'active', archived: null, deleted: null },
         { lifecycle: 'archived', archived: true, deleted: null },

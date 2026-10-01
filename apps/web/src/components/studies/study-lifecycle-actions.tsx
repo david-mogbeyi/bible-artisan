@@ -23,6 +23,8 @@ export const ARCHIVED_BANNER = 'Archived. This study is read-only until you unar
 export const CHANGED_ELSEWHERE = 'This study changed elsewhere. Reload to see the latest.';
 export const STATE_CHANGED_ELSEWHERE =
   "This study's status changed elsewhere. Reload to see the latest.";
+export const UNSAVED_EDITS_BLOCK =
+  'Save or discard your changes to this study before archiving it or moving it to trash.';
 
 /** Said in the polite status region once the server has committed the change. */
 const DONE: Record<StudyLifecycleChange, string> = {
@@ -72,16 +74,24 @@ interface Attempt {
  *   the study changed elsewhere and offers Reload; a 404 shows the page's unavailable state; an
  *   unknown outcome (network, 5xx) offers Retry, which resends the identical request.
  * - Buttons stay focusable while a request runs (`aria-disabled`), and ignore presses.
+ * - Archive and Move to trash would unmount the editor, so while it holds unsaved work
+ *   (`unsavedEdits`: a changed draft, or a save in flight or with an unknown outcome) they are
+ *   blocked the same way, described by a visible note saying to save or discard first. Nothing
+ *   is ever discarded silently.
  */
 export function StudyLifecycleActions({
   study,
   onReload,
+  unsavedEdits = false,
 }: {
   study: StudyResponse;
   /** Refetches the study into the query cache, rejecting when that fails. */
   onReload: () => Promise<unknown>;
+  /** The editor holds unsaved work (see `StudyEditor`'s `onUnsavedChange`). */
+  unsavedEdits?: boolean;
 }) {
   const queryClient = useQueryClient();
+  const blockedNoteId = useId();
   const dialogTitleId = useId();
   const dialogTextId = useId();
   const [announcement, setAnnouncement] = useState('');
@@ -158,8 +168,12 @@ export function StudyLifecycleActions({
     primaryRef.current?.focus();
   }, [study.lifecycle]);
 
+  // Only an active study has an editor, and only Archive and Move to trash leave it.
+  const blocked = unsavedEdits && study.lifecycle === 'active';
+
   function send(change: StudyLifecycleChange) {
     if (pending) return;
+    if (blocked && (change === 'archive' || change === 'trash')) return;
     focusOn.current = null;
     setStale(null);
     setProblem(null);
@@ -198,7 +212,7 @@ export function StudyLifecycleActions({
   }
 
   function openTrashDialog() {
-    if (pending) return;
+    if (pending || blocked) return;
     dialogRef.current?.showModal();
     cancelRef.current?.focus();
   }
@@ -216,6 +230,10 @@ export function StudyLifecycleActions({
 
   const buttonClass = 'rounded border border-accent px-3 py-1 text-accent aria-disabled:opacity-60';
   const busy = pending ? true : undefined;
+  const leaving = {
+    'aria-disabled': pending || blocked ? true : undefined,
+    'aria-describedby': blocked ? blockedNoteId : undefined,
+  } as const;
 
   return (
     <section aria-label="Study status" className="flex flex-col gap-3">
@@ -233,7 +251,7 @@ export function StudyLifecycleActions({
           <button
             ref={primaryRef}
             type="button"
-            aria-disabled={busy}
+            {...leaving}
             onClick={() => send('archive')}
             className={buttonClass}
           >
@@ -266,7 +284,7 @@ export function StudyLifecycleActions({
             ref={trashRef}
             type="button"
             aria-haspopup="dialog"
-            aria-disabled={busy}
+            {...leaving}
             onClick={openTrashDialog}
             className={buttonClass}
           >
@@ -274,6 +292,11 @@ export function StudyLifecycleActions({
           </button>
         )}
       </div>
+      {blocked ? (
+        <p id={blockedNoteId} className="text-sm">
+          {UNSAVED_EDITS_BLOCK}
+        </p>
+      ) : null}
 
       <div ref={alertRef} tabIndex={-1} className="flex flex-col gap-2 outline-none">
         {stale ? (

@@ -41,6 +41,29 @@ export function studyTagRows(studyId: string, ownerId: string): Promise<StudyTag
   );
 }
 
+/** The advisory-lock key of an owner's tag vocabulary (see `lockTagVocabularies`). */
+export function tagVocabularyLockKey(ownerId: string): string {
+  return `tag-vocabulary:${ownerId}`;
+}
+
+/**
+ * Takes each owner's tag-vocabulary lock (a transaction-scoped advisory lock keyed
+ * `tag-vocabulary:<owner id>`) in the caller's transaction, in sorted owner-id order. Every
+ * transaction that writes or deletes an owner's `tag` rows takes it first (after its study
+ * locks, before any tag row): a study's tag change (`applyTagChange`) and the trash purge
+ * (`StudyTrashPurgeService`). It serializes them per owner, so their tag-row locks, taken in
+ * different orders (by name, by id), can never deadlock; the sorted order keeps a transaction
+ * that needs several owners deadlock-free too. The one place the key format lives.
+ */
+export async function lockTagVocabularies(ownerIds: readonly string[]): Promise<void> {
+  for (const ownerId of [...new Set(ownerIds)].sort()) {
+    await database().query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', {
+      bind: [tagVocabularyLockKey(ownerId)],
+      type: QueryTypes.SELECT,
+    });
+  }
+}
+
 /**
  * Applies a tag delta (`tags.add` names, already normalized by `tagNameSchema` with distinct keys;
  * `tags.remove` ids) to the locked study, in the mutation's transaction. Returns null when the
@@ -75,10 +98,7 @@ export async function applyTagChange(
   // Tags belong to the owner, not the study, so two studies' mutations (different study locks) can
   // reach the same tag rows; removal locks by id and addition by name. One per-owner lock, taken
   // after the study lock and before any tag row, serializes them so they can never deadlock.
-  await database().query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', {
-    bind: [`tag-vocabulary:${m.ownerId}`],
-    type: QueryTypes.SELECT,
-  });
+  await lockTagVocabularies([m.ownerId]);
 
   if (removeIds.size > 0) {
     const ids = [...removeIds].sort();
