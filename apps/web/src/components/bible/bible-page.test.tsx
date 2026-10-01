@@ -282,6 +282,22 @@ describe('BiblePage', () => {
     await waitFor(() => expect(document.activeElement).toBe(heading));
   });
 
+  it('lets browser Back win over a lookup that answers afterwards', async () => {
+    const view = await renderAt(`ref=${PSALM_4_ID}`);
+    await screen.findByRole('heading', { level: 2, name: 'Psalms 4' });
+    const genesis = deferred<Response>();
+    referenceResponses.push(() => genesis.promise);
+    openFromPicker('GEN', '1');
+    // Back: the URL changes without the page pushing it.
+    view.follow(`/bible?ref=${PSALM_3_ID}`);
+    await screen.findByRole('heading', { level: 2, name: 'Psalms 3' });
+
+    genesis.resolve(jsonResponse(200, referenceBody(GENESIS_1_ID)));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(push).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { level: 2, name: 'Psalms 3' })).toBeTruthy();
+  });
+
   it('keeps one status region mounted and says when a passage is being opened', async () => {
     await renderAt(`ref=${PSALM_3_ID}`);
     await screen.findByRole('heading', { level: 2, name: 'Psalms 3' });

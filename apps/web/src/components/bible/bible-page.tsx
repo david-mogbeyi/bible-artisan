@@ -3,7 +3,7 @@
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RequireAuth } from '@/components/require-auth';
 import {
   bibleHref,
@@ -72,9 +72,19 @@ function BibleWorkspace() {
     setOpenProblem(null);
     return latest.current;
   };
+  // Back/Forward changes the URL without going through `open`; it supersedes any pending lookup.
+  const pushedReferenceId = useRef(referenceId);
+  useEffect(() => {
+    if (referenceId === pushedReferenceId.current) return;
+    pushedReferenceId.current = referenceId;
+    latest.current += 1;
+    setOpening(false);
+  }, [referenceId]);
+
   const open = (token: number, id: string, focus: boolean) => {
     if (token !== latest.current) return;
     if (focus) setFocusRequest((prev) => ({ referenceId: id, n: (prev?.n ?? 0) + 1 }));
+    pushedReferenceId.current = id;
     router.push(bibleHref(id), { scroll: false });
   };
   const navigation: Navigation = { begin, open: (token, id) => open(token, id, true) };
