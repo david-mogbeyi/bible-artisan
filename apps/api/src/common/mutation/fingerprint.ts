@@ -32,7 +32,7 @@ export interface FingerprintedRequest {
   /** The matched route pattern, e.g. `/v1/studies/:studyId`, never the raw URL. */
   route: string;
   /** Route params (router-decoded, UUIDs lower-cased). IDs are part of the fingerprint. */
-  params: Record<string, string>;
+  params: Record<string, string | string[]>;
   /** The raw parsed JSON body (not the Zod output), so every submitted field counts. */
   body: unknown;
 }

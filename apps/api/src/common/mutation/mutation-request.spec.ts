@@ -58,6 +58,18 @@ describe('mutationRequestInfo', () => {
     ).toBe('/v1/x');
   });
 
+  it('keeps wildcard params as normalized segment arrays', () => {
+    expect(
+      mutationRequestInfo({ ...matched, params: { splat: [STUDY.toUpperCase(), 'b'] } }).params,
+    ).toStrictEqual({ splat: [STUDY, 'b'] });
+  });
+
+  it('refuses a param shape it cannot fingerprint rather than dropping it', () => {
+    expect(() => mutationRequestInfo({ ...matched, params: { odd: 42 } })).toThrow(
+      'Unsupported route param shape for idempotency: odd',
+    );
+  });
+
   it('refuses a request that was not matched to a route', () => {
     expect(() => mutationRequestInfo({ ...matched, route: undefined })).toThrow(
       'needs a request matched to a route',

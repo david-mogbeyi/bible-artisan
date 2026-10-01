@@ -13,8 +13,8 @@ export interface MutationRequestInfo {
    * case, trailing-slash, and percent-encoding variants of one resource fingerprint alike.
    */
   route: string;
-  /** Route params, decoded by the router; UUIDs lower-cased. */
-  params: Record<string, string>;
+  /** Route params, decoded by the router; UUIDs lower-cased. Wildcard params are segment arrays. */
+  params: Record<string, string | string[]>;
   /** The raw parsed JSON body. */
   body: unknown;
 }
@@ -60,13 +60,23 @@ export function mutationRequestInfo(request: RequestLike): MutationRequestInfo {
 }
 
 /** Router-decoded params with UUIDs lower-cased (they are stored and compared lower-case). */
-function normalizedParams(params: Record<string, unknown>): Record<string, string> {
-  const normalized: Record<string, string> = {};
+function normalizedParams(params: Record<string, unknown>): Record<string, string | string[]> {
+  const normalized: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(params)) {
-    if (typeof value !== 'string') continue;
-    normalized[name] = isUuid(value) ? value.toLowerCase() : value;
+    if (typeof value === 'string') {
+      normalized[name] = normalizeSegment(value);
+    } else if (Array.isArray(value) && value.every((v): v is string => typeof v === 'string')) {
+      normalized[name] = value.map(normalizeSegment);
+    } else {
+      // Dropping a param would let two different resources share a fingerprint.
+      throw new Error(`Unsupported route param shape for idempotency: ${name}`);
+    }
   }
   return normalized;
+}
+
+function normalizeSegment(value: string): string {
+  return isUuid(value) ? value.toLowerCase() : value;
 }
 
 /** Param decorator for mutation handlers: `@MutationRequest() mutation: MutationRequestInfo`. */
