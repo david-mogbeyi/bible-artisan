@@ -33,16 +33,7 @@ describe('schema (composite-key owner isolation)', () => {
   });
 
   afterAll(async () => {
-    const bind = [created.studies];
-    await db.query(`DELETE FROM study_event WHERE study_id = ANY($1)`, { bind });
-    await db.query(`DELETE FROM study_branch WHERE study_id = ANY($1)`, { bind });
-    await db.query(
-      `UPDATE study SET original_question_node_id = NULL, main_question_node_id = NULL
-        WHERE id = ANY($1)`,
-      { bind },
-    );
-    await db.query(`DELETE FROM study_node WHERE study_id = ANY($1)`, { bind });
-    await db.query(`DELETE FROM study WHERE id = ANY($1)`, { bind });
+    // Deleting a user cascades to studies, and a study to its nodes, events and branches (BIB-19).
     await db.query(`DELETE FROM "user" WHERE id = ANY($1)`, { bind: [created.users] });
     await db.close();
   });
@@ -182,6 +173,89 @@ describe('schema (composite-key owner isolation)', () => {
       /study_main_question_node_fk/,
     );
     await expect(point('main_question_node_id', nodeId)).resolves.toBeDefined();
+  });
+
+  it('only lets a question pointer name a Question node, and pins the type of a node it names (BIB-19)', async () => {
+    const owner = await insertUser();
+    const studyId = await insertStudy(owner);
+    const questionId = await insertNode(studyId, owner);
+    const [thought] = await db.query<{ id: string }>(
+      `INSERT INTO study_node (study_id, owner_id, type) VALUES ($1, $2, 'thought') RETURNING id`,
+      { bind: [studyId, owner], type: QueryTypes.SELECT },
+    );
+    if (!thought) throw new Error('no node');
+    const point = (column: string, node: string) =>
+      db.query(`UPDATE study SET ${column} = $2 WHERE id = $1`, {
+        bind: [studyId, node],
+        type: QueryTypes.UPDATE,
+      });
+
+    await expect(point('original_question_node_id', thought.id)).rejects.toThrow(
+      /study_original_question_node_fk/,
+    );
+    await expect(point('main_question_node_id', thought.id)).rejects.toThrow(
+      /study_main_question_node_fk/,
+    );
+    await expect(
+      db.query(`UPDATE study SET question_node_type = 'thought' WHERE id = $1`, {
+        bind: [studyId],
+      }),
+    ).rejects.toThrow(/question_node_type" can only be updated to DEFAULT/);
+
+    await point('main_question_node_id', questionId);
+    // The type of a node a pointer names cannot change underneath it (node type is immutable).
+    await expect(
+      db.query(
+        `UPDATE study_node SET type = 'thought', title = NULL, question_status = NULL WHERE id = $1`,
+        { bind: [questionId] },
+      ),
+    ).rejects.toThrow(/study_main_question_node_fk/);
+  });
+
+  it('cascades hard deletes from user to study to every study-scoped row (BIB-19)', async () => {
+    const actions = await db.query<{ name: string; action: string }>(
+      `SELECT conname AS name, confdeltype::text AS action
+         FROM pg_constraint
+        WHERE contype = 'f'
+          AND conrelid::regclass::text IN
+              ('study', 'study_node', 'study_event', 'study_branch', 'mutation_receipt', 'auth_session')
+        ORDER BY conname`,
+      { type: QueryTypes.SELECT },
+    );
+    // c = CASCADE, a = NO ACTION (checked at the end of the statement, after the cascade).
+    expect(actions).toStrictEqual([
+      { name: 'auth_session_user_id_fkey', action: 'c' },
+      { name: 'mutation_receipt_owner_id_fkey', action: 'c' },
+      { name: 'study_branch_root_node_fk', action: 'a' },
+      { name: 'study_branch_study_owner_fk', action: 'c' },
+      { name: 'study_event_study_owner_fk', action: 'c' },
+      { name: 'study_main_question_node_fk', action: 'a' },
+      { name: 'study_node_scripture_reference_id_fkey', action: 'a' },
+      { name: 'study_node_study_owner_fk', action: 'c' },
+      { name: 'study_original_question_node_fk', action: 'a' },
+      { name: 'study_owner_id_fkey', action: 'c' },
+      { name: 'study_starting_reference_id_fkey', action: 'a' },
+    ]);
+  });
+
+  it('refuses to hard-delete on its own a node that a question pointer or a branch names (BIB-19)', async () => {
+    const owner = await insertUser();
+    const studyId = await insertStudy(owner);
+    const pointed = await insertNode(studyId, owner);
+    const root = await insertNode(studyId, owner);
+    await db.query(`UPDATE study SET main_question_node_id = $2 WHERE id = $1`, {
+      bind: [studyId, pointed],
+    });
+    await db.query(
+      `INSERT INTO study_branch (study_id, owner_id, root_node_id) VALUES ($1, $2, $3)`,
+      { bind: [studyId, owner, root] },
+    );
+    await expect(
+      db.query(`DELETE FROM study_node WHERE id = $1`, { bind: [pointed] }),
+    ).rejects.toThrow(/study_main_question_node_fk/);
+    await expect(
+      db.query(`DELETE FROM study_node WHERE id = $1`, { bind: [root] }),
+    ).rejects.toThrow(/study_branch_root_node_fk/);
   });
 
   it.each([

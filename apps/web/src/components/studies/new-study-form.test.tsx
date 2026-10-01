@@ -2,7 +2,14 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deferred, EDITION_ID, TRANSLATION } from '@/test/bible-fixtures';
 import { jsonResponse, renderWithQuery } from '@/test/render';
-import { BLANK_RULE, NewStudyForm, OFFLINE, START_RULE } from './new-study-form';
+import {
+  BLANK_RULE,
+  NewStudyForm,
+  OFFLINE,
+  QUESTION_BAD_CHARACTERS,
+  START_RULE,
+  TITLE_BAD_CHARACTERS,
+} from './new-study-form';
 
 const push = vi.fn();
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push, replace: vi.fn() }) }));
@@ -71,6 +78,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+
+/** How many POST /bible/resolve requests were sent. */
+function resolveCount(): number {
+  return (fetchMock.mock.calls as [string][]).filter(([input]) => input.endsWith('/bible/resolve'))
+    .length;
+}
 
 /** Every POST /studies sent: its body and Idempotency-Key. */
 function createCalls(): { body: unknown; key: string | undefined }[] {
@@ -173,8 +186,8 @@ describe('NewStudyForm', () => {
     expect(createCalls()).toStrictEqual([]);
   });
 
-  it('keeps the draft after a network failure and retries with the same key; an edited draft gets a new key', async () => {
-    createReplies.push(new TypeError('Failed to fetch'), new TypeError('Failed to fetch'));
+  it('keeps the draft after a network failure and Retry of the unchanged draft resends the same body with the same key', async () => {
+    createReplies.push(new TypeError('Failed to fetch'), jsonResponse(201, CREATED));
     await renderForm();
     type(/^Question/, 'What is conscience?');
     fireEvent.click(createButton());
@@ -187,18 +200,104 @@ describe('NewStudyForm', () => {
     expect(push).not.toHaveBeenCalled();
 
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(createCalls()).toHaveLength(2));
-    const [first, retried] = createCalls();
-    expect(retried).toStrictEqual(first);
-
-    createReplies.push(jsonResponse(201, CREATED));
-    type(/^Question/, 'What is a good conscience?');
-    fireEvent.click(createButton());
     await waitFor(() => expect(push).toHaveBeenCalledWith(`/studies/${STUDY_ID}`));
-    const edited = createCalls()[2];
-    expect(edited?.body).toStrictEqual({ question: 'What is a good conscience?' });
-    expect(edited?.key).toMatch(UUID);
-    expect(edited?.key).not.toBe(first?.key);
+    const [first, retried] = createCalls();
+    expect(first).toStrictEqual({
+      body: { question: 'What is conscience?' },
+      key: expect.stringMatching(UUID),
+    });
+    expect(retried).toStrictEqual(first);
+  });
+
+  it('Retry after an edit sends the current draft with a new key, never the old key with a new body', async () => {
+    createReplies.push(new TypeError('Failed to fetch'), jsonResponse(201, CREATED));
+    await renderForm();
+    type(/^Question/, 'What is conscience?');
+    fireEvent.click(createButton());
+    const alert = await screen.findByRole('alert');
+
+    type(/^Question/, 'What is a good conscience?');
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(`/studies/${STUDY_ID}`));
+    const [first, retried] = createCalls();
+    expect(retried?.body).toStrictEqual({ question: 'What is a good conscience?' });
+    expect(retried?.key).toMatch(UUID);
+    expect(retried?.key).not.toBe(first?.key);
+  });
+
+  it('never pairs one key with two bodies across failures, retries, edits and resubmits', async () => {
+    createReplies.push(
+      new TypeError('Failed to fetch'),
+      new TypeError('Failed to fetch'),
+      new TypeError('Failed to fetch'),
+      new TypeError('Failed to fetch'),
+      jsonResponse(201, CREATED),
+    );
+    await renderForm();
+    const retry = async () =>
+      fireEvent.click(
+        within(await screen.findByRole('alert')).getByRole('button', { name: 'Retry' }),
+      );
+    type(/^Question/, 'One');
+    fireEvent.click(createButton());
+    await retry();
+    await waitFor(() => expect(createCalls()).toHaveLength(2));
+    type(/^Question/, 'Two');
+    await retry();
+    await waitFor(() => expect(createCalls()).toHaveLength(3));
+    type(/^Question/, 'One');
+    fireEvent.click(createButton());
+    await waitFor(() => expect(createCalls()).toHaveLength(4));
+    type(/^Title/, 'Titled');
+    await retry();
+    await waitFor(() => expect(push).toHaveBeenCalledTimes(1));
+
+    const bodiesByKey = new Map<string | undefined, Set<string>>();
+    for (const call of createCalls()) {
+      const bodies = bodiesByKey.get(call.key) ?? new Set<string>();
+      bodies.add(JSON.stringify(call.body));
+      bodiesByKey.set(call.key, bodies);
+    }
+    expect([...bodiesByKey.values()].map((bodies) => bodies.size)).toStrictEqual([1, 1, 1, 1]);
+  });
+
+  it('resolves a typed passage once when the field is left and Create pressed while the check runs', async () => {
+    const check = deferred<Response>();
+    resolveReplies.set('Rom 9:1', check.promise);
+    createReplies.push(jsonResponse(201, CREATED));
+    await renderForm();
+    type(/^Passage$/, 'Rom 9:1');
+    fireEvent.blur(field(/^Passage$/));
+    fireEvent.click(createButton());
+    check.resolve(jsonResponse(200, { outcome: 'resolved', reference: ROMANS }));
+    await waitFor(() => expect(push).toHaveBeenCalledTimes(1));
+    expect(resolveCount()).toBe(1);
+    expect(createCalls().map((c) => c.body)).toStrictEqual([{ startingReferenceId: ROMANS.id }]);
+  });
+
+  it('checks the passage again after it is edited, and after a failed check', async () => {
+    resolveReplies.set('Rom 9:1', new TypeError('Failed to fetch'));
+    await renderForm();
+    type(/^Passage$/, 'Rom 9:1');
+    fireEvent.blur(field(/^Passage$/));
+    await screen.findByText("Couldn't check the passage.");
+    resolveReplies.set('Rom 9:1', jsonResponse(200, { outcome: 'resolved', reference: ROMANS }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('Starting passage: Romans 9:1')).toBeTruthy();
+    expect(resolveCount()).toBe(2);
+  });
+
+  it.each([
+    ['title', /^Title/, 'Con\u0000science', TITLE_BAD_CHARACTERS],
+    ['question', /^Question/, 'Why\u0007?', QUESTION_BAD_CHARACTERS],
+  ])('refuses control characters in the %s before sending', async (_, name, value, message) => {
+    await renderForm();
+    type(/^Question/, 'Why?');
+    type(name, value);
+    fireEvent.click(createButton());
+    expect(await screen.findByText(message)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(field(name)));
+    expect(createCalls()).toStrictEqual([]);
   });
 
   it('blocks creation while offline and keeps the draft', async () => {

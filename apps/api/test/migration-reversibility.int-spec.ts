@@ -10,7 +10,7 @@ import {
   readCorpusArtifact,
 } from '../src/modules/bible-content/corpus/corpus-importer';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
-import { withCorpusDropAllowed } from './support/corpus-drop';
+import { withAllDropsAllowed, withStudyDataDropAllowed } from './support/study-data-drop';
 
 const CORPUS_MIGRATION = '20261001094438_create_bible_corpus.ts';
 const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
@@ -70,6 +70,145 @@ describe('migration reversibility', () => {
     await db.close();
   });
 
+  async function columns(tables: string[]): Promise<string[]> {
+    const rows = await db.query<{ c: string }>(
+      `SELECT table_name || '.' || column_name AS c FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = ANY($1)
+        ORDER BY 1`,
+      { bind: [tables], type: QueryTypes.SELECT },
+    );
+    return rows.map((r) => r.c);
+  }
+
+  /** A user with one study holding everything BIB-19 creation writes. Returns the user id. */
+  async function seedStudyData(): Promise<string> {
+    const firstVerse = `
+      SELECT v.edition_id, v.book_code, v.chapter, v.verse, v.chapter, v.verse
+        FROM bible_verse v
+        JOIN bible_edition e ON e.id = v.edition_id AND e.activated_at IS NOT NULL
+       ORDER BY v.book_code, v.chapter, v.verse
+       LIMIT 1`;
+    await db.query(
+      `INSERT INTO scripture_reference
+         (edition_id, book_code, start_chapter, start_verse, end_chapter, end_verse)
+       ${firstVerse}
+       ON CONFLICT DO NOTHING`,
+    );
+    const [row] = await db.query<{ user_id: string }>(
+      `WITH u AS (
+         INSERT INTO "user" (normalized_email) VALUES (gen_random_uuid() || '@example.test')
+         RETURNING id
+       ), s AS (
+         INSERT INTO study (owner_id, title, starting_reference_id)
+         SELECT u.id, 'Seeded', r.id
+           FROM u, scripture_reference r
+          WHERE (r.edition_id, r.book_code, r.start_chapter, r.start_verse, r.end_chapter, r.end_verse)
+                = (${firstVerse})
+         RETURNING id, owner_id, starting_reference_id
+       ), q AS (
+         INSERT INTO study_node (study_id, owner_id, type, title, question_status)
+         SELECT s.id, s.owner_id, 'question', 'Seeded question', 'open' FROM s
+         RETURNING id, study_id, owner_id
+       ), p AS (
+         INSERT INTO study_node (study_id, owner_id, type, scripture_reference_id)
+         SELECT s.id, s.owner_id, 'scripture', s.starting_reference_id FROM s
+       ), b AS (
+         INSERT INTO study_branch (study_id, owner_id, root_node_id)
+         SELECT q.study_id, q.owner_id, q.id FROM q
+       )
+       SELECT id AS user_id FROM u`,
+      { type: QueryTypes.SELECT },
+    );
+    if (!row) throw new Error('seed returned nothing');
+    await db.query(
+      `UPDATE study s SET original_question_node_id = n.id, main_question_node_id = n.id
+         FROM study_node n
+        WHERE n.study_id = s.id AND n.type = 'question' AND s.owner_id = $1`,
+      { bind: [row.user_id] },
+    );
+    return row.user_id;
+  }
+
+  it('refuses each study and user table drop without the study-data opt-in while rows exist', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    // Past the corpus with only the corpus opt-in fails at BIB-19 already; with both, down to just
+    // after the BIB-9 tables. Their own guards are then checked one by one below.
+    try {
+      await withAllDropsAllowed(() =>
+        migrator.down({ to: '20261001000001_create_auth_challenge.ts' }),
+      );
+      for (const [migration, message] of [
+        ['20260930200004_create_study_event.ts', 'study_event drop refused: study events exist'],
+        ['20260930200003_create_study_node.ts', 'study_node drop refused: study nodes exist'],
+        ['20260930200002_create_study.ts', 'study drop refused: studies exist'],
+        ['20260930200001_create_user.ts', 'user drop refused: users exist'],
+      ] as const) {
+        if (migration === '20260930200004_create_study_event.ts') {
+          await db.query(
+            `INSERT INTO study_event (study_id, owner_id, sequence, event_type)
+             SELECT id, owner_id, 1, 'seeded' FROM study WHERE owner_id = $1`,
+            { bind: [userId] },
+          );
+        }
+        const before = await recordedMigrations(db);
+        expect(before.at(-1)).toBe(migration);
+        const error = await migrator.down().catch((e: unknown) => e);
+        expect((error as { cause?: unknown }).cause).toMatchObject({
+          message: `${message} (set ALLOW_STUDY_DATA_DROP=1)`,
+          parent: expect.objectContaining({ code: '23000' }),
+        });
+        expect(await recordedMigrations(db)).toStrictEqual(before);
+        await withStudyDataDropAllowed(() => migrator.down());
+      }
+      expect(await recordedMigrations(db)).toStrictEqual([]);
+    } finally {
+      await migrator.up();
+      await importCorpus(db, readCorpusArtifact(ENGWEBP_RELEASE), ENGWEBP_RELEASE);
+    }
+  });
+
+  it('refuses at the first destructive step from latest toward the corpus while study data exists, changing nothing', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const studyData = async (): Promise<unknown[]> =>
+      db.query(
+        `SELECT s.title, s.starting_reference_id, s.original_question_node_id,
+                s.main_question_node_id, n.type, n.title AS node_title, n.question_status,
+                n.scripture_reference_id, b.root_node_id
+           FROM study s
+           JOIN study_node n ON n.study_id = s.id
+           JOIN study_branch b ON b.study_id = s.id
+          WHERE s.owner_id = $1
+          ORDER BY n.type`,
+        { bind: [userId], type: QueryTypes.SELECT },
+      );
+    try {
+      const before = await recordedMigrations(db);
+      expect(before).toStrictEqual(shippedMigrationNames());
+      const tablesBefore = await publicTables(db, DOMAIN_TABLES);
+      const columnsBefore = await columns(['study', 'study_node', 'study_branch']);
+      const dataBefore = await studyData();
+      expect(dataBefore).toHaveLength(2);
+
+      // No opt-in at all: the newest migration (BIB-19's study roots) is the first `down` toward
+      // the corpus and refuses before anything commits.
+      const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as { cause?: unknown }).cause).toMatchObject({
+        message: 'study roots drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(tablesBefore);
+      expect(await columns(['study', 'study_node', 'study_branch'])).toStrictEqual(columnsBefore);
+      expect(await studyData()).toStrictEqual(dataBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('refuses to drop an active Bible corpus without the explicit opt-in, changing nothing', async () => {
     // A shared reference id exists (rows are never deleted, so a real database keeps them).
     await db.query(
@@ -92,11 +231,11 @@ describe('migration reversibility', () => {
     expect(referencesBefore.length).toBeGreaterThan(0);
     const migrator = createMigrator(db);
     // Migrations after the search index are not corpus-bound (BIB-19's study roots): revert them
-    // normally first, so the next `down` is the first corpus-bound one.
+    // with only the study-data opt-in, so the next `down` is the first corpus-bound one.
     const later = shippedMigrationNames().filter((name) => name > SEARCH_MIGRATION);
     if (later[0]) {
       const first = later[0];
-      await migrator.down({ to: first });
+      await withStudyDataDropAllowed(() => migrator.down({ to: first }));
     }
     // Restore latest even when an assertion fails, so later tests and files see the full schema.
     try {
@@ -130,7 +269,7 @@ describe('migration reversibility', () => {
   it('refuses to drop the shared reference ids without the opt-in once the search index is gone', async () => {
     const migrator = createMigrator(db);
     const REFERENCE_MIGRATION = '20261001104810_create_scripture_reference.ts';
-    await withCorpusDropAllowed(() => migrator.down({ to: SEARCH_MIGRATION }));
+    await withAllDropsAllowed(() => migrator.down({ to: SEARCH_MIGRATION }));
     // Restore latest even when an assertion fails, so later tests and files see the full schema.
     try {
       const before = await recordedMigrations(db);
@@ -155,7 +294,7 @@ describe('migration reversibility', () => {
     const later = shippedMigrationNames().filter((name) => name > CORPUS_MIGRATION);
     if (later[0]) {
       const first = later[0];
-      await withCorpusDropAllowed(() => migrator.down({ to: first }));
+      await withAllDropsAllowed(() => migrator.down({ to: first }));
     }
     // Restore latest even when an assertion fails, so later tests and files see the full schema.
     try {
@@ -187,8 +326,9 @@ describe('migration reversibility', () => {
     expect(await recordedMigrations(db)).toStrictEqual(allNames);
     expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
 
-    // Dropping the active corpus needs the explicit opt-in (ADR 0001, BIB-14 addendum).
-    const reverted = await withCorpusDropAllowed(() => migrator.down({ to: 0 }));
+    // Dropping the active corpus and any study data needs both explicit opt-ins (ADR 0001, BIB-14
+    // and BIB-19 addenda).
+    const reverted = await withAllDropsAllowed(() => migrator.down({ to: 0 }));
     let reapplied: Awaited<ReturnType<typeof migrator.up>> | undefined;
     // Restore latest even when an assertion fails, so later tests see the full schema.
     try {

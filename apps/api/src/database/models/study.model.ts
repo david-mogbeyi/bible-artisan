@@ -75,6 +75,14 @@ export class Study extends Model {
   @Column({ field: 'main_question_node_id', type: DataType.UUID, allowNull: true })
   declare mainQuestionNodeId: string | null;
 
+  /**
+   * Always 'question': a STORED GENERATED constant (BIB-19) that is the last column of both
+   * question-pointer FKs into study_node (owner_id, study_id, id, type), so a pointer can only
+   * name a Question node. PostgreSQL refuses any written value, so never set it.
+   */
+  @Column({ field: 'question_node_type', type: DataType.TEXT })
+  declare readonly questionNodeType: 'question';
+
   @CreatedAt
   @Column({ field: 'created_at', type: DataType.DATE, allowNull: false })
   declare createdAt: Date;

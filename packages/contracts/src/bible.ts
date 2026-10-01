@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { httpUrlSchema } from './url';
+import { userTextSchema } from './user-text';
 
 /**
  * Bible reference resolution DTOs (BIB-15; PRD sections 14, 23, 24; FR-BIBLE-001..003).
@@ -13,7 +14,7 @@ export const MAX_REFERENCE_INPUT_LENGTH = 200;
 export const MAX_REFERENCE_VERSES = 200;
 
 export const resolveReferenceRequestSchema = z.object({
-  input: z.string().trim().min(1).max(MAX_REFERENCE_INPUT_LENGTH),
+  input: userTextSchema({ max: MAX_REFERENCE_INPUT_LENGTH }),
   editionId: z.uuid(),
 });
 
@@ -97,7 +98,7 @@ export const SEARCH_MODES = ['terms', 'phrase'] as const;
 export type SearchMode = (typeof SEARCH_MODES)[number];
 
 export const searchBibleQuerySchema = z.object({
-  q: z.string().trim().min(1).max(MAX_SEARCH_QUERY_LENGTH),
+  q: userTextSchema({ max: MAX_SEARCH_QUERY_LENGTH }),
   /** `terms`: every word must occur. `phrase`: the words occur together, in order. */
   mode: z.enum(SEARCH_MODES).default('terms'),
   editionId: z.uuid(),

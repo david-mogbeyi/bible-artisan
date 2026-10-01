@@ -51,15 +51,8 @@ describe('Sequelize models against the real schema', () => {
   });
 
   afterAll(async () => {
-    const studyId = created.studies;
-    await StudyEvent.destroy({ where: { studyId } });
-    await StudyBranch.destroy({ where: { studyId } });
-    await Study.update(
-      { originalQuestionNodeId: null, mainQuestionNodeId: null },
-      { where: { id: studyId } },
-    );
-    await StudyNode.destroy({ where: { studyId } });
-    await Study.destroy({ where: { id: studyId } });
+    // Deleting a study cascades to its nodes, events and branches (BIB-19).
+    await Study.destroy({ where: { id: created.studies } });
     await AuthChallenge.destroy({ where: { id: created.challenges } });
     await AuthSession.destroy({ where: { userId: created.users } });
     await MutationReceipt.destroy({ where: { ownerId: created.users } });
@@ -97,6 +90,7 @@ describe('Sequelize models against the real schema', () => {
       startingReferenceId: null,
       originalQuestionNodeId: null,
       mainQuestionNodeId: null,
+      questionNodeType: 'question',
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
@@ -266,6 +260,12 @@ describe('Sequelize models against the real schema', () => {
     await expect(study.update({ mainQuestionNodeId: foreignNode.id })).rejects.toBeInstanceOf(
       ForeignKeyConstraintError,
     );
+    // Same study and owner, but not a question: the pointer FKs include the node type.
+    for (const pointer of ['mainQuestionNodeId', 'originalQuestionNodeId'] as const) {
+      await expect(
+        Study.update({ [pointer]: node.id }, { where: { id: study.id } }),
+      ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    }
     expect(await StudyBranch.count({ where: { studyId: study.id } })).toBe(0);
   });
 

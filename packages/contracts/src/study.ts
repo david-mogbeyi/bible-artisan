@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { scriptureReferenceSchema } from './bible';
 import { eventSequenceSchema } from './mutation';
+import { userTextSchema } from './user-text';
 
 /**
  * Study creation and read DTOs (BIB-19; PRD sections 10, 11, 23, 24; FR-STUDY-001/002).
@@ -33,8 +34,8 @@ export const BLANK_STUDY_HAS_CONTENT = 'A blank study has no question or startin
  */
 export const createStudyRequestSchema = z
   .strictObject({
-    title: z.string().trim().min(1).max(MAX_STUDY_TITLE_LENGTH).optional(),
-    question: z.string().trim().min(1).max(MAX_QUESTION_LENGTH).optional(),
+    title: userTextSchema({ max: MAX_STUDY_TITLE_LENGTH }).optional(),
+    question: userTextSchema({ max: MAX_QUESTION_LENGTH }).optional(),
     startingReferenceId: z.uuid().optional(),
     blank: z.literal(true).optional(),
   })

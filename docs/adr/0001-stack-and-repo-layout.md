@@ -450,11 +450,30 @@ Only step 2 differs:
   - `question_status` on, and only on, questions;
   - a 1–4,000-character statement on questions;
   - a reference on, and only on, Scripture nodes.
-- `study` gains `starting_reference_id` plus `original_question_node_id` and `main_question_node_id`. The two pointers are composite FKs `(owner_id, id, node) → study_node (owner_id, study_id, id)`, which needs the new `UNIQUE (owner_id, study_id, id)`. A pointer can therefore only name a node of the same study and owner.
-- New `study_branch` table (id, study, owner, root node, created_at), with composite FKs to the study and to its root node.
+- `study` gains `starting_reference_id` plus `original_question_node_id` and `main_question_node_id`. The two pointers are composite FKs `(owner_id, id, node, question_node_type) → study_node (owner_id, study_id, id, type)`. `question_node_type` is a STORED generated constant `'question'` on `study`, and the target is the new `UNIQUE (owner_id, study_id, id, type)`. A pointer can therefore only name a **Question** node of the same study and owner. Node type is immutable (PRD section 8), and the same FK refuses a type change on a node a pointer names. A trigger was not needed: the declarative FK is enough because the type never changes.
+- New `study_branch` table (id, study, owner, root node, created_at), with composite FKs to the study and to its root node (through `UNIQUE (owner_id, study_id, id)`).
 - `scripture_reference` is edition-bound, so PRD section 23's `starting_translation_id` is unnecessary, and its "both or neither" rule holds by construction.
 - Since studies and nodes now reference `scripture_reference`, PostgreSQL itself refuses a plain `TRUNCATE` of it before the immutability trigger runs. `TRUNCATE … CASCADE` still reaches the trigger, and a test covers both.
-- The corpus-refusal reversibility test now reverts migrations newer than the search index (none of them corpus-bound) before asserting the refusal.
+
+**Hard delete: one statement, cascading.** The PRD needs a 30-day trash purge (BIB-22) and account deletion, so `DELETE FROM study WHERE …` or `DELETE FROM "user" WHERE …` must work without manual ordering.
+
+- `study_node`, `study_event` and `study_branch` reference `study (owner_id, id)` with `ON DELETE CASCADE`. This migration alters the BIB-9 node and event FKs, which were NO ACTION, and its `down` restores them.
+- `study.owner_id → user` is `ON DELETE CASCADE` too. `auth_session` and `mutation_receipt` already cascaded from `user`. Deleting a user removes their sessions, receipts, studies and every study row.
+- The study → question pointers and the branch → root node FKs stay NO ACTION. NO ACTION is checked at the end of the statement, after the cascade has removed both sides, so the cycle never blocks a study or user delete. Deleting a node on its own while a pointer or branch still names it is refused (nodes are soft-deleted anyway).
+- `mutation_receipt` is owner-scoped, not study-scoped: a deleted study's creation receipt stays until it expires or the account is deleted. Replaying it returns the original 201, and the study then reads as 404.
+- The FKs to `scripture_reference` never fire: those rows are never deleted (BIB-15 triggers).
+- Integration tests delete a created study (question, Scripture node, branch, event, receipt) and a user, and assert no orphans. Test cleanups now delete users only.
+
+**Guarded `down` for study data (`ALLOW_STUDY_DATA_DROP=1`).** Each migration's `down` commits on its own. Without a guard, a `down` toward the corpus would commit the study-roots drop (question statements and statuses, Scripture references, pointers, branches) before the corpus guards refused further down.
+
+- The study-roots `down` refuses with a fixed, content-free error ("study roots drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)", SQLSTATE 23000), changing nothing, while any of that data exists: a `study_branch` row, or a non-null `study_node.title` / `question_status` / `scripture_reference_id`, or a non-null study starting reference or question pointer.
+- For consistency, the BIB-9 `user`, `study`, `study_node` and `study_event` downs refuse the same way while their table has any row. The auth and receipt tables are transient (they expire) and are not guarded. A real database keeps an active corpus, and the corpus guards stop a `down` before any of the BIB-9 steps are reached.
+- The opt-in is distinct from `ALLOW_CORPUS_DROP`, so dropping the corpus never implies dropping user data. Example: `ALLOW_STUDY_DATA_DROP=1 pnpm --filter @bible-artisan/api db:migrate:down`.
+- The reversibility suite seeds a full study, then runs `down --to <corpus>` from latest with no opt-ins. It asserts the refusal comes at the first step and that tables, columns, SequelizeMeta and the seeded rows are unchanged. Another test checks each BIB-9 guard. Tests that revert further set both opt-ins (`test/support/study-data-drop.ts`).
+
+**User text (`userTextSchema`, contracts).** Free text a user types (study `title` and `question`, `POST /bible/resolve` `input`, `GET /bible/search` `q`) goes through one shared schema. It trims, applies the length bounds, and refuses C0 control characters other than tab, line feed and carriage return, as well as unpaired UTF-16 surrogates. PostgreSQL `text` rejects U+0000, which previously surfaced as a 500 inside the creation transaction. A refusal is a 400 `VALIDATION` with the fixed field error "Remove control or invalid characters", raised before any transaction or receipt. The text is never echoed. The web form runs the same check before sending.
+
+**`study_created` event and BIB-55.** The event's node and branch ids live only in `payload_json` (`scriptureNodeId`, `questionNodeId`, `branchId`). BIB-55 owns StudyEvent's `node_id` / `branch_id` columns. When they land, existing `study_created` rows need a backfill from `payload_json`. This is recorded on BIB-55.
 
 **Decisions.**
 
@@ -466,7 +485,8 @@ Only step 2 differs:
 - **Deferred to BIB-33.** `sessionId` in the 201 (PRD section 24 lists it), the `study_session` row, branch memberships, and `session_started` events. Sessions start on the first meaningful action and are per browser tab, which is BIB-33's model.
 - **Web.**
   - The `/studies/new` form keeps its draft in page state only, never in localStorage.
-  - It sends one Idempotency-Key per draft and reuses it on every retry of the same body.
+  - It reuses an Idempotency-Key only for a byte-identical body. Retry re-submits the draft as it is now: an unchanged draft resends the same body with the same key, and an edited draft goes out with a new key. One key never carries two bodies, so normal use can't get 422 `IDEMPOTENCY_KEY_REUSED`.
+  - Leaving the passage field and then pressing Create shares the running check, so the passage is resolved once.
   - A minimal `/studies/[studyId]` page reads the study back.
 
 **Privacy.** No new log lines. `log-redaction.int-spec.ts` covers both routes on 201, replay, 400, 422, 200 and 404.

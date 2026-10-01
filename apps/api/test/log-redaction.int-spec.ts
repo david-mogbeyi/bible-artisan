@@ -8,14 +8,9 @@ import { afterAll, beforeAll, describe, expect, it, type MockInstance, vi } from
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
-import { AuthSession } from '../src/database/models/auth-session.model';
 import { BibleBook } from '../src/database/models/bible-book.model';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { BibleVerse } from '../src/database/models/bible-verse.model';
-import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
-import { StudyBranch } from '../src/database/models/study-branch.model';
-import { StudyEvent } from '../src/database/models/study-event.model';
-import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
 import { DevOtpProvider } from '../src/modules/identity/otp/dev-otp.provider';
@@ -235,16 +230,7 @@ describe('content-redacted operational logs', () => {
   afterAll(async () => {
     const otpUsers = await User.findAll({ where: { normalizedEmail: otpEmails } });
     userIds.push(...otpUsers.map((user) => user.id));
-    await StudyEvent.destroy({ where: { ownerId: userIds } });
-    await StudyBranch.destroy({ where: { ownerId: userIds } });
-    await Study.update(
-      { originalQuestionNodeId: null, mainQuestionNodeId: null },
-      { where: { ownerId: userIds } },
-    );
-    await StudyNode.destroy({ where: { ownerId: userIds } });
-    await MutationReceipt.destroy({ where: { ownerId: userIds } });
-    await Study.destroy({ where: { ownerId: userIds } });
-    await AuthSession.destroy({ where: { userId: userIds } });
+    // Deleting a user cascades to their sessions, receipts, studies and every study row (BIB-19).
     await AuthChallenge.destroy({ where: { normalizedEmail: otpEmails } });
     await User.destroy({ where: { id: userIds } });
     await app.close();

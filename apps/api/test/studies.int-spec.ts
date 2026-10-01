@@ -7,6 +7,7 @@ import {
   type ResolveReferenceResponse,
   type ScriptureReference,
   STUDY_START_REQUIRED,
+  USER_TEXT_INVALID_CHARACTERS,
 } from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import request, { type Response } from 'supertest';
@@ -226,14 +227,8 @@ describe('study creation and read (BIB-19)', () => {
   });
 
   afterAll(async () => {
-    const where = { ownerId: userIds };
-    await StudyEvent.destroy({ where });
-    await StudyBranch.destroy({ where });
-    await Study.update({ originalQuestionNodeId: null, mainQuestionNodeId: null }, { where });
-    await StudyNode.destroy({ where });
-    await MutationReceipt.destroy({ where });
-    await Study.destroy({ where });
-    await AuthSession.destroy({ where: { userId: userIds } });
+    // Deleting a user cascades to their sessions, receipts and studies, and each study to its
+    // nodes, branches and events (BIB-19).
     await User.destroy({ where: { id: userIds } });
     await app.close();
   });
@@ -468,6 +463,27 @@ describe('study creation and read (BIB-19)', () => {
         'a whitespace-only question',
         { question: '   ' },
         { question: ['Too small: expected string to have >=1 characters'] },
+      ],
+      // PostgreSQL text refuses U+0000; refused before the transaction, never a 500.
+      [
+        'a title holding U+0000',
+        { title: 'Con\u0000science', question: 'Why?' },
+        { title: [USER_TEXT_INVALID_CHARACTERS] },
+      ],
+      [
+        'a question holding U+0000',
+        { question: 'Why\u0000?' },
+        { question: [USER_TEXT_INVALID_CHARACTERS] },
+      ],
+      [
+        'a question holding a C0 control character',
+        { question: 'Why\u001b[31m?' },
+        { question: [USER_TEXT_INVALID_CHARACTERS] },
+      ],
+      [
+        'a question holding a lone surrogate',
+        { question: 'Why\ud83d?' },
+        { question: [USER_TEXT_INVALID_CHARACTERS] },
       ],
       [
         'a malformed reference id',
@@ -768,6 +784,72 @@ describe('study creation and read (BIB-19)', () => {
       expect([malformed.status, malformed.body]).toStrictEqual([404, NOT_FOUND]);
       // The owner still reads it.
       expect((await read(alice, studyId)).status).toBe(200);
+    });
+  });
+
+  describe('hard delete (trash purge, account deletion)', () => {
+    it('removes a study with its question, Scripture node, branch and events in one statement, leaving no orphans', async () => {
+      const owner = await signedInUser();
+      const keep = await create(owner, { question: 'Kept?' }, randomUUID());
+      const created = await create(
+        owner,
+        { question: 'What is conscience?', startingReferenceId: romans.id },
+        randomUUID(),
+      );
+      expect([keep.status, created.status]).toStrictEqual([201, 201]);
+      const { studyId } = created.body as CreateStudyResponse;
+      const keptId = (keep.body as CreateStudyResponse).studyId;
+      expect(await ownerRows(owner)).toStrictEqual({
+        studies: 2,
+        nodes: 3,
+        branches: 2,
+        events: 2,
+        receipts: 2,
+      });
+
+      await db.query(`DELETE FROM study WHERE owner_id = $1 AND id = $2`, {
+        bind: [owner.user.id, studyId],
+      });
+
+      const where = { studyId };
+      expect([
+        await Study.count({ where: { id: studyId } }),
+        await StudyNode.count({ where }),
+        await StudyBranch.count({ where }),
+        await StudyEvent.count({ where }),
+      ]).toStrictEqual([0, 0, 0, 0]);
+      // The other study is untouched. Receipts are owner-scoped (not study-scoped): they stay
+      // until they expire or the account is deleted, and the study they name now reads as 404.
+      expect(await ownerRows(owner)).toStrictEqual({
+        studies: 1,
+        nodes: 1,
+        branches: 1,
+        events: 1,
+        receipts: 2,
+      });
+      expect((await read(owner, keptId)).status).toBe(200);
+      expect([(await read(owner, studyId)).status]).toStrictEqual([404]);
+    });
+
+    it('removes a user with their sessions, receipts, studies and every study row in one statement', async () => {
+      const owner = await signedInUser();
+      const other = await signedInUser();
+      await create(owner, { question: 'Why?', startingReferenceId: jude.id }, randomUUID());
+      await create(owner, { blank: true }, randomUUID());
+      await create(other, { question: 'Why?' }, randomUUID());
+      const otherBefore = await ownerRows(other);
+
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [owner.user.id] });
+
+      expect(await ownerRows(owner)).toStrictEqual({
+        studies: 0,
+        nodes: 0,
+        branches: 0,
+        events: 0,
+        receipts: 0,
+      });
+      expect(await AuthSession.count({ where: { userId: owner.user.id } })).toBe(0);
+      expect(await ownerRows(other)).toStrictEqual(otherBefore);
     });
   });
 });

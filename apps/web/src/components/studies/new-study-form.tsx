@@ -2,11 +2,13 @@
 
 import {
   type CreateStudyRequest,
+  hasForbiddenUserTextCharacter,
   MAX_QUESTION_LENGTH,
   MAX_STUDY_TITLE_LENGTH,
   REFERENCE_NOT_FOUND,
   type ReferenceCandidate,
   type ScriptureReference,
+  USER_TEXT_INVALID_CHARACTERS,
 } from '@bible-artisan/contracts';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
@@ -26,6 +28,8 @@ export const OFFLINE =
   "You're offline. Your draft is kept on this page; create the study when you're back online.";
 const TITLE_TOO_LONG = `Use at most ${MAX_STUDY_TITLE_LENGTH} characters for the title.`;
 const QUESTION_TOO_LONG = `Use at most ${MAX_QUESTION_LENGTH.toLocaleString('en-US')} characters for the question.`;
+export const TITLE_BAD_CHARACTERS = 'Remove control or invalid characters from the title.';
+export const QUESTION_BAD_CHARACTERS = 'Remove control or invalid characters from the question.';
 const NOT_A_REFERENCE = "That isn't a Bible reference. Try a form like Rom 9:1.";
 const PASSAGE_UNAVAILABLE =
   "That passage isn't available in an active translation. Look it up again.";
@@ -60,11 +64,22 @@ type Passage =
 
 type FieldErrors = Partial<Record<'title' | 'question' | 'passage', string>>;
 
-/** One submission: the same body always goes with the same Idempotency-Key. */
+/**
+ * The last submission. Its key is reused only for a byte-identical body, so a retry of an
+ * unchanged draft can never create a second study, and an edited draft (a different body) always
+ * gets a new key, so the server never sees one key with two bodies (422 IDEMPOTENCY_KEY_REUSED).
+ */
 interface Attempt {
   json: string;
-  body: CreateStudyRequest;
   key: string;
+}
+
+/** A passage check that is running or has resolved, for the text and edition it was asked for. */
+interface Check {
+  text: string;
+  edition: string;
+  token: number;
+  result: Promise<ScriptureReference | null>;
 }
 
 /** `/studies/new` (PRD section 11, New Study). */
@@ -94,9 +109,13 @@ export function NewStudyForm() {
   const [alerts, setAlerts] = useState(0);
   const attempt = useRef<Attempt | null>(null);
   const lastCheck = useRef(0);
+  // The current check, shared by blur and submit so one passage is resolved once.
+  const currentCheck = useRef<Check | null>(null);
   // True from a submit until its request is sent (or refused locally), covering the passage
   // check, so a second press in that window cannot send a second request.
   const submitting = useRef(false);
+  // Which button the last submission came from, so Retry repeats it on the current draft.
+  const lastBlank = useRef(false);
   const alertRef = useRef<HTMLDivElement>(null);
   const fieldRefs = {
     title: useRef<HTMLInputElement>(null),
@@ -146,9 +165,37 @@ export function NewStudyForm() {
     else if (rule) setAlerts((n) => n + 1);
   }
 
-  /** Resolves the passage text in an edition; the latest check wins over any earlier answer. */
-  async function checkPassage(text: string, edition: string): Promise<ScriptureReference | null> {
+  /**
+   * Resolves the passage text in an edition; the latest check wins over any earlier answer. A
+   * check for the same text and edition that is still running, or has resolved, is reused, so
+   * leaving the field and pressing Create sends one resolve request, not two. Editing the passage
+   * or the translation bumps `lastCheck`, which retires it.
+   */
+  function checkPassage(text: string, edition: string): Promise<ScriptureReference | null> {
+    const current = currentCheck.current;
+    if (
+      current &&
+      current.token === lastCheck.current &&
+      current.text === text &&
+      current.edition === edition
+    ) {
+      return current.result;
+    }
     const token = ++lastCheck.current;
+    const result = runCheck(text, edition, token).then((reference) => {
+      // Only a resolved reference stays reusable: a correction or a failure is checked afresh.
+      if (!reference && currentCheck.current?.token === token) currentCheck.current = null;
+      return reference;
+    });
+    currentCheck.current = { text, edition, token, result };
+    return result;
+  }
+
+  async function runCheck(
+    text: string,
+    edition: string,
+    token: number,
+  ): Promise<ScriptureReference | null> {
     setPassage({ state: 'checking' });
     try {
       const result = await resolveReference(text, edition);
@@ -192,7 +239,7 @@ export function NewStudyForm() {
     const json = JSON.stringify(body);
     const key =
       attempt.current && attempt.current.json === json ? attempt.current.key : crypto.randomUUID();
-    attempt.current = { json, body, key };
+    attempt.current = { json, key };
     setProblem(null);
     create.mutate({ body, key });
   }
@@ -200,6 +247,7 @@ export function NewStudyForm() {
   async function submit(blank: boolean) {
     if (pending || submitting.current) return;
     submitting.current = true;
+    lastBlank.current = blank;
     try {
       await prepareAndSend(blank);
     } finally {
@@ -223,6 +271,8 @@ export function NewStudyForm() {
     const errors: FieldErrors = {};
     if (t.length > MAX_STUDY_TITLE_LENGTH) errors.title = TITLE_TOO_LONG;
     if (q.length > MAX_QUESTION_LENGTH) errors.question = QUESTION_TOO_LONG;
+    if (hasForbiddenUserTextCharacter(t)) errors.title = TITLE_BAD_CHARACTERS;
+    if (hasForbiddenUserTextCharacter(q)) errors.question = QUESTION_BAD_CHARACTERS;
     const rule = blank ? (q || p ? BLANK_RULE : null) : !q && !p ? START_RULE : null;
     if (Object.keys(errors).length > 0 || rule) {
       showFieldErrors(errors, rule);
@@ -257,8 +307,12 @@ export function NewStudyForm() {
     });
   }
 
+  /**
+   * Retry submits the draft as it is now, the way the failed press did (blank or not). `send`
+   * keeps the key when the body is unchanged and takes a new one when the draft was edited.
+   */
   function retry() {
-    if (attempt.current) send(attempt.current.body);
+    void submit(lastBlank.current);
   }
 
   const describedBy = (...parts: (string | false)[]) =>
@@ -484,8 +538,13 @@ function serverFieldErrors(body: unknown): { fields: FieldErrors; rule: string |
   const fieldErrors = (body as { fieldErrors?: Record<string, unknown> } | null)?.fieldErrors;
   if (!fieldErrors) return null;
   const fields: FieldErrors = {};
-  if (fieldErrors.title) fields.title = TITLE_TOO_LONG;
-  if (fieldErrors.question) fields.question = QUESTION_TOO_LONG;
+  const copy = (errors: unknown, bad: string, tooLong: string): string =>
+    Array.isArray(errors) && errors.includes(USER_TEXT_INVALID_CHARACTERS) ? bad : tooLong;
+  if (fieldErrors.title)
+    fields.title = copy(fieldErrors.title, TITLE_BAD_CHARACTERS, TITLE_TOO_LONG);
+  if (fieldErrors.question) {
+    fields.question = copy(fieldErrors.question, QUESTION_BAD_CHARACTERS, QUESTION_TOO_LONG);
+  }
   if (fieldErrors.startingReferenceId) fields.passage = PASSAGE_UNAVAILABLE;
   const rule = fieldErrors._ ? START_RULE : fieldErrors.blank ? BLANK_RULE : null;
   return Object.keys(fields).length > 0 || rule ? { fields, rule } : null;
