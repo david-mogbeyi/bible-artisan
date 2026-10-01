@@ -31,14 +31,36 @@ describe('parseIdempotencyKey', () => {
 });
 
 describe('mutationRequestInfo', () => {
-  it('takes method, path without query, body, and the key', () => {
+  const STUDY = '3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b';
+  const matched = {
+    method: 'post',
+    baseUrl: '',
+    route: { path: '/v1/studies/:studyId' },
+    headers: { 'idempotency-key': KEY },
+    body: { a: 1 },
+  };
+
+  it('takes method, the matched route pattern, lower-cased UUID params, body, and the key', () => {
     expect(
-      mutationRequestInfo({
-        method: 'post',
-        originalUrl: '/v1/studies?x=1',
-        headers: { 'idempotency-key': KEY },
-        body: { a: 1 },
-      }),
-    ).toStrictEqual({ idempotencyKey: KEY, method: 'POST', path: '/v1/studies', body: { a: 1 } });
+      mutationRequestInfo({ ...matched, params: { studyId: STUDY.toUpperCase(), slug: 'Ab' } }),
+    ).toStrictEqual({
+      idempotencyKey: KEY,
+      method: 'POST',
+      route: '/v1/studies/:studyId',
+      params: { studyId: STUDY, slug: 'Ab' },
+      body: { a: 1 },
+    });
+  });
+
+  it('prefixes a router mount path', () => {
+    expect(
+      mutationRequestInfo({ ...matched, baseUrl: '/v1', route: { path: '/x' }, params: {} }).route,
+    ).toBe('/v1/x');
+  });
+
+  it('refuses a request that was not matched to a route', () => {
+    expect(() => mutationRequestInfo({ ...matched, route: undefined })).toThrow(
+      'needs a request matched to a route',
+    );
   });
 });

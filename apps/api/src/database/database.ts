@@ -6,6 +6,7 @@ import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
 import { Study } from './models/study.model';
 import { User } from './models/user.model';
+import { enableTransactionPropagation } from './transaction-context';
 
 export type Database = Sequelize;
 
@@ -15,6 +16,8 @@ export type Database = Sequelize;
  * amendment); register every model here so each new one only needs adding to this list.
  */
 export function createDatabase(connectionString: string): Database {
+  // Queries inside a managed transaction join it without passing `{ transaction }` (BIB-12).
+  enableTransactionPropagation();
   return new Sequelize(connectionString, {
     models: [User, Study, StudyNode, StudyEvent, AuthChallenge, AuthSession, MutationReceipt],
     logging: false,

@@ -71,6 +71,13 @@ const PROBE_ROUTES: Record<string, PrivateAccess> = {
       test: 'gets the neutral 404 when another user mutates a study they do not own',
     },
   },
+  'POST /v1/__test/studies/:studyId/nodes/:nodeId/mutations': {
+    access: 'private',
+    crossUserTest: {
+      file: 'mutations.int-spec.ts',
+      test: 'gets the neutral 404 when another user mutates a node of a study they do not own',
+    },
+  },
 };
 
 /** Every test-only probe on top of the real AppModule. */

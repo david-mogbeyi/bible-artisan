@@ -49,7 +49,7 @@ export class Study extends Model {
   /**
    * The per-study event counter (migration 20261001074053): the sequence of the study's latest
    * committed event, 0 before the first. Allocated only through
-   * `StudyRevisionService.nextEventSequence`. bigint, so pg returns a decimal string; typed
+   * the mutation pipeline (`MutationService` → `StudyRevisionService.writeCounters`). bigint, so pg returns a decimal string; typed
    * `string` so it is never silently rounded.
    */
   @Column({

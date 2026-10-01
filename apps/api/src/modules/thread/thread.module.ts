@@ -1,14 +1,13 @@
 import { Module } from '@nestjs/common';
-import { StudyModule } from '../study/study.module';
 import { ThreadService } from './thread.service';
 
 /**
- * Thread bounded context (PRD §26). Owns `study_event`. Exports `ThreadService`, which Graph,
- * Notes, and Study call inside their own mutation transactions to append the matching event
- * (sequence allocated through Study's `StudyRevisionService`).
+ * Thread bounded context (PRD §26). Owns `study_event`. Exports `ThreadService`, which the
+ * mutation pipeline (`MutationService` → `StudyMutation.appendEvent`) calls inside a study
+ * mutation's transaction, under its `StudyLock`. No controllers here: MutationModule imports this
+ * module, so routes that run mutations live in a module that imports MutationModule instead.
  */
 @Module({
-  imports: [StudyModule],
   providers: [ThreadService],
   exports: [ThreadService],
 })

@@ -1,12 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { Transaction } from 'sequelize';
 import { StudyEvent } from '../../database/models/study-event.model';
-import { StudyRevisionService } from '../study/study-revision.service';
+import { StudyLock } from '../study/study-revision.service';
 
 export interface AppendEventInput {
-  /** From the session, never the request. */
-  ownerId: string;
-  studyId: string;
   /** A PRD §13 event family, e.g. `study_renamed`. */
   eventType: string;
   /** Bounded, readable labels only (PRD §23): no full chapters, note bodies, or excerpts. */
@@ -24,30 +20,30 @@ export interface AppendedEvent {
 /**
  * Writes Study Thread events (PRD §13). The only way to insert into `study_event`.
  *
- * `appendEvent` takes the caller's transaction and refuses to run without one, so an event is
- * committed atomically with the domain mutation it records, or not at all (FR-THREAD-001). It
- * allocates the event's per-study sequence from the study row counter in that same transaction.
+ * `appendEvent` requires the `StudyLock` of a running mutation: the event is written in that
+ * mutation's transaction (committed atomically with it, or not at all, FR-THREAD-001), owner and
+ * study come from the lock rather than the caller, and its sequence is allocated from the locked
+ * study counter. Domain code reaches it through `StudyMutation.appendEvent`
+ * (`MutationService.execute`), never directly.
  */
 @Injectable()
 export class ThreadService {
-  constructor(private readonly studyRevisions: StudyRevisionService) {}
-
-  async appendEvent(transaction: Transaction, input: AppendEventInput): Promise<AppendedEvent> {
-    if (!(transaction instanceof Transaction)) {
-      throw new Error('ThreadService.appendEvent requires the mutation transaction');
+  async appendEvent(lock: StudyLock, input: AppendEventInput): Promise<AppendedEvent> {
+    if (!(lock instanceof StudyLock)) {
+      throw new Error('ThreadService.appendEvent requires the mutation StudyLock');
     }
-    const { ownerId, studyId, eventType, payload = {}, occurredAt } = input;
-    const sequence = await this.studyRevisions.nextEventSequence(transaction, ownerId, studyId);
+    const { eventType, payload = {}, occurredAt } = input;
+    const sequence = lock.allocateEventSequence();
     const event = await StudyEvent.create(
       {
-        ownerId,
-        studyId,
+        ownerId: lock.ownerId,
+        studyId: lock.studyId,
         sequence,
         eventType,
         payloadJson: payload,
         ...(occurredAt ? { occurredAt } : {}),
       },
-      { transaction },
+      { transaction: lock.transaction },
     );
     return { id: event.id, sequence };
   }

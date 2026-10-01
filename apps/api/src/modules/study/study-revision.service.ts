@@ -1,66 +1,137 @@
 import { Injectable } from '@nestjs/common';
-import { literal, Transaction } from 'sequelize';
+import { Transaction } from 'sequelize';
 import { NotFoundError } from '../../common/errors/domain-errors';
 import { isResourceId } from '../../common/validation/resource-id';
 import { Study } from '../../database/models/study.model';
 
 /**
- * The study row's transactional counters (PRD §23). Study owns the `study` table, so other modules
- * (Thread, Graph, Notes) bump these only through this service, inside their mutation transaction.
+ * Proof that a transaction holds a study's row lock, plus the study's counters as this mutation
+ * will commit them (PRD §23). Created only by `StudyRevisionService.lock`; `MutationService` owns
+ * its lifecycle. Event sequences are allocated from it in memory: the row lock makes this
+ * transaction the study's only writer until COMMIT, so `last + 1, last + 2, …` cannot collide,
+ * and `StudyRevisionService.writeCounters` persists the final values in one UPDATE.
+ */
+export class StudyLock {
+  private released = false;
+  private eventSequence: bigint;
+  private contentBumped = false;
+
+  /** @internal Use `StudyRevisionService.lock`. */
+  constructor(
+    readonly transaction: Transaction,
+    readonly ownerId: string,
+    readonly studyId: string,
+    /** `study.content_revision` when the lock was taken. */
+    private readonly lockedContentRevision: number,
+    /** `study.last_event_sequence` when the lock was taken. */
+    readonly lockedEventSequence: bigint,
+  ) {
+    this.eventSequence = lockedEventSequence;
+  }
+
+  /** The next per-study event sequence, as a decimal string (bigint; never Number() it). */
+  allocateEventSequence(): string {
+    this.assertHeld();
+    this.eventSequence += 1n;
+    return this.eventSequence.toString();
+  }
+
+  /** Marks this mutation as a content change: `content_revision + 1` once, however often called. */
+  bumpContentRevision(): void {
+    this.assertHeld();
+    this.contentBumped = true;
+  }
+
+  /** The content revision this mutation commits. */
+  get contentRevision(): number {
+    return this.lockedContentRevision + (this.contentBumped ? 1 : 0);
+  }
+
+  /** The last event sequence this mutation commits. */
+  get lastEventSequence(): bigint {
+    return this.eventSequence;
+  }
+
+  /** Events appended under this lock so far. */
+  get eventsAppended(): number {
+    return Number(this.eventSequence - this.lockedEventSequence);
+  }
+
+  /** True when a counter differs from the locked row, so `writeCounters` has something to write. */
+  get countersChanged(): boolean {
+    return this.contentBumped || this.eventSequence !== this.lockedEventSequence;
+  }
+
+  /** Throws once the mutation that took the lock has finished (or for a forged lock). */
+  assertHeld(): void {
+    // Sequelize sets `finished` ('commit' | 'rollback') on a transaction once it ends.
+    const { finished } = this.transaction as Transaction & { finished?: string };
+    if (this.released || finished !== undefined) {
+      throw new Error('StudyLock used after its mutation finished');
+    }
+  }
+
+  /** @internal Called by `MutationService` when the work ends. */
+  release(): void {
+    this.released = true;
+  }
+}
+
+/**
+ * The study row's lock and transactional counters (PRD §23). Study owns the `study` table, so the
+ * mutation pipeline reaches these columns only through this service.
  *
- * Each method is one owner-scoped `UPDATE … RETURNING`, which takes the study row lock and holds
- * it until the caller's transaction ends. Lock order inside a mutation: receipt claim, then the
- * study row (these methods, or a study revision update), then child rows.
+ * Lock order (enforced by `MutationService`, which is the only caller): receipt claim → `lock()`
+ * (`SELECT … FOR UPDATE` on the study row) → the mutation's own rows (the study's revision or a
+ * child's) → `writeCounters()` (same study row, already locked). Every study-scoped mutation takes
+ * the study row first, so two mutations of one study can never hold a child row each and wait on
+ * the other: they queue on the study row instead.
  */
 @Injectable()
 export class StudyRevisionService {
-  /**
-   * Allocates the study's next event sequence (1, 2, 3, …). Concurrent allocations on one study
-   * queue on the row lock and receive consecutive values in commit order; a rolled-back
-   * transaction undoes its increment, so committed sequences have no gaps. Returns a decimal
-   * string (bigint). Absent or another owner's study → 404.
-   */
-  async nextEventSequence(
-    transaction: Transaction,
-    ownerId: string,
-    studyId: string,
-  ): Promise<string> {
-    const study = await this.increment(transaction, ownerId, studyId, 'lastEventSequence');
-    return study.lastEventSequence;
-  }
-
-  /**
-   * Records that the study's content changed (`content_revision + 1`, PRD §23). Call it from
-   * content mutations only; read/navigation events must not move it. Returns the new value.
-   */
-  async bumpContentRevision(
-    transaction: Transaction,
-    ownerId: string,
-    studyId: string,
-  ): Promise<number> {
-    const study = await this.increment(transaction, ownerId, studyId, 'contentRevision');
-    return study.contentRevision;
-  }
-
-  private async increment(
-    transaction: Transaction,
-    ownerId: string,
-    studyId: string,
-    attribute: 'lastEventSequence' | 'contentRevision',
-  ): Promise<Study> {
-    // A row lock outside a transaction is released at once, so the counter would protect nothing.
+  /** Locks the owner's study row until the transaction ends. Absent or another owner's → 404. */
+  async lock(transaction: Transaction, ownerId: string, studyId: string): Promise<StudyLock> {
+    // A row lock outside a transaction is released at once, so it would protect nothing.
     if (!(transaction instanceof Transaction)) {
-      throw new Error('StudyRevisionService requires a transaction');
+      throw new Error('StudyRevisionService.lock requires a transaction');
     }
     if (!isResourceId(studyId)) throw new NotFoundError();
-    const column = attribute === 'lastEventSequence' ? 'last_event_sequence' : 'content_revision';
-    const [, rows] = await Study.update(
-      { [attribute]: literal(`${column} + 1`) },
-      // silent: counters are not an edit of the study itself, so updated_at stays put.
-      { where: { id: studyId, ownerId }, transaction, returning: true, silent: true },
-    );
-    const study = rows[0];
+    const study = await Study.findOne({
+      where: { id: studyId, ownerId },
+      attributes: ['contentRevision', 'lastEventSequence'],
+      transaction,
+      lock: Transaction.LOCK.UPDATE,
+    });
     if (!study) throw new NotFoundError();
-    return study;
+    return new StudyLock(
+      transaction,
+      ownerId,
+      studyId,
+      study.contentRevision,
+      BigInt(study.lastEventSequence),
+    );
+  }
+
+  /**
+   * Persists the lock's counters in ONE statement: `content_revision` (when the mutation bumped
+   * it) and `last_event_sequence` (when it appended events). No-op when neither changed.
+   */
+  async writeCounters(lock: StudyLock): Promise<void> {
+    lock.assertHeld();
+    if (!lock.countersChanged) return;
+    const [, rows] = await Study.update(
+      {
+        contentRevision: lock.contentRevision,
+        lastEventSequence: lock.lastEventSequence.toString(),
+      },
+      {
+        where: { id: lock.studyId, ownerId: lock.ownerId },
+        transaction: lock.transaction,
+        returning: ['id'],
+        // silent: counters are not an edit of the study itself, so updated_at stays put.
+        silent: true,
+      },
+    );
+    if (rows.length !== 1) throw new Error('StudyRevisionService: locked study row vanished');
   }
 }

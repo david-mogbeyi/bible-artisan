@@ -5,8 +5,8 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
  * (`study_id` + `owner_id` → `study(owner_id, id)`, declared in the migration's raw SQL).
  * Nullability and defaults mirror the migration.
  *
- * Rows are written only by `ThreadService.appendEvent` (BIB-12), inside the mutation's
- * transaction, with `sequence` allocated from `study.last_event_sequence`. The activity-dedupe
+ * Rows are written only by `ThreadService.appendEvent` (via `StudyMutation.appendEvent`, BIB-12),
+ * in the mutation's transaction, with `sequence` allocated from `study.last_event_sequence`. The activity-dedupe
  * columns (`client_mutation_id`, `correlation_id`) and the rest of the event taxonomy belong to
  * BIB-55.
  */

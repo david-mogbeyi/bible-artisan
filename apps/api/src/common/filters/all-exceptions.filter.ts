@@ -53,6 +53,17 @@ const CONNECTION_LOSS_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * PostgreSQL SQLSTATEs for a transaction PostgreSQL aborted because of a concurrent one, not
+ * because the request is wrong: 40P01 deadlock_detected, 40001 serialization_failure. The whole
+ * transaction (domain writes, event, receipt) was rolled back, so retrying the identical request
+ * with the same Idempotency-Key is safe and normally succeeds.
+ */
+const TRANSIENT_CONFLICT_CODES: ReadonlySet<string> = new Set(['40P01', '40001']);
+
+/** Seconds a client should wait before retrying a transient conflict. */
+const TRANSIENT_CONFLICT_RETRY_AFTER_SECONDS = 1;
+
+/**
  * A client-supplied `x-correlation-id` is echoed and logged, so only a bounded opaque value (a
  * UUID) is accepted. Anything else (missing, empty, repeated, over-long, free text) is replaced
  * by a freshly generated ID, so a client cannot inject arbitrary content into logs.
@@ -65,7 +76,13 @@ export function resolveCorrelationId(header: string | string[] | undefined): str
  * Maps every thrown exception to the shared error envelope (PRD §24), the only shape a 4xx/5xx
  * JSON body may take from /v1. `retryable` follows §24: stale-revision conflicts (409) are retried
  * only after explicit user reconciliation, so they are NOT retryable; only dependency outages
- * (503) and rate limits (429) are.
+ * (503), rate limits (429), and transient transaction aborts (503 `TRANSIENT_CONFLICT`) are.
+ *
+ * Deadlocks and serialization failures map to 503 + `retryable: true` + `Retry-After`, not 409:
+ * §24 reserves 409 for revision/uniqueness conflicts, which the web client answers with the
+ * reconciliation UI (Keep Server / Save My Version) and never retries automatically. A deadlock is
+ * not a user conflict; the database was momentarily unable to apply a valid request, which is
+ * what 503 means in §24's list, and the save queue should simply retry with the same key.
  *
  * Logs only the error code, status, correlation ID, and the thrown value's constructor name
  * (NFR-PRIV-001): never `message`, `fieldErrors`, or stack text, which could carry user content.
@@ -212,6 +229,19 @@ export class AllExceptionsFilter implements ExceptionFilter {
       };
     }
 
+    if (isTransientConflict(exception)) {
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        envelope: {
+          code: 'TRANSIENT_CONFLICT',
+          message: 'The request collided with a concurrent change. Retry it',
+          retryable: true,
+          correlationId,
+        },
+        retryAfterSeconds: TRANSIENT_CONFLICT_RETRY_AFTER_SECONDS,
+      };
+    }
+
     if (isDependencyUnavailable(exception)) {
       return {
         status: HttpStatus.SERVICE_UNAVAILABLE,
@@ -253,6 +283,24 @@ function exposedHttpStatusOf(exception: unknown): number | undefined {
   return code >= 400 && code <= 599 ? code : undefined;
 }
 
+/** SQLSTATE codes on the error itself or on the driver error Sequelize wraps. */
+function sqlStatesOf(exception: unknown): string[] {
+  if (!(exception instanceof Error)) return [];
+  const withCodes = exception as Error & {
+    code?: unknown;
+    original?: { code?: unknown };
+    parent?: { code?: unknown };
+  };
+  return [withCodes.code, withCodes.original?.code, withCodes.parent?.code].filter(
+    (code): code is string => typeof code === 'string',
+  );
+}
+
+/** True when PostgreSQL aborted the transaction as a deadlock victim or serialization failure. */
+function isTransientConflict(exception: unknown): boolean {
+  return sqlStatesOf(exception).some((code) => TRANSIENT_CONFLICT_CODES.has(code));
+}
+
 /**
  * True when the database is unreachable rather than the query being wrong: any Sequelize
  * ConnectionError (refused, host not found, pool acquire timeout, ...), a Sequelize TimeoutError,
@@ -261,15 +309,8 @@ function exposedHttpStatusOf(exception: unknown): number | undefined {
 function isDependencyUnavailable(exception: unknown): boolean {
   if (exception instanceof DependencyUnavailableError) return true;
   if (exception instanceof ConnectionError || exception instanceof TimeoutError) return true;
-  if (!(exception instanceof Error)) return false;
-  const withCodes = exception as Error & {
-    code?: unknown;
-    original?: { code?: unknown };
-    parent?: { code?: unknown };
-  };
-  return [withCodes.code, withCodes.original?.code, withCodes.parent?.code].some(
-    (code) =>
-      typeof code === 'string' && (code.startsWith('08') || CONNECTION_LOSS_CODES.has(code)),
+  return sqlStatesOf(exception).some(
+    (code) => code.startsWith('08') || CONNECTION_LOSS_CODES.has(code),
   );
 }
 

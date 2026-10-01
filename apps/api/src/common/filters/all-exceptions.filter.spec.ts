@@ -219,6 +219,25 @@ describe('AllExceptionsFilter', () => {
     expect(run(error)).toStrictEqual(DEPENDENCY_UNAVAILABLE);
   });
 
+  it.each([
+    ['a deadlock victim (40P01)', new DatabaseError(pgError('40P01'))],
+    ['a serialization failure (40001)', new DatabaseError(pgError('40001'))],
+    ['an unwrapped deadlock (40P01)', pgError('40P01')],
+  ])('maps %s to 503 TRANSIENT_CONFLICT, retryable, with Retry-After', (_name, error) => {
+    expect(runWithHeaders(error)).toStrictEqual({
+      result: {
+        status: 503,
+        body: {
+          code: 'TRANSIENT_CONFLICT',
+          message: 'The request collided with a concurrent change. Retry it',
+          retryable: true,
+          correlationId: expect.stringMatching(UUID),
+        },
+      },
+      setHeaders: [['Retry-After', '1']],
+    });
+  });
+
   it('does not map an ordinary query error (e.g. unique violation 23505) to 503', () => {
     expect(run(new DatabaseError(pgError('23505'))).status).toBe(500);
   });
