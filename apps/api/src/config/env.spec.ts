@@ -4,6 +4,7 @@ import { loadEnv } from './env';
 describe('loadEnv', () => {
   it('splits CORS origins and applies defaults', () => {
     const env = loadEnv({
+      NODE_ENV: 'development',
       DATABASE_URL: 'postgres://localhost/x',
       CORS_ALLOWED_ORIGINS: 'http://a.test, http://b.test',
     });
@@ -12,12 +13,24 @@ describe('loadEnv', () => {
   });
 
   it('fails fast without DATABASE_URL', () => {
-    expect(() => loadEnv({})).toThrow(/DATABASE_URL/);
+    expect(() => loadEnv({ NODE_ENV: 'development' })).toThrow(/DATABASE_URL/);
+  });
+
+  it('fails closed without NODE_ENV instead of defaulting to development', () => {
+    expect(() => loadEnv({ DATABASE_URL: 'postgres://localhost/x' })).toThrow(
+      /NODE_ENV: is required \(development, test, or production\)/,
+    );
+  });
+
+  it('rejects an unknown NODE_ENV', () => {
+    expect(() => loadEnv({ DATABASE_URL: 'postgres://localhost/x', NODE_ENV: 'prod' })).toThrow(
+      /NODE_ENV: must be development, test, or production/,
+    );
   });
 });
 
 describe('loadEnv: email OTP and session settings', () => {
-  const base = { DATABASE_URL: 'postgres://localhost/x' };
+  const base = { NODE_ENV: 'development', DATABASE_URL: 'postgres://localhost/x' };
 
   it('defaults to the dev OTP provider and Secure cookies', () => {
     const env = loadEnv(base);
@@ -28,6 +41,12 @@ describe('loadEnv: email OTP and session settings', () => {
 
   it('refuses the dev OTP provider in production', () => {
     expect(() => loadEnv({ ...base, NODE_ENV: 'production', OTP_PROVIDER: 'dev' })).toThrow(
+      /OTP_PROVIDER: the dev OTP provider cannot run in production/,
+    );
+  });
+
+  it('refuses to start in production when OTP_PROVIDER is left at its dev default', () => {
+    expect(() => loadEnv({ ...base, NODE_ENV: 'production' })).toThrow(
       /OTP_PROVIDER: the dev OTP provider cannot run in production/,
     );
   });

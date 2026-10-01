@@ -4,7 +4,9 @@
  * keep one active code per email (a new send supersedes the previous one) and to make codes
  * single use. Attempt and resend limits are enforced by `AuthService` in PostgreSQL.
  *
- * Implementations must throw `DependencyUnavailableError` on outages/misconfiguration and must
+ * Implementations throw `DependencyUnavailableError` on transient outages (503),
+ * `RateLimitedError` when the provider rate-limits (429), `ValidationError` when the address
+ * can't receive a code (400), and a non-retryable error on misconfiguration (500). They must
  * never put the email, code, or credentials into thrown messages or logs (NFR-PRIV-001).
  */
 export interface OtpProvider {

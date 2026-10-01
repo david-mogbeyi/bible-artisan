@@ -7,7 +7,17 @@ const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'tr
 
 const envSchema = z
   .object({
-    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    /**
+     * Required, no default: production safety (dev OTP adapter refused, Secure cookies enforced)
+     * keys off `production`, so a deploy that forgot to set it must refuse to start rather than
+     * silently run as `development` (fail closed).
+     */
+    NODE_ENV: z.enum(['development', 'test', 'production'], {
+      error: (issue) =>
+        issue.input === undefined
+          ? 'is required (development, test, or production)'
+          : 'must be development, test, or production',
+    }),
     API_PORT: z.coerce.number().int().positive().default(4000),
     CORS_ALLOWED_ORIGINS: z
       .string()

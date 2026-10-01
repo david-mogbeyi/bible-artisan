@@ -320,6 +320,72 @@ describe('email OTP sign-in and sessions', () => {
     });
   });
 
+  describe('JSON-only mutations (login CSRF)', () => {
+    const UNSUPPORTED = envelope('UNSUPPORTED_MEDIA_TYPE', 'Unsupported Media Type');
+
+    it('refuses a form-encoded start with 415: no code sent, no challenge kept', async () => {
+      const email = newEmail();
+      const res = await http().post('/v1/auth/otp/start').type('form').send({ email }).expect(415);
+      expect(res.body).toStrictEqual(UNSUPPORTED);
+      expect(setCookie(res)).toBeUndefined();
+      expect(await AuthChallenge.count({ where: { normalizedEmail: email } })).toBe(0);
+      expect(provider.latestCodeFor(email)).toBeUndefined();
+    });
+
+    it.each([
+      ['form-encoded', 'application/x-www-form-urlencoded'],
+      ['text/plain (a JSON-looking form body)', 'text/plain'],
+      ['multipart', 'multipart/form-data; boundary=x'],
+    ])(
+      'refuses a %s verify with 415, sets no cookie, and keeps the code usable',
+      async (_label, contentType) => {
+        const email = newEmail();
+        const { challengeId, code } = await start(email);
+        const body =
+          contentType === 'text/plain'
+            ? JSON.stringify({ challengeId, code })
+            : contentType.startsWith('multipart')
+              ? `--x\r\nContent-Disposition: form-data; name="code"\r\n\r\n${code}\r\n--x--\r\n`
+              : new URLSearchParams({ challengeId, code }).toString();
+        const res = await http()
+          .post('/v1/auth/otp/verify')
+          .set('content-type', contentType)
+          .send(body)
+          .expect(415);
+        expect(res.body).toStrictEqual(UNSUPPORTED);
+        expect(setCookie(res)).toBeUndefined();
+
+        // The refused request never reached the handler: no attempt spent, JSON still works.
+        const challenge = await AuthChallenge.findByPk(challengeId, { rejectOnEmpty: true });
+        expect(challenge.attemptCount).toBe(0);
+        const ok = await http()
+          .post('/v1/auth/otp/verify')
+          .set('content-type', 'application/json; charset=utf-8')
+          .send(JSON.stringify({ challengeId, code }))
+          .expect(200);
+        sessionTokenFrom(ok);
+      },
+    );
+
+    it('refuses a cross-site form logout (no body) with 415 and keeps the session', async () => {
+      const token = await signIn(newEmail());
+      const res = await http()
+        .post('/v1/auth/logout')
+        .set('Cookie', cookie(token))
+        .set('content-type', 'application/x-www-form-urlencoded')
+        .expect(415);
+      expect(res.body).toStrictEqual(UNSUPPORTED);
+      expect(setCookie(res)).toBeUndefined();
+      await http().get('/v1/me').set('Cookie', cookie(token)).expect(200);
+      // The web client's JSON logout (Content-Type set, no body) still works.
+      await http()
+        .post('/v1/auth/logout')
+        .set('Cookie', cookie(token))
+        .set('content-type', 'application/json')
+        .expect(204);
+    });
+  });
+
   describe('session validity on /v1/me', () => {
     it.each([
       ['no cookie', undefined],
@@ -454,15 +520,18 @@ describe('email OTP sign-in and sessions', () => {
 class ScriptedProvider implements OtpProvider {
   sendFails = false;
   verifyFails = false;
+  verifyResult: OtpVerifyResult = { status: 'invalid' };
+  private sent = 0;
   send(): Promise<{ providerRef: string }> {
+    this.sent += 1;
     return this.sendFails
       ? Promise.reject(new DependencyUnavailableError())
-      : Promise.resolve({ providerRef: 'scripted-ref' });
+      : Promise.resolve({ providerRef: `scripted-ref-${this.sent}` });
   }
   verify(): Promise<OtpVerifyResult> {
     return this.verifyFails
       ? Promise.reject(new DependencyUnavailableError())
-      : Promise.resolve({ status: 'invalid' });
+      : Promise.resolve(this.verifyResult);
   }
 }
 
@@ -489,6 +558,7 @@ describe('email OTP provider outages', () => {
 
   afterAll(async () => {
     await AuthChallenge.destroy({ where: { normalizedEmail: { [Op.in]: emails } } });
+    await User.destroy({ where: { normalizedEmail: { [Op.in]: emails } } });
     await app.close();
   });
 
@@ -502,6 +572,57 @@ describe('email OTP provider outages', () => {
 
     provider.sendFails = false;
     await http().post('/v1/auth/otp/start').send({ email }).expect(202);
+  });
+
+  it('keeps the previous code verifiable when a resend fails to send', async () => {
+    const email = `${randomUUID()}@example.test`;
+    emails.push(email);
+    const started = await http().post('/v1/auth/otp/start').send({ email }).expect(202);
+    const { challengeId } = started.body as { challengeId: string };
+    const before = await AuthChallenge.findByPk(challengeId, { rejectOnEmpty: true });
+    // Past the 60 s resend window.
+    await before.update({ createdAt: new Date(before.createdAt.getTime() - 61_000) });
+
+    provider.sendFails = true;
+    await http().post('/v1/auth/otp/start').send({ email }).expect(503);
+    provider.sendFails = false;
+
+    const after = await AuthChallenge.findByPk(challengeId, { rejectOnEmpty: true });
+    expect(after.expiresAt).toStrictEqual(before.expiresAt);
+    expect(await AuthChallenge.count({ where: { normalizedEmail: email } })).toBe(1);
+    provider.verifyResult = { status: 'ok', subject: `scripted|${randomUUID()}` };
+    try {
+      const res = await http()
+        .post('/v1/auth/otp/verify')
+        .send({ challengeId, code: '123456' })
+        .expect(200);
+      expect(res.body).toStrictEqual({
+        id: expect.stringMatching(UUID),
+        email,
+        displayName: null,
+        timezone: 'UTC',
+      });
+    } finally {
+      provider.verifyResult = { status: 'invalid' };
+    }
+  });
+
+  it('supersedes the previous code only once a resend has been sent', async () => {
+    const email = `${randomUUID()}@example.test`;
+    emails.push(email);
+    const first = await http().post('/v1/auth/otp/start').send({ email }).expect(202);
+    const { challengeId } = first.body as { challengeId: string };
+    const old = await AuthChallenge.findByPk(challengeId, { rejectOnEmpty: true });
+    await old.update({ createdAt: new Date(old.createdAt.getTime() - 61_000) });
+
+    await http().post('/v1/auth/otp/start').send({ email }).expect(202);
+    const res = await http()
+      .post('/v1/auth/otp/verify')
+      .send({ challengeId, code: '123456' })
+      .expect(422);
+    expect(res.body).toStrictEqual(
+      envelope('OTP_EXPIRED', 'The code has expired or was already used'),
+    );
   });
 
   it('returns 503 when the code cannot be checked, without spending an attempt', async () => {

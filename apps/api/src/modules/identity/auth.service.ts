@@ -58,14 +58,9 @@ export class AuthService {
         const waitMs = latest.createdAt.getTime() + OTP_RESEND_INTERVAL_MS - now.getTime();
         if (waitMs > 0) throw new RateLimitedError(Math.ceil(waitMs / 1000));
       }
-      // A new code supersedes every earlier open challenge for this email.
-      await AuthChallenge.update(
-        { expiresAt: now },
-        {
-          where: { normalizedEmail: email, consumedAt: null, expiresAt: { [Op.gt]: now } },
-          transaction,
-        },
-      );
+      // Earlier open challenges are NOT superseded here: until the provider has actually sent the
+      // new code, the previous one is still the user's valid code. This unsent row (no
+      // provider_ref, so it can't be verified) holds the resend window against concurrent starts.
       return AuthChallenge.create(
         {
           normalizedEmail: email,
@@ -81,10 +76,30 @@ export class AuthService {
       ({ providerRef } = await this.provider.send(email));
     } catch (error) {
       // Nothing was sent: drop the challenge so it neither blocks an immediate retry nor verifies.
+      // Any earlier open challenge was left untouched, so its code still works.
       await challenge.destroy();
       throw error;
     }
-    await AuthChallenge.update({ providerRef }, { where: { id: challenge.id } });
+    await this.db.transaction(async (transaction) => {
+      await AuthChallenge.update({ providerRef }, { where: { id: challenge.id }, transaction });
+      // The new code is out (and the provider has invalidated the previous one), so it supersedes
+      // every earlier open challenge for this email. Scoped to rows created before this one, so a
+      // later start can never be expired by this one finishing late.
+      const supersededAt = new Date();
+      await AuthChallenge.update(
+        { expiresAt: supersededAt },
+        {
+          where: {
+            normalizedEmail: email,
+            id: { [Op.ne]: challenge.id },
+            createdAt: { [Op.lt]: challenge.createdAt },
+            consumedAt: null,
+            expiresAt: { [Op.gt]: supersededAt },
+          },
+          transaction,
+        },
+      );
+    });
 
     return {
       challengeId: challenge.id,
