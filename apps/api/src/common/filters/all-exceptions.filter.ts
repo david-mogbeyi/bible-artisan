@@ -14,6 +14,7 @@ import {
   UnauthenticatedError,
   ValidationError,
 } from '../errors/domain-errors';
+import { isUuid } from '../validation/uuid';
 
 /**
  * Minimal structural typing for the underlying HTTP request/response so this filter doesn't need
@@ -50,15 +51,13 @@ const CONNECTION_LOSS_CODES: ReadonlySet<string> = new Set([
   'EPIPE',
 ]);
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * A client-supplied `x-correlation-id` is echoed and logged, so only a bounded opaque value (a
  * UUID) is accepted. Anything else (missing, empty, repeated, over-long, free text) is replaced
  * by a freshly generated ID, so a client cannot inject arbitrary content into logs.
  */
 export function resolveCorrelationId(header: string | string[] | undefined): string {
-  return typeof header === 'string' && UUID_PATTERN.test(header) ? header : randomUUID();
+  return isUuid(header) ? header : randomUUID();
 }
 
 /**

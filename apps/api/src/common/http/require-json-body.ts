@@ -1,14 +1,9 @@
 import { UnsupportedMediaTypeException } from '@nestjs/common';
-
-interface RequestLike {
-  method: string;
-  headers: Record<string, string | string[] | undefined>;
-}
-
-const STATE_CHANGING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+import { isStateChangingMethod, type RequestLike } from './http-request';
 
 /**
- * True when a state-changing request must be refused because it is not JSON: it carries a body or
+ * True when a state-changing request (any method but GET/HEAD/OPTIONS, the same set
+ * `requireTrustedOrigin` checks) must be refused because it is not JSON: it carries a body or
  * a Content-Type, and that Content-Type is not `application/json`.
  *
  * Why: browsers send `application/x-www-form-urlencoded`, `multipart/form-data`, and `text/plain`
@@ -20,7 +15,7 @@ const STATE_CHANGING_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PAT
  * a non-browser client calling logout) are allowed.
  */
 export function isNonJsonMutation(req: RequestLike): boolean {
-  if (!STATE_CHANGING_METHODS.has(req.method.toUpperCase())) return false;
+  if (!isStateChangingMethod(req.method)) return false;
   const contentType = req.headers['content-type'];
   const hasBody =
     req.headers['transfer-encoding'] !== undefined ||

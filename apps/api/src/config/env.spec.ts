@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadEnv } from './env';
+import { httpAllowedOrigins, loadEnv } from './env';
 
 describe('loadEnv', () => {
   it('splits CORS origins and applies defaults', () => {
@@ -10,6 +10,73 @@ describe('loadEnv', () => {
     });
     expect(env.CORS_ALLOWED_ORIGINS).toEqual(['http://a.test', 'http://b.test']);
     expect(env.API_PORT).toBe(4000);
+  });
+
+  it('defaults the HTTP allowlist to the local web app outside production', () => {
+    const env = loadEnv({ NODE_ENV: 'development', DATABASE_URL: 'postgres://localhost/x' });
+    expect(env.CORS_ALLOWED_ORIGINS).toBeUndefined();
+    expect(httpAllowedOrigins(env)).toStrictEqual(['http://localhost:3000']);
+  });
+
+  it.each([
+    '*',
+    'https://*.bible.test',
+    'https://app.bible.test/',
+    'https://app.bible.test/path',
+    'HTTPS://APP.bible.test',
+    'app.bible.test',
+    'ftp://app.bible.test',
+    'http://localhost:3000, https://evil.test/x',
+    ' , ',
+  ])('refuses CORS_ALLOWED_ORIGINS=%j without echoing it', (value) => {
+    let message = '';
+    try {
+      loadEnv({
+        NODE_ENV: 'development',
+        DATABASE_URL: 'postgres://localhost/x',
+        CORS_ALLOWED_ORIGINS: value,
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/^Invalid environment configuration: CORS_ALLOWED_ORIGINS: /);
+    expect(message).not.toContain('bible.test');
+    expect(message).not.toContain('evil.test');
+  });
+
+  it('requires explicit https CORS origins in production', () => {
+    const production = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://localhost/x',
+      OTP_PROVIDER: 'stytch',
+      STYTCH_PROJECT_ID: 'p',
+      STYTCH_SECRET: 's',
+    };
+    // The HTTP API refuses to configure itself without an explicit allowlist (fail closed)...
+    expect(() => httpAllowedOrigins(loadEnv(production))).toThrow(
+      /CORS_ALLOWED_ORIGINS: is required in production for the HTTP API/,
+    );
+    expect(
+      httpAllowedOrigins(loadEnv({ ...production, CORS_ALLOWED_ORIGINS: 'https://a.test' })),
+    ).toStrictEqual(['https://a.test']);
+    // ...and an http origin is refused for any process that sets one.
+    expect(() =>
+      loadEnv({ ...production, CORS_ALLOWED_ORIGINS: 'https://app.example.com,http://x.test' }),
+    ).toThrow(/CORS_ALLOWED_ORIGINS: every origin must use https in production/);
+  });
+
+  it('loads the worker config in production without CORS_ALLOWED_ORIGINS (no HTTP surface)', () => {
+    // WorkerModule loads exactly this config (ConfigModule -> loadEnv) and never calls
+    // httpAllowedOrigins, so a production worker must start without the HTTP-only variable.
+    const env = loadEnv({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://localhost/x',
+      OTP_PROVIDER: 'stytch',
+      STYTCH_PROJECT_ID: 'p',
+      STYTCH_SECRET: 's',
+    });
+    expect(env.NODE_ENV).toBe('production');
+    expect(env.CORS_ALLOWED_ORIGINS).toBeUndefined();
   });
 
   it('fails fast without DATABASE_URL', () => {
@@ -70,8 +137,10 @@ describe('loadEnv: email OTP and session settings', () => {
       STYTCH_API_URL: 'https://api.stytch.com',
       STYTCH_PROJECT_ID: 'project-live-123',
       STYTCH_SECRET: 'secret-live-123',
+      CORS_ALLOWED_ORIGINS: 'https://app.example.com',
     });
     expect(env.OTP_PROVIDER).toBe('stytch');
+    expect(env.CORS_ALLOWED_ORIGINS).toEqual(['https://app.example.com']);
   });
 
   it('allows non-Secure cookies only outside production', () => {

@@ -5,6 +5,9 @@ import { z } from 'zod';
 /** 'true'/'false' env strings to booleans; anything else is a config error. */
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
+/** The local web app; the HTTP API's CORS/CSRF allowlist when CORS_ALLOWED_ORIGINS is unset outside production. */
+const DEV_WEB_ORIGIN = 'http://localhost:3000';
+
 const envSchema = z
   .object({
     /**
@@ -19,15 +22,16 @@ const envSchema = z
           : 'must be development, test, or production',
     }),
     API_PORT: z.coerce.number().int().positive().default(4000),
+    /**
+     * Browser origins allowed to call the API with credentials. They also gate every mutation
+     * (CSRF, `requireTrustedOrigin`), so each entry must be an exact bare origin. Only the HTTP
+     * API reads it, through `httpAllowedOrigins` (required there in production, local web app
+     * fallback elsewhere); the worker has no HTTP surface and may leave it unset.
+     */
     CORS_ALLOWED_ORIGINS: z
       .string()
-      .default('http://localhost:3000')
-      .transform((value) =>
-        value
-          .split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean),
-      ),
+      .optional()
+      .transform((value, ctx) => (value === undefined ? undefined : parseOrigins(value, ctx))),
     DATABASE_URL: z.url(),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'verbose']).default('info'),
     /** Email OTP adapter (BIB-10): `stytch` (managed provider) or `dev` (local/test only). */
@@ -62,7 +66,73 @@ const envSchema = z
         message: 'session cookies must be Secure in production',
       });
     }
+    if (
+      env.NODE_ENV === 'production' &&
+      env.CORS_ALLOWED_ORIGINS?.some((origin) => !origin.startsWith('https://'))
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ALLOWED_ORIGINS'],
+        message: 'every origin must use https in production',
+      });
+    }
   });
+
+/**
+ * The HTTP API's CORS + CSRF allowlist. Called by `configureApp` before the server listens, so an
+ * API process in production without CORS_ALLOWED_ORIGINS refuses to start (fail closed) instead of
+ * trusting the local dev origin. Kept out of `loadEnv` because the worker loads the same config
+ * and has no HTTP surface. The error never echoes configured values.
+ */
+export function httpAllowedOrigins(env: Env): string[] {
+  if (env.CORS_ALLOWED_ORIGINS !== undefined) return env.CORS_ALLOWED_ORIGINS;
+  if (env.NODE_ENV === 'production') {
+    throw new Error(
+      'Invalid environment configuration: CORS_ALLOWED_ORIGINS: is required in production for the HTTP API',
+    );
+  }
+  return [DEV_WEB_ORIGIN];
+}
+
+/**
+ * Splits a comma-separated origin list. Each entry must be a bare http(s) origin exactly as a
+ * browser sends it in the `Origin` header (`scheme://host[:port]`, lowercase, no path, no
+ * trailing slash, no wildcard), otherwise it could never match, or would match too much.
+ * Issues never echo the configured values.
+ */
+function parseOrigins(value: string, ctx: z.RefinementCtx): string[] {
+  const origins = value
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  if (origins.length === 0) {
+    ctx.addIssue({ code: 'custom', message: 'must list at least one origin' });
+  }
+  for (const origin of origins) {
+    if (!isBareHttpOrigin(origin)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'each origin must be a bare http(s) origin like https://app.example.com',
+      });
+      break;
+    }
+  }
+  return origins;
+}
+
+function isBareHttpOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    // `*.example.com` is a syntactically valid host to the URL parser; refuse wildcards outright.
+    return (
+      !value.includes('*') &&
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      url.origin === value
+    );
+  } catch {
+    return false;
+  }
+}
 
 export type Env = z.infer<typeof envSchema>;
 
