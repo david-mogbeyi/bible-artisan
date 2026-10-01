@@ -8,6 +8,8 @@ import {
   DependencyUnavailableError,
   IdempotencyKeyReusedError,
   NotFoundError,
+  NoteRuleError,
+  NoteTooLongError,
   OtpError,
   QuestionNotFoundError,
   RateLimitedError,
@@ -151,10 +153,23 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof QuestionNotFoundError ||
       exception instanceof StudyUnchangedError ||
       exception instanceof TagLimitExceededError ||
-      exception instanceof StudyLifecycleError
+      exception instanceof StudyLifecycleError ||
+      exception instanceof NoteRuleError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,
+        envelope: {
+          code: exception.code,
+          message: exception.message,
+          retryable: false,
+          correlationId,
+        },
+      };
+    }
+
+    if (exception instanceof NoteTooLongError) {
+      return {
+        status: HttpStatus.PAYLOAD_TOO_LARGE,
         envelope: {
           code: exception.code,
           message: exception.message,

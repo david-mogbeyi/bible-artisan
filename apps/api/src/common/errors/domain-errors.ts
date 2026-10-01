@@ -1,7 +1,16 @@
 import {
   type AnchorProblemCode,
   LIFECYCLE_TRANSITION_INVALID,
+  MAX_NOTE_CHARACTERS,
+  MAX_NOTES_PER_STUDY,
   MAX_STUDY_TAGS,
+  NOTE_LIMIT_EXCEEDED,
+  NOTE_NOT_TRASHED,
+  NOTE_TARGET_NOT_FOUND,
+  NOTE_TOO_LONG,
+  NOTE_TRASHED,
+  NOTE_UNCHANGED,
+  type NoteErrorCode,
   QUESTION_NOT_FOUND,
   REFERENCE_NOT_FOUND,
   type ReferenceErrorCode,
@@ -256,5 +265,39 @@ export class StudyLifecycleError extends Error {
   constructor(readonly code: StudyLifecycleErrorCode) {
     super(STUDY_LIFECYCLE_MESSAGES[code]);
     this.name = 'StudyLifecycleError';
+  }
+}
+
+const NOTE_MESSAGES: Record<NoteErrorCode, string> = {
+  [NOTE_TARGET_NOT_FOUND]: 'That item is not part of this study',
+  [NOTE_LIMIT_EXCEEDED]: `A study can have at most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} notes`,
+  [NOTE_UNCHANGED]: 'The note already has this content and version',
+  [NOTE_TRASHED]: 'This note is in the trash. Restore it to make changes',
+  [NOTE_NOT_TRASHED]: 'This note is not in the trash',
+};
+
+/**
+ * A note change the note's or study's state cannot apply (BIB-23; PRD section 24: 422): a target
+ * that is not a live node of the study (another user's, another study's, a deleted and an absent
+ * node are all the same), the per-study note cap, an edit that changes nothing, and trash/restore
+ * from the wrong state. Raised under the study lock, so nothing is written. Fixed messages.
+ */
+export class NoteRuleError extends Error {
+  constructor(readonly code: NoteErrorCode) {
+    super(NOTE_MESSAGES[code]);
+    this.name = 'NoteRuleError';
+  }
+}
+
+/**
+ * A note's derived plain text is longer than the documented limit (FR-NOTE-004, PRD section 15;
+ * section 24: 413 payload too large). Checked before any transaction, so nothing is written; the
+ * client keeps its draft. Fixed message naming the limit, never the content.
+ */
+export class NoteTooLongError extends Error {
+  readonly code = NOTE_TOO_LONG;
+  constructor() {
+    super(`A note can have at most ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters`);
+    this.name = 'NoteTooLongError';
   }
 }

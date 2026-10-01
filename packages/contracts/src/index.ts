@@ -10,3 +10,4 @@ export * from './user-text';
 export * from './study-edit';
 export * from './study-library';
 export * from './study-lifecycle';
+export * from './note';

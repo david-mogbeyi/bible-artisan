@@ -70,6 +70,16 @@ export type CreateStudyResponse = z.infer<typeof createStudyResponseSchema>;
 
 export const STUDY_LIFECYCLES = ['active', 'archived', 'trashed'] as const;
 
+/** PRD section 8: the six MVP node types (CHECK-constrained on `study_node.type`). */
+export const STUDY_NODE_TYPES = [
+  'scripture',
+  'question',
+  'observation',
+  'thought',
+  'conclusion',
+  'source',
+] as const;
+
 export const QUESTION_STATUSES = ['open', 'partially_answered', 'answered', 'deferred'] as const;
 
 /** A Question node as the study page shows it (the main or the original question). */

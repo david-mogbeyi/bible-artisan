@@ -29,7 +29,8 @@
     "sequelize-typescript": "2.1.6",
     "umzug": "3.8.3",
     "pg": "8.23.1",
-    "zod": "4.6.5"
+    "zod": "4.6.5",
+    "body-parser": "2.3.0"
   },
   "devDependencies": {
     "@nestjs/testing": "12.1.2",
@@ -42,6 +43,7 @@
     "@swc/cli": "0.8.1",
     "unplugin-swc": "2.0.0",
     "supertest": "7.3.0",
-    "@types/supertest": "7.2.1"
+    "@types/supertest": "7.2.1",
+    "@types/body-parser": "1.19.6"
   }
 }

@@ -30,6 +30,8 @@ interface StudyRow {
   lastActivityAt: Date;
   createdAt: Date;
   deletedAt: Date | null;
+  /** Some search word occurs in a live note of the study (BIB-23); false without a search. */
+  matchedInNotes: boolean;
   /** The sort value as the cursor carries it: microsecond UTC text, or the title sort key. */
   sortKey: string;
 }
@@ -94,8 +96,9 @@ function database(): Sequelize {
  * requests. `cursorKey` seals and opens cursors (`library-cursor.ts`).
  *
  * Search: every folded query word must be a substring (`strpos`, a plain bound string, never a
- * pattern) of the study's folded title and description or of one of its tag keys. The query
- * reaches SQL only as bind parameters.
+ * pattern) of the study's folded title and description, of one of its tag keys, or of the folded
+ * text of one of its live notes (BIB-23; trashed notes are not searched). The query reaches SQL
+ * only as bind parameters, and the note subqueries are scoped by the session owner like the rest.
  *
  * Bounded: at most `limit + 1` studies, then one query for their tags and one batched reference
  * lookup.
@@ -158,6 +161,7 @@ export async function listStudies(
       lastActivityAt: row.lastActivityAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
       purgeAt: row.deletedAt === null ? null : studyPurgeAt(row.deletedAt).toISOString(),
+      matchedInNotes: row.matchedInNotes,
     })),
     nextCursor,
   };
@@ -204,16 +208,26 @@ export function libraryQuery(
                 WHERE st.owner_id = $1 AND st.study_id = s.id AND st.tag_id = ${param(listing.tag)})`,
     );
   }
+  const liveNoteMatches = (word: string): string =>
+    `EXISTS (SELECT 1 FROM note n
+              WHERE n.owner_id = $1 AND n.study_id = s.id AND n.deleted_at IS NULL
+                AND strpos(n.search_text, ${word}) > 0)`;
+  const words: string[] = [];
   for (const token of listing.tokens) {
     const word = param(token);
+    words.push(word);
     filters.push(
       `(strpos(s.search_text, ${word}) > 0
         OR EXISTS (SELECT 1 FROM study_tag st
                      JOIN tag t ON t.owner_id = st.owner_id AND t.id = st.tag_id
                     WHERE st.owner_id = $1 AND st.study_id = s.id
-                      AND strpos(t.normalized_name, ${word}) > 0))`,
+                      AND strpos(t.normalized_name, ${word}) > 0)
+        OR ${liveNoteMatches(word)})`,
     );
   }
+  // "Found in notes" (PRD section 14: separate result labels): some word matched a live note.
+  const matchedInNotes =
+    words.length === 0 ? 'false' : `(${words.map(liveNoteMatches).join(' OR ')})`;
 
   const { order, direction, text, seekValue } = SORTS[listing.sort];
   const seek =
@@ -240,7 +254,8 @@ export function libraryQuery(
     groups.push(`(SELECT s.id, s.title, s.lifecycle, s.is_pinned AS pinned,
                 s.starting_reference_id AS "startingReferenceId",
                 s.last_activity_at AS "lastActivityAt", s.created_at AS "createdAt",
-                s.deleted_at AS "deletedAt", ${order} AS "sortValue", ${text} AS "sortKey"
+                s.deleted_at AS "deletedAt", ${matchedInNotes} AS "matchedInNotes",
+                ${order} AS "sortValue", ${text} AS "sortKey"
            FROM study s
           WHERE ${where.join('\n            AND ')}
           ORDER BY ${order} ${direction}, s.id ${direction}
@@ -248,7 +263,8 @@ export function libraryQuery(
   }
 
   const sql = `SELECT page.id, page.title, page.lifecycle, page.pinned, page."startingReferenceId",
-            page."lastActivityAt", page."createdAt", page."deletedAt", page."sortKey"
+            page."lastActivityAt", page."createdAt", page."deletedAt", page."matchedInNotes",
+            page."sortKey"
        FROM (${groups.join('\n         UNION ALL\n         ')}) page
       ORDER BY ${listing.pinnedFirst ? 'page.pinned DESC, ' : ''}page."sortValue"${listing.sort === 'title' ? ' COLLATE "C"' : ''} ${direction}, page.id ${direction}
       LIMIT ${limit}`;

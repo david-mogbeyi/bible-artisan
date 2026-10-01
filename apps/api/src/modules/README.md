@@ -23,6 +23,9 @@ Rules (see /AGENTS.md for the full list):
   (`now()` in SQL), never `new Date()`, and `archived_at` / `deleted_at` are written with it too.
 - Every study mutation follows the mutation contract below. See ADR 0001's BIB-12 addendum.
 - Controllers speak DTOs from `@bible-artisan/contracts`. Never return Sequelize model instances directly.
+- Mutation responses are stored on their Idempotency-Key receipt. Keep private text out of them
+  where the client already has it (BIB-23's note saves return ids, revision and counts, not the
+  note), so it does not linger in `mutation_receipt`.
 - Logging (BIB-13): every request already gets a correlation ID and one access line
   (`observability/request-logging.ts`), and every error one `http_error` line. Don't log request
   data yourself. If a module needs its own line, use Nest's `Logger` with a fixed message and

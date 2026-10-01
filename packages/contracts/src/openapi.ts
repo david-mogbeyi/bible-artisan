@@ -27,6 +27,22 @@ import {
 } from './anchor';
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema, livenessResponseSchema } from './health';
+import {
+  createNoteRequestSchema,
+  createNoteResponseSchema,
+  MAX_NOTE_CHARACTERS,
+  MAX_NOTE_VERSIONS,
+  MAX_NOTES_PER_STUDY,
+  NOTE_CHECKPOINT_INTERVAL_SECONDS,
+  NOTE_LIST_STATES,
+  noteListResponseSchema,
+  noteMutationResponseSchema,
+  noteResponseSchema,
+  noteStateRequestSchema,
+  noteVersionListResponseSchema,
+  noteVersionResponseSchema,
+  updateNoteRequestSchema,
+} from './note';
 import { createStudyRequestSchema, createStudyResponseSchema, studyResponseSchema } from './study';
 import {
   DEFAULT_LIBRARY_LIMIT,
@@ -61,7 +77,28 @@ export interface OpenApiDocument {
  */
 function toSchema(schema: z.ZodType): SchemaObject {
   const { $schema: _dialect, ...rest } = z.toJSONSchema(schema, { target: 'openapi-3.0' });
-  return rest;
+  return hoistDefinitions(rest);
+}
+
+/**
+ * Named recursive schemas (`meta({ id })`, e.g. the note document's `NoteBlock`) come out of the
+ * converter as local `definitions` referenced as `#/definitions/<id>`, which an OpenAPI document
+ * cannot resolve. They become shared components instead (each id converts identically wherever
+ * it appears), and their references point there.
+ */
+const hoisted: Record<string, SchemaObject> = {};
+
+function hoistDefinitions(converted: SchemaObject): SchemaObject {
+  const { definitions, ...rest } = converted as SchemaObject & {
+    definitions?: Record<string, SchemaObject>;
+  };
+  const relink = <T>(value: T): T =>
+    JSON.parse(JSON.stringify(value).replaceAll('"#/definitions/', '"#/components/schemas/')) as T;
+  for (const [id, definition] of Object.entries(definitions ?? {})) {
+    if (id.startsWith('__')) throw new Error(`openapi: name the recursive schema ${id} with meta`);
+    hoisted[id] = relink(definition);
+  }
+  return relink(rest);
 }
 
 /**
@@ -73,7 +110,7 @@ function toInputSchema(schema: z.ZodType): SchemaObject {
     target: 'openapi-3.0',
     io: 'input',
   });
-  return rest;
+  return hoistDefinitions(rest);
 }
 
 const ref = (name: string): { $ref: string } => ({ $ref: `#/components/schemas/${name}` });
@@ -120,6 +157,23 @@ const studyIdParam = {
   required: true,
   schema: { type: 'string', format: 'uuid' },
 };
+
+const uuidPathParam = (name: string): Record<string, unknown> => ({
+  name,
+  in: 'path',
+  required: true,
+  schema: { type: 'string', format: 'uuid' },
+});
+
+/** What every note route (BIB-23) shares about ownership. */
+const NOTE_OWNERSHIP =
+  "Another user's, an absent and a malformed study, note or version id, a note of another study, and a study trashed 30 or more days ago are the same 404.";
+
+/** What every note mutation (BIB-23) shares. */
+const NOTE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent (ids only) commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NOTE_OWNERSHIP}`;
+
+/** The note document rules (NFR-SEC-002), for the routes that take one. */
+const NOTE_DOCUMENT_RULES = `content is a Tiptap/ProseMirror document checked against an allowlist: paragraph, heading (level 1-3), bulletList, orderedList (start), listItem, blockquote, text and hardBreak nodes; bold, italic and link (href only, http or https, no credentials) marks. Anything else (another node, mark or attribute, HTML, an unsafe link, nesting deeper than 12 levels, more than 20,000 nodes) is 400 and nothing is stored. The server derives the plain text; more than ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters of it is 413 NOTE_TOO_LONG, and a body over 1 MiB is 413.`;
 
 /** What every lifecycle route (BIB-22) shares after its own first sentence. */
 const LIFECYCLE_RULES =
@@ -306,7 +360,7 @@ function buildDocument(): OpenApiDocument {
       '/studies': {
         get: {
           description:
-            "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. state=trashed is the Trash view: trashed studies still inside their 30-day recovery window, each with its purgeAt. No totals.",
+            "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description, one of the study's tag names, or the text of one of its live notes; matchedInNotes says a word was found in a note. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. state=trashed is the Trash view: trashed studies still inside their 30-day recovery window, each with its purgeAt. No totals.",
           security: sessionCookie,
           parameters: [
             queryParam('q', false, {
@@ -411,6 +465,95 @@ function buildDocument(): OpenApiDocument {
           'Restores a trashed study inside its recovery window to the state it was trashed from (archived if it was archived, else active), with its nodes, events and branches intact. study_restored.',
         ),
       },
+      '/studies/{studyId}/notes': {
+        post: {
+          description: `Creates a note on the study, or on one of its live nodes (targetNodeId; anything else is 422 NOTE_TARGET_NOT_FOUND), with version 1 (FR-NOTE-001). Creating a note is a study change: expectedRevision is the study's revision, which the creation bumps (studyRevision in the response); contentRevision moves. note_created. At most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} notes per study (422 NOTE_LIMIT_EXCEEDED). The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam],
+          requestBody: jsonBody('CreateNoteRequest'),
+          responses: {
+            201: jsonResponse('The new note, without its content', 'CreateNoteResponse'),
+            default: errorResponse,
+          },
+        },
+        get: {
+          description: `Lists the study's notes, most recently updated first: state=active (default) the live notes, state=trashed the note trash. Each has a plain-text preview and its target node (deleted: true marks a note whose node was deleted, kept for orphaned-note review, FR-NOTE-002). Archived and trashed studies stay readable. ${NOTE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [
+            studyIdParam,
+            queryParam('state', false, { type: 'string', enum: [...NOTE_LIST_STATES] }),
+          ],
+          responses: {
+            200: jsonResponse("The study's notes", 'NoteListResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/notes/{noteId}': {
+        get: {
+          description: `Returns one note with its content and target, live or in the note trash. ${NOTE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam, uuidPathParam('noteId')],
+          responses: {
+            200: jsonResponse('The note', 'NoteResponse'),
+            default: errorResponse,
+          },
+        },
+        patch: {
+          description: `Saves new content (an autosave) and/or a checkpoint. expectedRevision is the note's. A version is written for checkpoint: true, or when the content changed and the newest version is at least ${NOTE_CHECKPOINT_INTERVAL_SECONDS} seconds old by the database clock, never as a copy of the newest version; only the newest ${MAX_NOTE_VERSIONS} versions are kept. contentRevision moves only when a version is written. note_autosaved {noteId, versionId}. Nothing to change is 422 NOTE_UNCHANGED; a note in the trash is 422 NOTE_TRASHED. The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('noteId')],
+          requestBody: jsonBody('UpdateNoteRequest'),
+          responses: {
+            200: jsonResponse('The note as saved, without its content', 'NoteMutationResponse'),
+            default: errorResponse,
+          },
+        },
+        delete: {
+          description: `Moves the note to the note trash (reversible with restore); it stays readable. A note already in the trash is 422 NOTE_TRASHED. note_trashed. ${NOTE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('noteId')],
+          requestBody: jsonBody('NoteStateRequest'),
+          responses: {
+            200: jsonResponse('The note in the trash', 'NoteMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/notes/{noteId}/restore': {
+        post: {
+          description: `Restores a note from the note trash with its content and versions. A live note is 422 NOTE_NOT_TRASHED. note_restored. ${NOTE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('noteId')],
+          requestBody: jsonBody('NoteStateRequest'),
+          responses: {
+            200: jsonResponse('The restored note', 'NoteMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/notes/{noteId}/versions': {
+        get: {
+          description: `Lists the note's kept versions, newest first, with previews. ${NOTE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam, uuidPathParam('noteId')],
+          responses: {
+            200: jsonResponse('The versions', 'NoteVersionListResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/notes/{noteId}/versions/{versionId}': {
+        get: {
+          description: `Returns one version of the note with its content. Restoring it is a PATCH of that content with checkpoint: true. ${NOTE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam, uuidPathParam('noteId'), uuidPathParam('versionId')],
+          responses: {
+            200: jsonResponse('The version', 'NoteVersionResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/bible/translations': {
         get: {
           description:
@@ -468,6 +611,17 @@ function buildDocument(): OpenApiDocument {
         UpdateStudyRequest: toInputSchema(updateStudyRequestSchema),
         UpdateStudyResponse: toSchema(updateStudyResponseSchema),
         StudyLifecycleRequest: toSchema(studyLifecycleRequestSchema),
+        CreateNoteRequest: toSchema(createNoteRequestSchema),
+        CreateNoteResponse: toSchema(createNoteResponseSchema),
+        UpdateNoteRequest: toSchema(updateNoteRequestSchema),
+        NoteStateRequest: toSchema(noteStateRequestSchema),
+        NoteMutationResponse: toSchema(noteMutationResponseSchema),
+        NoteResponse: toSchema(noteResponseSchema),
+        NoteListResponse: toSchema(noteListResponseSchema),
+        NoteVersionListResponse: toSchema(noteVersionListResponseSchema),
+        NoteVersionResponse: toSchema(noteVersionResponseSchema),
+        // Filled while the entries above were converted.
+        ...hoisted,
       },
     },
   };
