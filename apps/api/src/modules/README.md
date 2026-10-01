@@ -13,4 +13,7 @@ Rules (see /AGENTS.md for the full list):
   (owner from `@CurrentUserId()`, IDs through `ParseResourceIdPipe`); absent and foreign IDs
   are the same 404. Children are queried by `id` + `study_id` + `owner_id`, never by ID alone.
   Every new route goes into `test/route-inventory.int-spec.ts` with its cross-user test.
+- Mutations run through `MutationService.execute` (Idempotency-Key receipt, one transaction),
+  check revisions with `updateWithExpectedRevision`, and append events with
+  `ThreadService.appendEvent` inside that transaction. See ADR 0001's BIB-12 addendum.
 - Controllers speak DTOs from `@bible-artisan/contracts`. Never return Sequelize model instances directly.

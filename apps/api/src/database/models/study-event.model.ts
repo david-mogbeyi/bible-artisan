@@ -5,10 +5,10 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
  * (`study_id` + `owner_id` → `study(owner_id, id)`, declared in the migration's raw SQL).
  * Nullability and defaults mirror the migration.
  *
- * This ticket keeps the table to the minimal columns that prove the append-only,
- * composite-FK, per-study `sequence` shape. The transactional sequence allocator, idempotent
- * replay columns (`client_mutation_id`, `correlation_id`), and the rest of the event taxonomy
- * belong to BIB-12 and its siblings — this ticket never writes a row through application code.
+ * Rows are written only by `ThreadService.appendEvent` (BIB-12), inside the mutation's
+ * transaction, with `sequence` allocated from `study.last_event_sequence`. The activity-dedupe
+ * columns (`client_mutation_id`, `correlation_id`) and the rest of the event taxonomy belong to
+ * BIB-55.
  */
 @Table({ tableName: 'study_event', timestamps: false })
 export class StudyEvent extends Model {

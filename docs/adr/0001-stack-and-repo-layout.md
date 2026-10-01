@@ -95,6 +95,31 @@ A synchronizer or double-submit token would add web and API plumbing without clo
 
 **Safe URLs.** `httpUrlSchema` in `@bible-artisan/contracts` accepts only http/https URLs without credentials or embedded whitespace/control characters (NFR-SEC-002). Every stored URL (note links in BIB-23, Source URLs) must use it. The Tiptap allowlist schema and link `rel` rendering belong to BIB-23.
 
+## Addendum (2026-10-01, BIB-12): revisions, idempotency, and event sequences
+
+Every study mutation route reuses one pipeline; none builds its own variant:
+
+```ts
+const expectedRevision = requireExpectedRevision(mutation.body); // 400 / 428, before anything else
+const body = parseBody(schema, mutation.body);
+const result = await mutations.execute(ownerId, mutation, async (tx) => {
+  const row = await updateWithExpectedRevision(Model, { where: { id, ownerId, ... }, expectedRevision, values, transaction: tx }); // 404 / 409
+  await studyRevisions.bumpContentRevision(tx, ownerId, studyId);
+  await thread.appendEvent(tx, { ownerId, studyId, eventType });
+  return { status: 200, body: dto };
+});
+return sendMutationResult(res, result); // `@MutationRequest()` + `@Res({ passthrough: true })`
+```
+
+- **Conflict detection is one conditional statement**: `UPDATE … SET revision = revision + 1 WHERE … AND revision = :expected RETURNING *`. Concurrent writers with the same expected revision queue on the row lock, and PostgreSQL re-evaluates the losers' WHERE against the committed row, so they match nothing (no lost update, no explicit lock, no SERIALIZABLE retries). Zero rows → owner-scoped re-read: absent → 404, present → 409 with `currentRevision`.
+- **Event sequences come from a counter column**, `study.last_event_sequence` (PRD §23 "transactional per-study counter"), bumped with `UPDATE … RETURNING` in the mutation's transaction. Writers to one study serialize on the study row until commit, and a rollback undoes its increment, so committed sequences are 1..N with no gaps; unique `(study_id, sequence)` stays as the backstop. `bigint` comes back from pg as a decimal string and stays a string, in TypeScript and on the wire (`eventSequenceSchema`).
+- **Lock order** inside a mutation: receipt claim → study row (study revision update, `bumpContentRevision`, `nextEventSequence`) → child rows. A child update bumps the study content revision first.
+- **Receipts** (`mutation_receipt`, PK `(owner_id, idempotency_key)`, so keys never collide or replay across users). `MutationService.execute` runs everything in one transaction and resolves only after COMMIT, so nothing is acknowledged before it is durable (NFR-REL-001). It claims the receipt first with `INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= now()`. A concurrent duplicate blocks on the first request's uncommitted unique-index entry and then replays (committed) or runs (rolled back), so there is no "in progress" state and no double execution. Failed work rolls the receipt back with everything else, so errors are never cached. Same key with a different request → 422 `IDEMPOTENCY_KEY_REUSED` (the IETF idempotency-key draft's status for this; PRD §24 lists 422 for a request that cannot be applied in the current state). Replays carry `Idempotent-Replayed: true`. Receipts live 7 days (PRD §23); an expired key can be claimed again, and physical purge waits for the job runner (BIB-39).
+- **Request fingerprint**: SHA-256 hex of canonical JSON of `{ method, path, body }`, where `path` excludes the query string, `body` is the raw parsed JSON (not the Zod output, so every submitted field counts, `expectedRevision` included), and canonical JSON sorts object keys recursively, keeps array order, and drops `undefined` members.
+- `Idempotency-Key` is optional per PRD §24 ("accept"), must be a UUID when sent, and is stored lower-cased. A request without one is not deduplicated, so the web save coordinator (BIB-35) must always send one.
+- `mutation_receipt` is owned by `src/common/mutation/MutationModule`, not a domain module: it is owner-scoped rather than study-scoped (POST /studies has no study yet) and every domain module writes through it.
+- `study_event.client_mutation_id` and the activity endpoint's dedupe are BIB-55's; domain-mutation retries are already deduplicated by the receipt.
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

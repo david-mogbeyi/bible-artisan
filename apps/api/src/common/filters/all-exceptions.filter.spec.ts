@@ -16,6 +16,7 @@ import {
 import { AllExceptionsFilter, resolveCorrelationId } from './all-exceptions.filter';
 import {
   DependencyUnavailableError,
+  IdempotencyKeyReusedError,
   NotFoundError,
   OtpError,
   RateLimitedError,
@@ -155,6 +156,18 @@ describe('AllExceptionsFilter', () => {
     expect(run(new OtpError(code))).toStrictEqual({
       status: 422,
       body: { code, message, retryable: false, correlationId: expect.stringMatching(UUID) },
+    });
+  });
+
+  it('maps IdempotencyKeyReusedError to 422 with a fixed message, not retryable', () => {
+    expect(run(new IdempotencyKeyReusedError())).toStrictEqual({
+      status: 422,
+      body: {
+        code: 'IDEMPOTENCY_KEY_REUSED',
+        message: 'This Idempotency-Key was already used for a different request',
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+      },
     });
   });
 

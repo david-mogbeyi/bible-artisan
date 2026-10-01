@@ -6,6 +6,7 @@ import { STATUS_CODES } from 'node:http';
 import { ConnectionError, TimeoutError } from 'sequelize';
 import {
   DependencyUnavailableError,
+  IdempotencyKeyReusedError,
   NotFoundError,
   OtpError,
   RateLimitedError,
@@ -117,7 +118,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       };
     }
 
-    if (exception instanceof OtpError) {
+    if (exception instanceof OtpError || exception instanceof IdempotencyKeyReusedError) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,
         envelope: {

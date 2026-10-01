@@ -1,9 +1,15 @@
 import { Module } from '@nestjs/common';
+import { StudyModule } from '../study/study.module';
+import { ThreadService } from './thread.service';
 
 /**
- * Thread bounded context (PRD §26). Owns `study_event` and the transactional per-study sequence
- * allocator that Graph/Notes call inside their own mutation transactions. Placeholder module — the
- * allocator and idempotency utilities ship with BIB-12.
+ * Thread bounded context (PRD §26). Owns `study_event`. Exports `ThreadService`, which Graph,
+ * Notes, and Study call inside their own mutation transactions to append the matching event
+ * (sequence allocated through Study's `StudyRevisionService`).
  */
-@Module({})
+@Module({
+  imports: [StudyModule],
+  providers: [ThreadService],
+  exports: [ThreadService],
+})
 export class ThreadModule {}

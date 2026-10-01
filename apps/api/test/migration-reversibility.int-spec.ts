@@ -9,6 +9,7 @@ import { createMigrator, MIGRATIONS_DIR } from '../src/database/migrator';
 const DOMAIN_TABLES = [
   'auth_challenge',
   'auth_session',
+  'mutation_receipt',
   'study',
   'study_event',
   'study_node',

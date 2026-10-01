@@ -48,6 +48,20 @@ export class RevisionConflictError extends Error {
   }
 }
 
+/**
+ * An Idempotency-Key was reused with a different request (method, path, or body) by the same
+ * owner (PRD §23 MutationReceipt: "Reject reuse with a different request body"). Mapped to 422:
+ * the key is in a state that cannot accept this request. A changed request needs a new key.
+ * Fixed message; never echoes the key or body.
+ */
+export class IdempotencyKeyReusedError extends Error {
+  readonly code = 'IDEMPOTENCY_KEY_REUSED';
+  constructor(message = 'This Idempotency-Key was already used for a different request') {
+    super(message);
+    this.name = 'IdempotencyKeyReusedError';
+  }
+}
+
 /** No valid session on a route that requires one (PRD §24: 401). */
 export class UnauthenticatedError extends Error {
   readonly code = 'UNAUTHENTICATED';
