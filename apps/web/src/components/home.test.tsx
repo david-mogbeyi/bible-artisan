@@ -23,7 +23,9 @@ beforeEach(() => {
   fetchMock = vi.fn((input: string) => {
     if (input.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
     if (input.endsWith('/health')) {
-      return Promise.resolve(jsonResponse(200, { status: 'ok', database: 'ok' }));
+      return Promise.resolve(
+        jsonResponse(200, { status: 'ok', database: 'up', migrations: 'current' }),
+      );
     }
     if (input.endsWith('/auth/logout')) {
       const next = logoutResponses.shift();
@@ -42,6 +44,7 @@ afterEach(() => {
 async function renderSignedIn() {
   const rendered = renderWithQuery(<Home />);
   await screen.findByText('Signed in as reader@example.test');
+  await screen.findByText('API ok · database up');
   return rendered;
 }
 

@@ -18,6 +18,7 @@ import { OTP_PROVIDER, type OtpProvider } from '../src/modules/identity/otp/otp-
 import { SessionService } from '../src/modules/identity/session.service';
 import { createAppLogger } from '../src/modules/observability/logger';
 import { createTestApp } from './app';
+import { envelope, NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
 import { MutationProbeModule } from './support/mutation-probe';
 import { OwnerIsolationProbeModule } from './support/owner-isolation-probe';
 
@@ -41,8 +42,9 @@ const ERROR_KEYS = new Set([...LOGGER_KEYS, 'code', 'status', 'correlationId', '
 type LogEntry = Record<string, unknown>;
 
 interface ExpectedError {
-  code: string;
   errorType: string;
+  /** The whole error envelope the client gets, minus its correlation ID (the request's). */
+  body: Record<string, unknown>;
 }
 
 /**
@@ -66,10 +68,16 @@ describe('content-redacted operational logs', () => {
   const otpEmails: string[] = [];
   const captured: string[] = [];
   const sentinels: string[] = [];
+  /** The sentinels a client sent (as opposed to real secrets the flow returns to their owner). */
+  const inputs: string[] = [];
   const spies: MockInstance[] = [];
 
   /** A unique private string; registered so the leak check looks for it. */
-  const secret = (label: string): string => track(`SENTINEL-${label}-${randomUUID()}`);
+  const secret = (label: string): string => {
+    const value = track(`SENTINEL-${label}-${randomUUID()}`);
+    inputs.push(value);
+    return value;
+  };
   function track(value: string): string {
     sentinels.push(value);
     return value;
@@ -109,16 +117,37 @@ describe('content-redacted operational logs', () => {
     return sentinels.filter((value) => output.includes(value.toLowerCase()));
   }
 
+  /**
+   * Sentinels a response body echoes. An error body may echo none at all; a success body may
+   * return the owner's own data (their email, a study ID) but never anything the client sent.
+   */
+  function echoed(res: Response): string[] {
+    const body = res.text.toLowerCase();
+    return (res.status >= 400 ? sentinels : inputs).filter((value) =>
+      body.includes(value.toLowerCase()),
+    );
+  }
+
   /** Waits for, then returns, the lines logged for one request (by its correlation ID). */
   async function linesFor(res: Response): Promise<{ access: LogEntry; errors: LogEntry[] }> {
-    const correlationId = res.headers[CORRELATION_ID_HEADER.toLowerCase()];
+    const correlationId = res.headers[CORRELATION_ID_HEADER.toLowerCase()] as string;
     expect(correlationId).toMatch(/^[0-9a-f-]{36}$/);
-    return vi.waitFor(() => {
-      const mine = entries().filter((entry) => entry.correlationId === correlationId);
-      const access = mine.filter((entry) => entry.message === 'http_request');
-      if (access.length !== 1) throw new Error(`expected 1 access line, got ${access.length}`);
-      return { access: access[0] as LogEntry, errors: mine.filter((e) => e !== access[0]) };
-    });
+    return linesForId(correlationId);
+  }
+
+  function linesForId(
+    correlationId: string,
+    timeout = 1000,
+  ): Promise<{ access: LogEntry; errors: LogEntry[] }> {
+    return vi.waitFor(
+      () => {
+        const mine = entries().filter((entry) => entry.correlationId === correlationId);
+        const access = mine.filter((entry) => entry.message === 'http_request');
+        if (access.length !== 1) throw new Error(`expected 1 access line, got ${access.length}`);
+        return { access: access[0] as LogEntry, errors: mine.filter((e) => e !== access[0]) };
+      },
+      { timeout },
+    );
   }
 
   /** Asserts the request's whole log output: one access line, and an error line iff expected. */
@@ -149,7 +178,7 @@ describe('content-redacted operational logs', () => {
               timestamp: expect.any(Number),
               message: 'http_error',
               context: 'AllExceptionsFilter',
-              code: error.code,
+              code: error.body.code,
               status: access.status,
               correlationId,
               errorType: error.errorType,
@@ -157,9 +186,8 @@ describe('content-redacted operational logs', () => {
           ]
         : [],
     );
-    if (error) {
-      expect((res.body as { correlationId?: unknown }).correlationId).toBe(correlationId);
-    }
+    if (error) expect(res.body).toStrictEqual({ ...error.body, correlationId });
+    expect(echoed(res)).toStrictEqual([]);
     expect(leaks()).toStrictEqual([]);
   }
 
@@ -224,7 +252,10 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       res,
       { method: 'GET', route: 'unmatched', status: 404 },
-      { code: 'NOT_FOUND', errorType: 'NotFoundException' },
+      {
+        errorType: 'NotFoundException',
+        body: envelope({ code: 'NOT_FOUND', message: 'Not Found' }),
+      },
     );
   });
 
@@ -233,7 +264,7 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       res,
       { method: 'GET', route: '/v1/me', status: 401 },
-      { code: 'UNAUTHENTICATED', errorType: 'UnauthenticatedError' },
+      { errorType: 'UnauthenticatedError', body: UNAUTHENTICATED },
     );
   });
 
@@ -269,7 +300,14 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       badEmail,
       { method: 'POST', route: '/v1/auth/otp/start', status: 400 },
-      { code: 'VALIDATION', errorType: 'ValidationError' },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { email: ['Enter a valid email address'] },
+        }),
+      },
     );
 
     const badCode = await withPrivateChannels(http().post('/v1/auth/otp/verify')).send({
@@ -279,7 +317,14 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       badCode,
       { method: 'POST', route: '/v1/auth/otp/verify', status: 400 },
-      { code: 'VALIDATION', errorType: 'ValidationError' },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { challengeId: ['Invalid UUID'], code: ['Enter the 6-digit code'] },
+        }),
+      },
     );
   });
 
@@ -290,7 +335,10 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       res,
       { method: 'POST', route: 'unmatched', status: 403 },
-      { code: 'FORBIDDEN', errorType: 'ForbiddenException' },
+      {
+        errorType: 'ForbiddenException',
+        body: envelope({ code: 'FORBIDDEN', message: 'Forbidden' }),
+      },
     );
   });
 
@@ -301,7 +349,10 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       res,
       { method: 'POST', route: 'unmatched', status: 415 },
-      { code: 'UNSUPPORTED_MEDIA_TYPE', errorType: 'UnsupportedMediaTypeException' },
+      {
+        errorType: 'UnsupportedMediaTypeException',
+        body: envelope({ code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Unsupported Media Type' }),
+      },
     );
   });
 
@@ -312,7 +363,10 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       res,
       { method: 'POST', route: 'unmatched', status: 413 },
-      { code: 'PAYLOAD_TOO_LARGE', errorType: 'PayloadTooLargeError' },
+      {
+        errorType: 'PayloadTooLargeError',
+        body: envelope({ code: 'PAYLOAD_TOO_LARGE', message: 'Payload Too Large' }),
+      },
     );
   });
 
@@ -323,7 +377,10 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       res,
       { method: 'POST', route: 'unmatched', status: 400 },
-      { code: 'BAD_REQUEST', errorType: 'BadRequestException' },
+      {
+        errorType: 'BadRequestException',
+        body: envelope({ code: 'BAD_REQUEST', message: 'Bad Request' }),
+      },
     );
   });
 
@@ -335,7 +392,7 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       res,
       { method: 'GET', route: '/v1/__test/studies/:studyId', status: 404 },
-      { code: 'NOT_FOUND', errorType: 'NotFoundError' },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
     );
   });
 
@@ -357,7 +414,14 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       stale,
       { method: 'POST', route, status: 409 },
-      { code: 'REVISION_CONFLICT', errorType: 'RevisionConflictError' },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 2,
+        }),
+      },
     );
 
     const failed = await mutate(
@@ -367,22 +431,71 @@ describe('content-redacted operational logs', () => {
     await expectLogged(
       failed,
       { method: 'POST', route, status: 500 },
-      { code: 'INTERNAL_ERROR', errorType: 'ProbeFailure' },
+      {
+        errorType: 'ProbeFailure',
+        body: envelope({ code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' }),
+      },
     );
 
     const badKey = await mutate({ expectedRevision: 2, title: secret('title') }, secret('key'));
     await expectLogged(
       badKey,
       { method: 'POST', route, status: 400 },
-      { code: 'VALIDATION', errorType: 'ValidationError' },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { 'Idempotency-Key': ['Must be a UUID'] },
+        }),
+      },
     );
+  });
+
+  it('logs a request the client aborted with no status, never a default 200', async () => {
+    const correlationId = randomUUID();
+    // The probe holds its transaction for 1 s; the client gives up after 200 ms.
+    const aborted = await withPrivateChannels(
+      http().post(`/v1/__test/studies/${studyId}/mutations${query()}`),
+      cookie,
+    )
+      .set('x-correlation-id', correlationId)
+      .set('Idempotency-Key', track(randomUUID()))
+      .timeout(200)
+      .send({ expectedRevision: 2, title: secret('title'), pauseMs: 1000 })
+      .then(
+        () => 'answered',
+        (error: { code?: string; timeout?: number }) => error.timeout ?? error.code,
+      );
+    expect(aborted).toBe(200);
+
+    const { access, errors } = await linesForId(correlationId, 3000);
+    expect(access).toStrictEqual({
+      level: 'log',
+      pid: expect.any(Number),
+      timestamp: expect.any(Number),
+      message: 'http_request',
+      context: 'HttpRequest',
+      method: 'POST',
+      route: '/v1/__test/studies/:studyId/mutations',
+      status: null,
+      durationMs: expect.any(Number),
+      correlationId,
+      aborted: true,
+    });
+    expect(errors).toStrictEqual([]);
+    // The server still finishes the mutation; wait for its commit before cleanup runs.
+    await vi.waitFor(async () => expect((await Study.findByPk(studyId))?.revision).toBe(3), {
+      timeout: 3000,
+    });
+    expect(leaks()).toStrictEqual([]);
   });
 
   it('uses one correlation ID per request across header, envelope, and every log line', async () => {
     const supplied = randomUUID();
     const res = await http().get('/v1/me').set('x-correlation-id', supplied).expect(401);
     expect(res.headers[CORRELATION_ID_HEADER.toLowerCase()]).toBe(supplied);
-    expect((res.body as { correlationId: string }).correlationId).toBe(supplied);
+    expect(res.body).toStrictEqual({ ...UNAUTHENTICATED, correlationId: supplied });
     const { access, errors } = await linesFor(res);
     expect([access, ...errors].map((entry) => entry.correlationId)).toStrictEqual([
       supplied,

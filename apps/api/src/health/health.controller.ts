@@ -1,12 +1,16 @@
-import { Controller, Get, Header, HttpStatus, Inject, Logger, Res } from '@nestjs/common';
+import { Controller, Get, Header, HttpStatus, Inject, Res } from '@nestjs/common';
 import type { HealthResponse, LivenessResponse } from '@bible-artisan/contracts';
-import { DATABASE } from '../database/database.module';
-import type { Database } from '../database/database';
 import { Public } from '../modules/identity/public.decorator';
-import { checkReadiness } from './readiness';
+import { ReadinessProbe } from './readiness';
 
 /** Migration names shipped with this build (`shippedMigrationNames()`), read once at startup. */
 export const SHIPPED_MIGRATIONS = Symbol('SHIPPED_MIGRATIONS');
+
+/**
+ * pg connection config for the readiness probe's own client (`{ connectionString }` from
+ * DATABASE_URL): the same database as the request pool, but never the pool itself.
+ */
+export const READINESS_CONNECTION = Symbol('READINESS_CONNECTION');
 
 /** The slice of the Express response the readiness route needs to set its status. */
 interface StatusResponse {
@@ -20,12 +24,7 @@ interface StatusResponse {
 @Public()
 @Controller('health')
 export class HealthController {
-  private readonly logger = new Logger('Health');
-
-  constructor(
-    @Inject(DATABASE) private readonly db: Database,
-    @Inject(SHIPPED_MIGRATIONS) private readonly shippedMigrations: readonly string[],
-  ) {}
+  constructor(@Inject(ReadinessProbe) private readonly readiness: ReadinessProbe) {}
 
   /** Liveness: answers whenever the process serves HTTP. Deliberately no database access. */
   @Get('live')
@@ -38,19 +37,13 @@ export class HealthController {
    * Readiness: 200 only when the database answers within the timeout and every shipped migration
    * is applied; otherwise 503 with the same body shape, so the platform marks the deployment
    * unhealthy. A probe status report rather than an API error, so it is not the error envelope.
+   * Single-flight and briefly cached (`ReadinessProbe`), which logs failed checks.
    */
   @Get()
   @Header('Cache-Control', 'no-store')
   async ready(@Res({ passthrough: true }) res: StatusResponse): Promise<HealthResponse> {
-    const { report, failure } = await checkReadiness(this.db, this.shippedMigrations);
-    if (report.status !== 'ok') {
-      res.status(HttpStatus.SERVICE_UNAVAILABLE);
-      this.logger.warn('readiness_failed', {
-        database: report.database,
-        migrations: report.migrations,
-        failure,
-      });
-    }
+    const { report } = await this.readiness.check();
+    if (report.status !== 'ok') res.status(HttpStatus.SERVICE_UNAVAILABLE);
     return report;
   }
 }

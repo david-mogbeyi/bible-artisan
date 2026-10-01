@@ -2,6 +2,20 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 
+/**
+ * Invalid process configuration. The message names each offending variable and why, never its
+ * value. `variables` holds the names alone, for the content-free startup failure log.
+ */
+export class InvalidConfigError extends Error {
+  constructor(
+    readonly variables: readonly string[],
+    detail: string,
+  ) {
+    super(`Invalid environment configuration: ${detail}`);
+    this.name = 'InvalidConfigError';
+  }
+}
+
 /** 'true'/'false' env strings to booleans; anything else is a config error. */
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
@@ -87,8 +101,9 @@ const envSchema = z
 export function httpAllowedOrigins(env: Env): string[] {
   if (env.CORS_ALLOWED_ORIGINS !== undefined) return env.CORS_ALLOWED_ORIGINS;
   if (env.NODE_ENV === 'production') {
-    throw new Error(
-      'Invalid environment configuration: CORS_ALLOWED_ORIGINS: is required in production for the HTTP API',
+    throw new InvalidConfigError(
+      ['CORS_ALLOWED_ORIGINS'],
+      'CORS_ALLOWED_ORIGINS: is required in production for the HTTP API',
     );
   }
   return [DEV_WEB_ORIGIN];
@@ -144,8 +159,11 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   }
   const parsed = envSchema.safeParse(source);
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
-    throw new Error(`Invalid environment configuration: ${issues}`);
+    const { issues } = parsed.error;
+    throw new InvalidConfigError(
+      [...new Set(issues.map((i) => i.path.join('.')))],
+      issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+    );
   }
   return parsed.data;
 }

@@ -14,6 +14,7 @@ export interface LoggedRequest {
 /** The slice of an Express response the access log reads. */
 export interface LoggedResponse {
   statusCode: number;
+  headersSent: boolean;
   writableFinished: boolean;
   setHeader(name: string, value: string): unknown;
   once(event: 'finish' | 'close', listener: () => void): unknown;
@@ -29,7 +30,11 @@ export interface AccessLogFields {
   method: string;
   /** Matched route pattern (`/v1/studies/:studyId`), or `unmatched` when no route handled it. */
   route: string;
-  status: number;
+  /**
+   * The status the client was sent. `null` when the client went away before any response headers
+   * were written: nothing was sent, and Express's default `statusCode` (200) would be a lie.
+   */
+  status: number | null;
   durationMs: number;
   correlationId: string;
   /** Present (true) only when the client went away before the response finished. */
@@ -67,7 +72,7 @@ export function accessLogFields(
   return {
     method: loggedMethod(req.method),
     route: routePatternOf(req),
-    status: res.statusCode,
+    status: aborted && !res.headersSent ? null : res.statusCode,
     durationMs,
     correlationId: correlationIdOf(req),
     ...(aborted ? { aborted: true as const } : {}),

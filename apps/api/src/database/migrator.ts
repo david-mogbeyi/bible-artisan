@@ -7,14 +7,15 @@ import type { Database } from './database';
 
 export const MIGRATIONS_DIR = path.resolve(__dirname, '../../migrations');
 
-/** Matches the migrator's default glob (`*.{ts,js}`) for a plain directory listing. */
+/** A migration file: one `.ts` (source) or `.js` (built) module per migration. */
 const MIGRATION_FILE = /\.(ts|js)$/;
 
 /**
- * The migration names this build ships (file names, as Umzug records them in SequelizeMeta), in
- * order. The readiness probe compares them with SequelizeMeta without going through Umzug, whose
- * storage creates the table if it is missing. Throws if the directory is unreadable, so an API
- * deployed without its migrations fails at startup instead of reporting itself ready.
+ * The migration names a directory ships (file names, as recorded in SequelizeMeta), in order.
+ * The single source of the migration list: the migrator runs exactly these, and the readiness
+ * probe compares them with SequelizeMeta without going through Umzug (whose storage creates the
+ * table if it is missing). Throws if the directory is unreadable, so an API deployed without its
+ * migrations fails at startup instead of reporting itself ready.
  */
 export function shippedMigrationNames(dir: string = MIGRATIONS_DIR): string[] {
   return readdirSync(dir)
@@ -22,8 +23,11 @@ export function shippedMigrationNames(dir: string = MIGRATIONS_DIR): string[] {
     .sort();
 }
 
-/** Same table name/shape umzug's SequelizeStorage uses, so existing databases stay compatible. */
-const META_TABLE = '"SequelizeMeta"';
+/**
+ * The applied-migrations table, quoted for SQL. Same table name/shape umzug's SequelizeStorage
+ * uses, so existing databases stay compatible. Shared with the readiness probe.
+ */
+export const META_TABLE = '"SequelizeMeta"';
 
 /**
  * What each migration's `up`/`down` receives. `query` is the only way to run SQL and it is always
@@ -80,39 +84,40 @@ function createMetaStorage(db: Database): UmzugStorage {
  */
 export function createMigrator(
   db: Database,
-  { glob = path.join(MIGRATIONS_DIR, '*.{ts,js}') }: { glob?: string } = {},
+  { dir = MIGRATIONS_DIR }: { dir?: string } = {},
 ): Umzug<Database> {
   return new Umzug<Database>({
-    migrations: {
-      glob,
-      // Custom resolver (not Umzug.defaultResolver, whose `down` silently no-ops when the export
-      // is missing): a migration without the requested step fails loudly BEFORE its transaction
-      // opens, so SequelizeMeta is left untouched.
-      resolve: ({ name, path: filePath }) => {
-        if (!filePath) throw new Error(`Migration ${name} has no file path`);
-        const run = (direction: 'up' | 'down') => async (): Promise<void> => {
-          const step = loadMigrationModule(filePath)[direction];
-          if (typeof step !== 'function') {
-            throw new Error(`Migration ${name} does not export ${direction}()`);
-          }
-          await db.transaction(async (transaction) => {
-            const context: MigrationContext = {
-              query: async (sql) => {
-                await db.query(sql, { transaction });
-              },
-            };
-            await (step as MigrationFn)({ name, path: filePath, context });
-            await db.query(
-              direction === 'up'
-                ? `INSERT INTO ${META_TABLE} (name) VALUES ($1)`
-                : `DELETE FROM ${META_TABLE} WHERE name = $1`,
-              { bind: [name], transaction },
-            );
-          });
-        };
-        return { name, path: filePath, up: run('up'), down: run('down') };
-      },
-    },
+    // Custom resolution (not Umzug.defaultResolver, whose `down` silently no-ops when the export
+    // is missing): a migration without the requested step fails loudly BEFORE its transaction
+    // opens, so SequelizeMeta is left untouched.
+    migrations: shippedMigrationNames(dir).map((name) => {
+      const filePath = path.join(dir, name);
+      const run = (direction: 'up' | 'down') => async (): Promise<void> => {
+        const step = loadMigrationModule(filePath)[direction];
+        if (typeof step !== 'function') {
+          throw new Error(`Migration ${name} does not export ${direction}()`);
+        }
+        await db.transaction(async (transaction) => {
+          // DDL and backfills may legitimately run longer than the pool's request-sized
+          // statement_timeout (see DATABASE_TIMEOUTS), so a migration lifts it for its own
+          // transaction only.
+          await db.query('SET LOCAL statement_timeout = 0', { transaction });
+          const context: MigrationContext = {
+            query: async (sql) => {
+              await db.query(sql, { transaction });
+            },
+          };
+          await (step as MigrationFn)({ name, path: filePath, context });
+          await db.query(
+            direction === 'up'
+              ? `INSERT INTO ${META_TABLE} (name) VALUES ($1)`
+              : `DELETE FROM ${META_TABLE} WHERE name = $1`,
+            { bind: [name], transaction },
+          );
+        });
+      };
+      return { name, path: filePath, up: run('up'), down: run('down') };
+    }),
     context: db,
     storage: createMetaStorage(db),
     logger: undefined,

@@ -5,6 +5,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** Captures what the logger writes to stdout and stderr (errors go to stderr). */
+function captureAll(): string[] {
+  const lines: string[] = [];
+  const capture = (chunk: unknown): boolean => {
+    lines.push(String(chunk));
+    return true;
+  };
+  vi.spyOn(process.stdout, 'write').mockImplementation(capture);
+  vi.spyOn(process.stderr, 'write').mockImplementation(capture);
+  return lines;
+}
+
 /** Captures what the logger writes to stdout. */
 function captureStdout(): string[] {
   const lines: string[] = [];
@@ -57,4 +69,27 @@ describe('createAppLogger', () => {
     expect(lines[0]).toContain('hello');
     expect(lines[0]?.trimStart().startsWith('{')).toBe(false);
   });
+
+  it.each(['error', 'fatal'] as const)(
+    'reduces an Error passed to %s to its class, without message or stack',
+    (level) => {
+      const lines = captureAll();
+      const error = new TypeError('SENTINEL insert into note values (Romans 8:28)');
+      createAppLogger({ NODE_ENV: 'production', LOG_LEVEL: 'info' })[level](
+        error,
+        'ExceptionHandler',
+      );
+      expect(lines.map((line) => JSON.parse(line) as unknown)).toStrictEqual([
+        {
+          level,
+          pid: process.pid,
+          timestamp: expect.any(Number),
+          message: 'unhandled_error',
+          context: 'ExceptionHandler',
+          errorType: 'TypeError',
+        },
+      ]);
+      expect(lines.join('')).not.toMatch(/SENTINEL|Romans|at /);
+    },
+  );
 });
