@@ -24,25 +24,67 @@ async function statusText(): Promise<string> {
 
 describe('ApiStatus', () => {
   it('shows the API and database as up when ready', async () => {
-    respondWith(jsonResponse(200, { status: 'ok', database: 'up', migrations: 'current' }));
+    respondWith(
+      jsonResponse(200, { status: 'ok', database: 'up', migrations: 'current', corpus: 'ready' }),
+    );
     renderWithQuery(<ApiStatus />);
     expect(await statusText()).toBe('API ok · database up');
   });
 
   it('shows a down database from the 503 readiness body, not "unreachable"', async () => {
     respondWith(
-      jsonResponse(503, { status: 'unavailable', database: 'down', migrations: 'unknown' }),
+      jsonResponse(503, {
+        status: 'unavailable',
+        database: 'down',
+        migrations: 'unknown',
+        corpus: 'unknown',
+      }),
     );
     renderWithQuery(<ApiStatus />);
-    expect(await statusText()).toBe('API unavailable · database down · migrations unknown');
+    expect(await statusText()).toBe(
+      'API unavailable · database down · migrations unknown · Bible corpus unknown',
+    );
   });
 
   it('shows pending migrations from the 503 readiness body', async () => {
     respondWith(
-      jsonResponse(503, { status: 'unavailable', database: 'up', migrations: 'pending' }),
+      jsonResponse(503, {
+        status: 'unavailable',
+        database: 'up',
+        migrations: 'pending',
+        corpus: 'unknown',
+      }),
     );
     renderWithQuery(<ApiStatus />);
-    expect(await statusText()).toBe('API unavailable · database up · migrations pending');
+    expect(await statusText()).toBe(
+      'API unavailable · database up · migrations pending · Bible corpus unknown',
+    );
+  });
+
+  it('shows a missing Bible corpus from the 503 readiness body', async () => {
+    respondWith(
+      jsonResponse(503, {
+        status: 'unavailable',
+        database: 'up',
+        migrations: 'current',
+        corpus: 'missing',
+      }),
+    );
+    renderWithQuery(<ApiStatus />);
+    expect(await statusText()).toBe('API unavailable · database up · Bible corpus missing');
+  });
+
+  it('shows a corrupt Bible corpus from the 503 readiness body', async () => {
+    respondWith(
+      jsonResponse(503, {
+        status: 'unavailable',
+        database: 'up',
+        migrations: 'current',
+        corpus: 'corrupt',
+      }),
+    );
+    renderWithQuery(<ApiStatus />);
+    expect(await statusText()).toBe('API unavailable · database up · Bible corpus corrupt');
   });
 
   it('shows unreachable on a network error', async () => {

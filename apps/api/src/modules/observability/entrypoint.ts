@@ -4,7 +4,7 @@ import { errorTypeOf } from './correlation';
 import { createAppLogger } from './logger';
 
 /** Which process failed. */
-export type EntrypointName = 'api' | 'worker' | 'migrate';
+export type EntrypointName = 'api' | 'worker' | 'migrate' | 'corpus-import';
 
 /**
  * Everything a process-failure line may carry (NFR-PRIV-001). Each value is a class name, a fixed

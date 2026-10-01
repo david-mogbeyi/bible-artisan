@@ -1,10 +1,14 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseError, ForeignKeyConstraintError, UniqueConstraintError } from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
+import { BibleBook } from '../src/database/models/bible-book.model';
+import { BibleEdition } from '../src/database/models/bible-edition.model';
+import { BibleSuperscription } from '../src/database/models/bible-superscription.model';
+import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
@@ -270,4 +274,285 @@ describe('Sequelize models against the real schema', () => {
       }),
     ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
   });
+
+  // Corpus rows cannot be deleted once written (immutability triggers), so these run inside a
+  // transaction that is always rolled back. The verse carries empty text: no Scripture is typed.
+  it('creates a BibleEdition, BibleBook and BibleVerse through the models with DB-equivalent defaults', async () => {
+    const rollback = new Error('rollback');
+    const emptySha = createHash('sha256').update('').digest('hex');
+    await expect(
+      db.transaction(async (transaction) => {
+        const edition = await BibleEdition.create(
+          {
+            code: 'modeltest',
+            name: 'Model test',
+            abbreviation: 'MT',
+            language: 'en',
+            canon: 'protestant',
+            sourceUrl: 'https://example.test/artifact.zip',
+            sourceRelease: '2099-01-01',
+            artifactSha256: 'a'.repeat(64),
+            contentSha256: 'b'.repeat(64),
+            verseCount: 1,
+            superscriptionCount: 1,
+            licenseStatus: 'public_domain',
+            attribution: 'test',
+            rightsRecord: { publisher: 'test' },
+          },
+          { transaction },
+        );
+        const foundEdition = await BibleEdition.findByPk(edition.id, {
+          rejectOnEmpty: true,
+          transaction,
+        });
+        expect(foundEdition.get({ plain: true })).toStrictEqual({
+          id: expect.stringMatching(UUID),
+          code: 'modeltest',
+          name: 'Model test',
+          abbreviation: 'MT',
+          language: 'en',
+          canon: 'protestant',
+          sourceUrl: 'https://example.test/artifact.zip',
+          sourceRelease: '2099-01-01',
+          artifactSha256: 'a'.repeat(64),
+          contentSha256: 'b'.repeat(64),
+          verseCount: 1,
+          superscriptionCount: 1,
+          licenseStatus: 'public_domain',
+          attribution: 'test',
+          rightsRecord: { publisher: 'test' },
+          activatedAt: null,
+          createdAt: expect.any(Date),
+        });
+
+        await BibleBook.create(
+          {
+            editionId: edition.id,
+            code: 'TST',
+            sequence: 1,
+            name: 'Test',
+            abbreviation: 'Tst',
+            chapterCount: 1,
+          },
+          { transaction },
+        );
+        const book = await BibleBook.findOne({ where: { editionId: edition.id }, transaction });
+        expect(book?.get({ plain: true })).toStrictEqual({
+          editionId: edition.id,
+          code: 'TST',
+          sequence: 1,
+          name: 'Test',
+          abbreviation: 'Tst',
+          chapterCount: 1,
+        });
+
+        await BibleVerse.create(
+          {
+            editionId: edition.id,
+            bookCode: 'TST',
+            chapter: 1,
+            verse: 1,
+            text: '',
+            textSha256: emptySha,
+          },
+          { transaction },
+        );
+        const verse = await BibleVerse.findOne({ where: { editionId: edition.id }, transaction });
+        expect(verse?.get({ plain: true })).toStrictEqual({
+          editionId: edition.id,
+          bookCode: 'TST',
+          chapter: 1,
+          verse: 1,
+          text: '',
+          textSha256: emptySha,
+        });
+
+        // Placeholder text, not Scripture.
+        const lineSha = createHash('sha256').update('a').digest('hex');
+        await BibleSuperscription.create(
+          {
+            editionId: edition.id,
+            bookCode: 'TST',
+            chapter: 1,
+            beforeVerse: 1,
+            text: 'a',
+            textSha256: lineSha,
+          },
+          { transaction },
+        );
+        const superscription = await BibleSuperscription.findOne({
+          where: { editionId: edition.id },
+          transaction,
+        });
+        expect(superscription?.get({ plain: true })).toStrictEqual({
+          editionId: edition.id,
+          bookCode: 'TST',
+          chapter: 1,
+          beforeVerse: 1,
+          text: 'a',
+          textSha256: lineSha,
+        });
+
+        // The composite FK: a verse must belong to a book of its edition.
+        await expect(
+          BibleVerse.create(
+            {
+              editionId: edition.id,
+              bookCode: 'GEN',
+              chapter: 1,
+              verse: 1,
+              text: '',
+              textSha256: emptySha,
+            },
+            { transaction },
+          ),
+        ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+  });
+
+  it('rejects a BibleBook with an invalid code (CHECK)', async () => {
+    const rollback = new Error('rollback');
+    await expect(
+      db.transaction(async (transaction) => {
+        const edition = await BibleEdition.create(
+          {
+            code: 'modeltest',
+            name: 'Model test',
+            abbreviation: 'MT',
+            language: 'en',
+            canon: 'protestant',
+            sourceUrl: 'https://example.test/artifact.zip',
+            sourceRelease: '2099-01-01',
+            artifactSha256: 'a'.repeat(64),
+            contentSha256: 'b'.repeat(64),
+            verseCount: 1,
+            superscriptionCount: 1,
+            licenseStatus: 'public_domain',
+            attribution: 'test',
+            rightsRecord: {},
+          },
+          { transaction },
+        );
+        await expect(
+          BibleBook.create(
+            {
+              editionId: edition.id,
+              code: 'genesis',
+              sequence: 1,
+              name: 'Test',
+              abbreviation: 'Tst',
+              chapterCount: 1,
+            },
+            { transaction },
+          ),
+        ).rejects.toBeInstanceOf(DatabaseError);
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+  });
+
+  it('rejects a BibleSuperscription before a verse that does not exist (composite FK)', async () => {
+    await expect(superscriptionAttempt({ beforeVerse: 2, text: 'a' })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+  });
+
+  it('rejects an empty BibleSuperscription (CHECK)', async () => {
+    await expect(superscriptionAttempt({ beforeVerse: 1, text: '' })).rejects.toBeInstanceOf(
+      DatabaseError,
+    );
+  });
+
+  it('rejects a BibleEdition created already active (insert trigger)', async () => {
+    const error = await BibleEdition.create({
+      code: 'modeltest',
+      name: 'Model test',
+      abbreviation: 'MT',
+      language: 'en',
+      canon: 'protestant',
+      sourceUrl: 'https://example.test/artifact.zip',
+      sourceRelease: '2099-01-01',
+      artifactSha256: 'a'.repeat(64),
+      contentSha256: 'b'.repeat(64),
+      verseCount: 1,
+      superscriptionCount: 0,
+      licenseStatus: 'public_domain',
+      attribution: 'test',
+      rightsRecord: {},
+      activatedAt: new Date(),
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DatabaseError);
+    expect((error as DatabaseError).parent).toMatchObject({ code: '23000' });
+    expect(await BibleEdition.count({ where: { code: 'modeltest' } })).toBe(0);
+  });
+
+  /**
+   * Creates an inactive edition with one book and one empty verse (1:1), then a superscription
+   * with the given placement and text, all in a transaction that is always rolled back. Resolves
+   * only if the superscription insert succeeded.
+   */
+  async function superscriptionAttempt(line: { beforeVerse: number; text: string }): Promise<void> {
+    const rollback = new Error('rollback');
+    const emptySha = createHash('sha256').update('').digest('hex');
+    const outcome = await db
+      .transaction(async (transaction) => {
+        const edition = await BibleEdition.create(
+          {
+            code: 'modeltest',
+            name: 'Model test',
+            abbreviation: 'MT',
+            language: 'en',
+            canon: 'protestant',
+            sourceUrl: 'https://example.test/artifact.zip',
+            sourceRelease: '2099-01-01',
+            artifactSha256: 'a'.repeat(64),
+            contentSha256: 'b'.repeat(64),
+            verseCount: 1,
+            superscriptionCount: 1,
+            licenseStatus: 'public_domain',
+            attribution: 'test',
+            rightsRecord: {},
+          },
+          { transaction },
+        );
+        await BibleBook.create(
+          {
+            editionId: edition.id,
+            code: 'TST',
+            sequence: 1,
+            name: 'Test',
+            abbreviation: 'Tst',
+            chapterCount: 1,
+          },
+          { transaction },
+        );
+        await BibleVerse.create(
+          {
+            editionId: edition.id,
+            bookCode: 'TST',
+            chapter: 1,
+            verse: 1,
+            text: '',
+            textSha256: emptySha,
+          },
+          { transaction },
+        );
+        await BibleSuperscription.create(
+          {
+            editionId: edition.id,
+            bookCode: 'TST',
+            chapter: 1,
+            beforeVerse: line.beforeVerse,
+            text: line.text,
+            textSha256: createHash('sha256').update(line.text).digest('hex'),
+          },
+          { transaction },
+        );
+        throw rollback;
+      })
+      .catch((e: unknown) => e);
+    if (outcome !== rollback) throw outcome;
+  }
 });

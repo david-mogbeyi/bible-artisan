@@ -65,10 +65,13 @@ function buildDocument(): OpenApiDocument {
       '/health': {
         get: {
           description:
-            'Readiness: the database answers and every shipped migration is applied. Public.',
+            'Readiness: the database answers, every shipped migration is applied, and the pinned Bible corpus release is active. Public.',
           responses: {
             200: jsonResponse('Ready', 'HealthResponse'),
-            503: jsonResponse('Not ready (database down or migrations pending)', 'HealthResponse'),
+            503: jsonResponse(
+              'Not ready (database down, migrations pending, or Bible corpus missing or corrupt)',
+              'HealthResponse',
+            ),
             default: errorResponse,
           },
         },

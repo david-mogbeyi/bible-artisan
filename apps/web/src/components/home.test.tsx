@@ -24,7 +24,12 @@ beforeEach(() => {
     if (input.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
     if (input.endsWith('/health')) {
       return Promise.resolve(
-        jsonResponse(200, { status: 'ok', database: 'up', migrations: 'current' }),
+        jsonResponse(200, {
+          status: 'ok',
+          database: 'up',
+          migrations: 'current',
+          corpus: 'ready',
+        }),
       );
     }
     if (input.endsWith('/auth/logout')) {

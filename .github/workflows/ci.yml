@@ -43,5 +43,7 @@ jobs:
       - run: pnpm test
       # Migrations must apply cleanly to an empty database, and roll forward reproducibly.
       - run: pnpm db:migrate
+      # The pinned WEB corpus imports from the committed artifact (no network) and validates.
+      - run: pnpm corpus:import
       - run: pnpm test:integration
       - run: pnpm build

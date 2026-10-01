@@ -2,8 +2,16 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createDatabase } from '../src/database/database';
 import { migrateToLatest } from '../src/database/migrator';
+import {
+  importCorpus,
+  readCorpusArtifact,
+} from '../src/modules/bible-content/corpus/corpus-importer';
+import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 
-/** Points the integration suite at DATABASE_URL_TEST and migrates it once per run. */
+/**
+ * Points the integration suite at DATABASE_URL_TEST, migrates it, and imports the pinned Bible
+ * corpus (a no-op when already active), once per run.
+ */
 export default async function setup(): Promise<void> {
   const envFile = resolve(__dirname, '../../../.env');
   if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -16,6 +24,7 @@ export default async function setup(): Promise<void> {
   const db = createDatabase(url);
   try {
     await migrateToLatest(db);
+    await importCorpus(db, readCorpusArtifact(ENGWEBP_RELEASE), ENGWEBP_RELEASE);
   } finally {
     await db.close();
   }

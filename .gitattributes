@@ -1,0 +1,2 @@
+# Committed publisher corpus artifacts are verified by SHA-256: never let Git rewrite their bytes.
+apps/api/corpus/** binary

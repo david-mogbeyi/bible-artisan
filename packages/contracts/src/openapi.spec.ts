@@ -17,7 +17,7 @@ describe('buildOpenApiDocument', () => {
         '/health': {
           get: {
             description:
-              'Readiness: the database answers and every shipped migration is applied. Public.',
+              'Readiness: the database answers, every shipped migration is applied, and the pinned Bible corpus release is active. Public.',
             responses: {
               200: {
                 description: 'Ready',
@@ -26,7 +26,8 @@ describe('buildOpenApiDocument', () => {
                 },
               },
               503: {
-                description: 'Not ready (database down or migrations pending)',
+                description:
+                  'Not ready (database down, migrations pending, or Bible corpus missing or corrupt)',
                 content: {
                   'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } },
                 },
@@ -139,8 +140,9 @@ describe('buildOpenApiDocument', () => {
           status: { type: 'string', enum: ['ok', 'unavailable'] },
           database: { type: 'string', enum: ['up', 'down'] },
           migrations: { type: 'string', enum: ['current', 'pending', 'unknown'] },
+          corpus: { type: 'string', enum: ['ready', 'missing', 'corrupt', 'unknown'] },
         },
-        required: ['status', 'database', 'migrations'],
+        required: ['status', 'database', 'migrations', 'corpus'],
         additionalProperties: false,
       },
       LivenessResponse: {
