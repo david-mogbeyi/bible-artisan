@@ -241,6 +241,54 @@ describe('buildOpenApiDocument', () => {
             },
           },
         },
+        '/studies': {
+          post: {
+            description:
+              'Creates a study for the signed-in user in one transaction: the study (revision 1, content revision 1), a Scripture root node for startingReferenceId, a Question node for question, the initial branch (rooted at the question, else the passage), and one study_created event (sequence 1). Needs a question or a starting reference, or blank: true for an untitled empty study. The title, when omitted, is derived from the reference label, else the question. No expectedRevision (nothing exists yet). Send an Idempotency-Key: a retry with the same key and body replays the original 201 (Idempotent-Replayed: true) and never creates a second study; the same key with a different body is 422 IDEMPOTENCY_KEY_REUSED. An unknown reference, or one whose edition is not active, is 422 REFERENCE_NOT_FOUND and nothing is written.',
+            security: [{ sessionCookie: [] }],
+            parameters: [
+              {
+                name: 'Idempotency-Key',
+                in: 'header',
+                required: false,
+                schema: { type: 'string', format: 'uuid' },
+              },
+            ],
+            requestBody: {
+              required: true,
+              content: { 'application/json': { schema: ref('CreateStudyRequest') } },
+            },
+            responses: {
+              201: {
+                description: 'The created study',
+                content: { 'application/json': { schema: ref('CreateStudyResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
+        '/studies/{studyId}': {
+          get: {
+            description:
+              "Returns one of the signed-in user's studies: title, lifecycle, revisions, starting reference, main question and initial branch. Another user's, an absent, and a malformed id are the same 404.",
+            security: [{ sessionCookie: [] }],
+            parameters: [
+              {
+                name: 'studyId',
+                in: 'path',
+                required: true,
+                schema: { type: 'string', format: 'uuid' },
+              },
+            ],
+            responses: {
+              200: {
+                description: 'The study',
+                content: { 'application/json': { schema: ref('StudyResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
         '/bible/translations': {
           get: {
             description:
@@ -367,6 +415,9 @@ describe('buildOpenApiDocument', () => {
       'CaptureAnchorResponse',
       'ResolveAnchorRequest',
       'ResolveAnchorResponse',
+      'CreateStudyRequest',
+      'CreateStudyResponse',
+      'StudyResponse',
     ]);
   });
 });

@@ -17,6 +17,7 @@ import { BibleSuperscription } from '../src/database/models/bible-superscription
 import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { ScriptureReference } from '../src/database/models/scripture-reference.model';
+import { StudyBranch } from '../src/database/models/study-branch.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
@@ -50,10 +51,8 @@ describe('Sequelize models against the real schema', () => {
   });
 
   afterAll(async () => {
-    const studyId = created.studies;
-    await StudyEvent.destroy({ where: { studyId } });
-    await StudyNode.destroy({ where: { studyId } });
-    await Study.destroy({ where: { id: studyId } });
+    // Deleting a study cascades to its nodes, events and branches (BIB-19).
+    await Study.destroy({ where: { id: created.studies } });
     await AuthChallenge.destroy({ where: { id: created.challenges } });
     await AuthSession.destroy({ where: { userId: created.users } });
     await MutationReceipt.destroy({ where: { ownerId: created.users } });
@@ -88,6 +87,10 @@ describe('Sequelize models against the real schema', () => {
       revision: 1,
       contentRevision: 1,
       lastEventSequence: '0',
+      startingReferenceId: null,
+      originalQuestionNodeId: null,
+      mainQuestionNodeId: null,
+      questionNodeType: 'question',
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
@@ -158,18 +161,120 @@ describe('Sequelize models against the real schema', () => {
   it('creates a StudyNode with only required fields and reads it back', async () => {
     const owner = await createUser();
     const study = await createStudy(owner.id);
-    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'question' });
+    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'thought' });
     const found = await StudyNode.findByPk(node.id, { rejectOnEmpty: true });
     expect(found.get({ plain: true })).toStrictEqual({
       id: expect.stringMatching(UUID),
       studyId: study.id,
       ownerId: owner.id,
-      type: 'question',
+      type: 'thought',
+      title: null,
+      questionStatus: null,
+      scriptureReferenceId: null,
       revision: 1,
       deletedAt: null,
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
+  });
+
+  it('creates Question and Scripture nodes, a StudyBranch and the study pointers through the models (BIB-19)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    // A shared reference row (immutable, never deleted): upsert one for the first active verse.
+    await db.query(
+      `INSERT INTO scripture_reference
+         (edition_id, book_code, start_chapter, start_verse, end_chapter, end_verse)
+       SELECT v.edition_id, v.book_code, v.chapter, v.verse, v.chapter, v.verse
+         FROM bible_verse v
+         JOIN bible_edition e ON e.id = v.edition_id AND e.activated_at IS NOT NULL
+        ORDER BY v.book_code, v.chapter, v.verse
+        LIMIT 1
+       ON CONFLICT DO NOTHING`,
+    );
+    const reference = await ScriptureReference.findOne({ rejectOnEmpty: true });
+    const question = await StudyNode.create({
+      studyId: study.id,
+      ownerId: owner.id,
+      type: 'question',
+      title: 'What is conscience?',
+      questionStatus: 'open',
+    });
+    const scripture = await StudyNode.create({
+      studyId: study.id,
+      ownerId: owner.id,
+      type: 'scripture',
+      scriptureReferenceId: reference.id,
+    });
+    const branch = await StudyBranch.create({
+      studyId: study.id,
+      ownerId: owner.id,
+      rootNodeId: question.id,
+    });
+    await study.update({
+      startingReferenceId: reference.id,
+      originalQuestionNodeId: question.id,
+      mainQuestionNodeId: question.id,
+    });
+
+    const foundBranch = await StudyBranch.findByPk(branch.id, { rejectOnEmpty: true });
+    expect(foundBranch.get({ plain: true })).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      studyId: study.id,
+      ownerId: owner.id,
+      rootNodeId: question.id,
+      createdAt: expect.any(Date),
+    });
+    const foundQuestion = await StudyNode.findByPk(question.id, { rejectOnEmpty: true });
+    expect([foundQuestion.title, foundQuestion.questionStatus]).toStrictEqual([
+      'What is conscience?',
+      'open',
+    ]);
+    const foundScripture = await StudyNode.findByPk(scripture.id, { rejectOnEmpty: true });
+    expect(foundScripture.scriptureReferenceId).toBe(reference.id);
+    const foundStudy = await Study.findByPk(study.id, { rejectOnEmpty: true });
+    expect([
+      foundStudy.startingReferenceId,
+      foundStudy.originalQuestionNodeId,
+      foundStudy.mainQuestionNodeId,
+    ]).toStrictEqual([reference.id, question.id, question.id]);
+  });
+
+  it('rejects model-level BIB-19 rows that cross owner or study (StudyBranch, question pointer)', async () => {
+    const owner = await createUser();
+    const otherOwner = await createUser();
+    const study = await createStudy(owner.id);
+    const otherStudy = await createStudy(owner.id);
+    const foreignNode = await StudyNode.create({
+      studyId: otherStudy.id,
+      ownerId: owner.id,
+      type: 'thought',
+    });
+    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'thought' });
+    await expect(
+      StudyBranch.create({ studyId: study.id, ownerId: otherOwner.id, rootNodeId: node.id }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(
+      StudyBranch.create({ studyId: study.id, ownerId: owner.id, rootNodeId: foreignNode.id }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(study.update({ mainQuestionNodeId: foreignNode.id })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+    // Same study and owner, but not a question: the pointer FKs include the node type.
+    for (const pointer of ['mainQuestionNodeId', 'originalQuestionNodeId'] as const) {
+      await expect(
+        Study.update({ [pointer]: node.id }, { where: { id: study.id } }),
+      ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    }
+    expect(await StudyBranch.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('rejects a model-level question without a statement (CHECK)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    await expect(
+      StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'question' }),
+    ).rejects.toBeInstanceOf(DatabaseError);
   });
 
   it('creates a StudyEvent with only required fields; bigint sequence round-trips as an exact string', async () => {
@@ -201,7 +306,7 @@ describe('Sequelize models against the real schema', () => {
     const otherOwner = await createUser();
     const study = await createStudy(owner.id);
     await expect(
-      StudyNode.create({ studyId: study.id, ownerId: otherOwner.id, type: 'question' }),
+      StudyNode.create({ studyId: study.id, ownerId: otherOwner.id, type: 'thought' }),
     ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
     expect(await StudyNode.count({ where: { studyId: study.id } })).toBe(0);
   });
@@ -737,8 +842,17 @@ describe('Sequelize models against the real schema', () => {
   });
 
   it('refuses to truncate scripture_reference', async () => {
-    const error = await inReferenceTransaction(async (_editionId, transaction) => {
+    // Since BIB-19 studies and Scripture nodes reference it, so PostgreSQL itself refuses a plain
+    // TRUNCATE (0A000) before any trigger runs.
+    const plain = await inReferenceTransaction(async (_editionId, transaction) => {
       await db.query('TRUNCATE scripture_reference', { transaction });
+    }).catch((e: unknown) => e);
+    expect(plain).toBeInstanceOf(DatabaseError);
+    expect((plain as DatabaseError).parent).toMatchObject({ code: '0A000' });
+    // CASCADE gets past that check, and the statement trigger still refuses (in a rolled-back
+    // transaction, so nothing referencing it is touched either way).
+    const error = await inReferenceTransaction(async (_editionId, transaction) => {
+      await db.query('TRUNCATE scripture_reference CASCADE', { transaction });
     }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(DatabaseError);
     expect((error as DatabaseError).parent).toMatchObject({

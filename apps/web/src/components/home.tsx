@@ -10,7 +10,7 @@ import { signOut } from '@/lib/auth';
 
 const SIGN_OUT_ERROR = "You're still signed in. Something went wrong signing out. Try again.";
 
-/** Home (authorized). The study list and Continue Studying arrive with later tickets. */
+/** Home (authorized). New Study starts one (BIB-19); the study list and Continue Studying arrive with later tickets. */
 export function Home() {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -40,7 +40,10 @@ export function Home() {
         <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-16">
           <h1 className="font-serif text-4xl">Bible Artisan</h1>
           <p className="text-muted">Pick up your study exactly where you left it.</p>
-          <nav aria-label="Main">
+          <nav aria-label="Main" className="flex flex-wrap gap-4">
+            <Link href="/studies/new" className="text-accent underline">
+              New study
+            </Link>
             <Link href="/bible" className="text-accent underline">
               Read the Bible
             </Link>

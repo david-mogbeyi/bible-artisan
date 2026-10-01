@@ -2,18 +2,15 @@ import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { inspect } from 'node:util';
 import { type INestApplication, Module } from '@nestjs/common';
-import { CORRELATION_ID_HEADER } from '@bible-artisan/contracts';
+import { CORRELATION_ID_HEADER, STUDY_START_REQUIRED } from '@bible-artisan/contracts';
 import request, { type Response, type Test } from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
-import { AuthSession } from '../src/database/models/auth-session.model';
 import { BibleBook } from '../src/database/models/bible-book.model';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { BibleVerse } from '../src/database/models/bible-verse.model';
-import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
-import { StudyEvent } from '../src/database/models/study-event.model';
 import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
 import { DevOtpProvider } from '../src/modules/identity/otp/dev-otp.provider';
@@ -233,10 +230,7 @@ describe('content-redacted operational logs', () => {
   afterAll(async () => {
     const otpUsers = await User.findAll({ where: { normalizedEmail: otpEmails } });
     userIds.push(...otpUsers.map((user) => user.id));
-    await StudyEvent.destroy({ where: { ownerId: userIds } });
-    await MutationReceipt.destroy({ where: { ownerId: userIds } });
-    await Study.destroy({ where: { ownerId: userIds } });
-    await AuthSession.destroy({ where: { userId: userIds } });
+    // Deleting a user cascades to their sessions, receipts, studies and every study row (BIB-19).
     await AuthChallenge.destroy({ where: { normalizedEmail: otpEmails } });
     await User.destroy({ where: { id: userIds } });
     await app.close();
@@ -752,6 +746,86 @@ describe('content-redacted operational logs', () => {
           fieldErrors: { 'Idempotency-Key': ['Must be a UUID'] },
         }),
       },
+    );
+  });
+
+  it('logs study creation and reads without the title, question, reference, ids, or keys', async () => {
+    const edition = await BibleEdition.findOne({ where: { code: 'engwebp' }, rejectOnEmpty: true });
+    const resolved = await http()
+      .post('/v1/bible/resolve')
+      .set('Cookie', `ba_session=${cookie}`)
+      .send({ input: 'Rom 9:1', editionId: edition.id })
+      .expect(200);
+    const { reference } = resolved.body as { reference: { id: string; label: string } };
+    track(reference.id);
+    track(reference.label);
+    const create = (body: Record<string, unknown>, key: string): Test =>
+      withPrivateChannels(http().post(`/v1/studies${query()}`), cookie)
+        .set('Idempotency-Key', key)
+        .send(body);
+    const route = { method: 'POST', route: '/v1/studies' };
+
+    // Tracked rather than `secret`: the owner's own GET returns them, which is not an echo.
+    const body = {
+      title: track(`SENTINEL-study-title-${randomUUID()}`),
+      question: track(`SENTINEL-question-${randomUUID()}`),
+      startingReferenceId: reference.id,
+    };
+    const key = track(randomUUID());
+    const created = await create(body, key);
+    await expectLogged(created, { ...route, status: 201 });
+    const created201 = created.body as Record<string, string | null>;
+    for (const value of Object.values(created201)) {
+      if (typeof value === 'string' && value.length > 1) track(value);
+    }
+    const replayed = await create(body, key);
+    await expectLogged(replayed, { ...route, status: 201 });
+
+    const missingStart = await create({ title: secret('title') }, track(randomUUID()));
+    await expectLogged(
+      missingStart,
+      { ...route, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { _: [STUDY_START_REQUIRED] },
+        }),
+      },
+    );
+    const unknownReference = await create(
+      { question: secret('question'), startingReferenceId: track(randomUUID()) },
+      track(randomUUID()),
+    );
+    await expectLogged(
+      unknownReference,
+      { ...route, status: 422 },
+      {
+        errorType: 'ReferenceNotFoundError',
+        body: envelope({
+          code: 'REFERENCE_NOT_FOUND',
+          message: 'That passage is not available in an active translation',
+        }),
+      },
+    );
+
+    const readRoute = { method: 'GET', route: '/v1/studies/:studyId' };
+    const studyIdCreated = created201.studyId as string;
+    const read = await withPrivateChannels(
+      http().get(`/v1/studies/${studyIdCreated}${query()}`),
+      cookie,
+    );
+    expect(read.status).toBe(200);
+    await expectLogged(read, { ...readRoute, status: 200 });
+    const absent = await withPrivateChannels(
+      http().get(`/v1/studies/${track(randomUUID())}`),
+      cookie,
+    );
+    await expectLogged(
+      absent,
+      { ...readRoute, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
     );
   });
 

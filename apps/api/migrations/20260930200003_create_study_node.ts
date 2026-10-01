@@ -25,6 +25,20 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
   await context.query(`CREATE INDEX study_node_study_id_idx ON study_node (study_id, deleted_at);`);
 }
 
+// `down` refuses while any row exists unless ALLOW_STUDY_DATA_DROP=1 (ADR 0001, BIB-19 addendum):
+// a fixed, content-free error, and the migration's transaction rolls back, changing nothing.
 export async function down({ context }: { context: MigrationContext }): Promise<void> {
+  if (process.env.ALLOW_STUDY_DATA_DROP !== '1') {
+    await context.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM study_node) THEN
+          RAISE EXCEPTION 'study_node drop refused: study nodes exist (set ALLOW_STUDY_DATA_DROP=1)'
+            USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+      END
+      $$;
+    `);
+  }
   await context.query(`DROP TABLE IF EXISTS study_node;`);
 }

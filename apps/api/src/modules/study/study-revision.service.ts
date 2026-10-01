@@ -4,6 +4,12 @@ import { NotFoundError } from '../../common/errors/domain-errors';
 import { isResourceId } from '../../common/validation/resource-id';
 import { Study } from '../../database/models/study.model';
 
+/** The columns a new study is created with; owner and counters are never the caller's. */
+export interface NewStudy {
+  title: string;
+  startingReferenceId: string | null;
+}
+
 /**
  * Proof that a transaction holds a study's row lock, plus the study's counters as this mutation
  * will commit them (PRD §23). Created only by `StudyRevisionService.lock`; `MutationService` owns
@@ -82,7 +88,8 @@ export class StudyLock {
  * mutation pipeline reaches these columns only through this service.
  *
  * Lock order (enforced by `MutationService`, which is the only caller): receipt claim → `lock()`
- * (`SELECT … FOR UPDATE` on the study row) → the mutation's own rows (the study's revision or a
+ * (`SELECT … FOR UPDATE` on the study row), or `create()` for a new study (the INSERT holds the
+ * new row's lock) → the mutation's own rows (the study's revision or a
  * child's) → `writeCounters()` (same study row, already locked). Every study-scoped mutation takes
  * the study row first, so two mutations of one study can never hold a child row each and wait on
  * the other: they queue on the study row instead.
@@ -107,6 +114,27 @@ export class StudyRevisionService {
       transaction,
       ownerId,
       studyId,
+      study.contentRevision,
+      BigInt(study.lastEventSequence),
+    );
+  }
+
+  /**
+   * Inserts a new study for `ownerId` (from the session) and returns the lock on it (BIB-19). The
+   * INSERT holds the new row's lock until the transaction ends, and the row is invisible to
+   * everyone else until COMMIT, so the creating transaction is its only writer, exactly as after
+   * `lock()`. The lock starts from the inserted counters: revision 1, content revision 1 (every
+   * root created in this transaction shares it, PRD section 24) and event sequence 0.
+   */
+  async create(transaction: Transaction, ownerId: string, values: NewStudy): Promise<StudyLock> {
+    if (!(transaction instanceof Transaction)) {
+      throw new Error('StudyRevisionService.create requires a transaction');
+    }
+    const study = await Study.create({ ...values, ownerId }, { transaction });
+    return new StudyLock(
+      transaction,
+      ownerId,
+      study.id,
       study.contentRevision,
       BigInt(study.lastEventSequence),
     );

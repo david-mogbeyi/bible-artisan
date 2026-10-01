@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { Home } from './home';
@@ -107,4 +107,17 @@ describe('Home sign-out', () => {
       expect(logoutCalls()).toHaveLength(2);
     },
   );
+});
+
+describe('Home navigation', () => {
+  it('offers New study and Read the Bible', async () => {
+    await renderSignedIn();
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    expect(within(nav).getByRole('link', { name: 'New study' }).getAttribute('href')).toBe(
+      '/studies/new',
+    );
+    expect(within(nav).getByRole('link', { name: 'Read the Bible' }).getAttribute('href')).toBe(
+      '/bible',
+    );
+  });
 });

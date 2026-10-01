@@ -307,10 +307,20 @@ describe('GET /v1/bible/search', () => {
         `(${a} | ${b}:*)`,
         `'${a}' <-> "${b}" \\`,
         `${a}:* & ${b}:*`,
-        `${a}\u0000${b}`,
       ]) {
         const res = await search({ q: hostile }).expect(200);
         expect(res.body).toStrictEqual(plain.body);
+      }
+      // Control characters are refused as user text (BIB-19 `userTextSchema`), never echoed.
+      for (const q of [`${a}\u0000${b}`, `${a}\u001b${b}`]) {
+        const res = await search({ q }).expect(400);
+        expect(res.body).toStrictEqual(
+          envelope({
+            code: 'VALIDATION',
+            message: 'Invalid request',
+            fieldErrors: { q: ['Remove control or invalid characters'] },
+          }),
+        );
       }
       const injection = await search({ q: `${a}'); DROP TABLE bible_verse; --` }).expect(200);
       expect((injection.body as SearchBibleResponse).results).toStrictEqual([]);

@@ -7,6 +7,7 @@ import { BibleSuperscription } from './models/bible-superscription.model';
 import { BibleVerse } from './models/bible-verse.model';
 import { MutationReceipt } from './models/mutation-receipt.model';
 import { ScriptureReference } from './models/scripture-reference.model';
+import { StudyBranch } from './models/study-branch.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
 import { Study } from './models/study.model';
@@ -62,6 +63,7 @@ export function createDatabase(
       User,
       Study,
       StudyNode,
+      StudyBranch,
       StudyEvent,
       AuthChallenge,
       AuthSession,

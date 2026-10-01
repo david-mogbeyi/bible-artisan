@@ -1,5 +1,6 @@
 import {
   type Attributes,
+  type CreationAttributes,
   literal,
   type ModelStatic,
   type Transaction,
@@ -33,22 +34,31 @@ export interface RevisionedUpdate<M extends Model & Revisioned> {
   where?: WhereAttributeHash<Attributes<M>>;
 }
 
+/** Study columns the creating `work` may still set: never identity, owner, or counters. */
+export type CreatedStudyValues = Partial<
+  Pick<Attributes<Study>, 'originalQuestionNodeId' | 'mainQuestionNodeId'>
+>;
+
 /**
- * What a mutation's `work` receives from `MutationService.execute`: the study is already locked
- * (lock order receipt → study → children is fixed before `work` starts), and every query inside
- * `work` joins the mutation transaction automatically (database/transaction-context.ts).
+ * What a mutation's `work` receives from `MutationService.execute` (or `.create`): the study is
+ * already locked (lock order receipt → study → children is fixed before `work` starts), and every
+ * query inside `work` joins the mutation transaction automatically
+ * (database/transaction-context.ts).
  *
- * `work` must call `updateWithExpectedRevision` and `appendEvent` at least once each, or
- * `execute` throws and rolls everything back.
+ * `work` must call `appendEvent` at least once, and (except when creating the study, where there
+ * is no earlier revision to compare against) `updateWithExpectedRevision` at least once, or the
+ * pipeline throws and rolls everything back.
  */
 export class StudyMutation {
   private revisionChecks = 0;
   private finished = false;
 
-  /** @internal Created by `MutationService.execute`. */
+  /** @internal Created by `MutationService.execute` and `MutationService.create`. */
   constructor(
     private readonly lock: StudyLock,
     private readonly thread: ThreadService,
+    /** True when this mutation created the study (`MutationService.create`). */
+    readonly creating = false,
   ) {}
 
   get transaction(): Transaction {
@@ -105,6 +115,45 @@ export class StudyMutation {
     }
     this.revisionChecks += 1;
     return updated;
+  }
+
+  /**
+   * Inserts a row of a study-scoped child table (one with `study_id` and `owner_id`) for this
+   * study. Owner and study come from the lock, never from the caller, and the table's composite
+   * FK to `study (owner_id, id)` backs that up in the database.
+   */
+  async createChild<M extends Model>(
+    model: ModelStatic<M>,
+    values: Omit<CreationAttributes<M>, 'studyId' | 'ownerId'>,
+  ): Promise<M> {
+    this.assertOpen();
+    const attributes = model.getAttributes();
+    if (!('studyId' in attributes) || !('ownerId' in attributes)) {
+      throw new Error('StudyMutation: model is not a study-scoped child');
+    }
+    // TypeScript cannot prove `Omit<T, K> & Pick<T, K>` is `T` for a generic T; the attribute
+    // check above is what guarantees both keys exist on this model.
+    const row = { ...values, studyId: this.studyId, ownerId: this.ownerId };
+    return model.create(row as unknown as CreationAttributes<M>, {
+      transaction: this.transaction,
+    });
+  }
+
+  /**
+   * Sets root pointers on the study this mutation is creating (BIB-19), in the creating
+   * transaction. Not a revisioned edit: the study is still at revision 1, which no one has seen.
+   * Refused for an existing study, whose changes go through `updateWithExpectedRevision`.
+   */
+  async updateCreatedStudy(values: CreatedStudyValues): Promise<void> {
+    this.assertOpen();
+    if (!this.creating) {
+      throw new Error('StudyMutation: updateCreatedStudy is only for the study being created');
+    }
+    const [count] = await Study.update(values, {
+      where: { id: this.studyId, ownerId: this.ownerId },
+      transaction: this.transaction,
+    });
+    if (count !== 1) throw new Error('StudyMutation: the created study row vanished');
   }
 
   /** Appends a Study Thread event for this study in this transaction; returns its sequence. */

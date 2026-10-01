@@ -68,15 +68,19 @@ describe('owner isolation for private study-scoped resources', () => {
     aliceNode = await StudyNode.create({
       studyId: aliceStudy.id,
       ownerId: alice.user.id,
-      type: 'question',
+      type: 'thought',
     });
     aliceDeletedNode = await StudyNode.create({
       studyId: aliceStudy.id,
       ownerId: alice.user.id,
-      type: 'question',
+      type: 'thought',
       deletedAt: new Date(),
     });
-    bobNode = await StudyNode.create({ studyId: bobStudy.id, ownerId: bob.user.id, type: 'note' });
+    bobNode = await StudyNode.create({
+      studyId: bobStudy.id,
+      ownerId: bob.user.id,
+      type: 'thought',
+    });
   });
 
   afterAll(async () => {

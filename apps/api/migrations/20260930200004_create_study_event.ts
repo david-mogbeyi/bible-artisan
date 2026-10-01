@@ -22,6 +22,20 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
   `);
 }
 
+// `down` refuses while any row exists unless ALLOW_STUDY_DATA_DROP=1 (ADR 0001, BIB-19 addendum):
+// a fixed, content-free error, and the migration's transaction rolls back, changing nothing.
 export async function down({ context }: { context: MigrationContext }): Promise<void> {
+  if (process.env.ALLOW_STUDY_DATA_DROP !== '1') {
+    await context.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM study_event) THEN
+          RAISE EXCEPTION 'study_event drop refused: study events exist (set ALLOW_STUDY_DATA_DROP=1)'
+            USING ERRCODE = 'integrity_constraint_violation';
+        END IF;
+      END
+      $$;
+    `);
+  }
   await context.query(`DROP TABLE IF EXISTS study_event;`);
 }
