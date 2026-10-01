@@ -10,9 +10,19 @@ import {
   STUDY_ARCHIVED,
 } from '@bible-artisan/contracts';
 import { useQueryClient } from '@tanstack/react-query';
-import { EditorContent, useEditor, useEditorState } from '@tiptap/react';
+import { Fragment, type Node as ProseMirrorNode, Slice } from '@tiptap/pm/model';
+import { type Editor, EditorContent, useEditor, useEditorState } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
+import {
+  type FormEvent,
+  type RefObject,
+  useEffect,
+  useId,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { ApiError } from '@/lib/api-client';
 import {
   changeNoteState,
@@ -25,7 +35,7 @@ import {
 import { invalidateLibrary } from '@/lib/studies';
 import { NOTE_LINK_REL, NOTE_LINK_TARGET } from './note-content';
 import { characterCount, NoteAutosave, type SaveState } from './note-autosave';
-import { toNoteDocument } from './note-document';
+import { cleanNoteText, type NoteContentProblem, toNoteDraft } from './note-document';
 import { NoteVersions } from './note-versions';
 
 const LIMIT = MAX_NOTE_CHARACTERS.toLocaleString('en-US');
@@ -40,13 +50,31 @@ export const SAVE_COPY = {
   conflict:
     'This note changed somewhere else, so this edit was not saved. Your text is still here.',
   tooLong: `Too long to save: a note can have at most ${LIMIT} characters. Your text is still here.`,
+  tooLarge:
+    'This note is too large to save. Try removing long links or splitting it into two notes. Your text is still here.',
   invalid: "This formatting can't be saved. Your text is still here.",
   archived: 'This study was archived, so this edit was not saved. Reload to see it.',
   studyTrashed: 'This study was moved to the trash, so this edit was not saved. Reload to see it.',
   noteTrashed: 'This note was moved to the trash, so this edit was not saved. Reload to see it.',
   gone: "This note isn't available any more.",
   alreadyVersioned: 'This version is already saved.',
+  closeBlocked: "This note has changes that aren't saved, so it stays open.",
+  closeFailed: "Couldn't save this note, so it stays open. Your text is still here.",
 } as const;
+
+/** What can't be saved, by kind of content (the generic copy is `SAVE_COPY.invalid`). */
+export const INVALID_COPY: Record<NoteContentProblem, string> = {
+  link: "A link isn't a full web address (starting with http:// or https://), so this can't be saved. Edit or remove the link. Your text is still here.",
+  list_numbering:
+    "A numbered list's numbering can't be saved: it must start between 1 and 10,000. Your text is still here.",
+  characters:
+    "Some characters (such as invisible control characters) can't be saved. Your text is still here.",
+  too_deep:
+    'Lists and quotes are nested too deeply to save (at most 12 levels). Your text is still here.',
+  too_many_parts:
+    'This note has too many paragraphs, list items or line breaks to save. Try splitting it into two notes. Your text is still here.',
+  structure: SAVE_COPY.invalid,
+};
 
 function stateText(state: SaveState): string {
   switch (state.kind) {
@@ -62,8 +90,10 @@ function stateText(state: SaveState): string {
       return SAVE_COPY.conflict;
     case 'too_long':
       return SAVE_COPY.tooLong;
+    case 'too_large':
+      return SAVE_COPY.tooLarge;
     case 'invalid':
-      return SAVE_COPY.invalid;
+      return INVALID_COPY[state.problem];
     case 'locked':
       return state.code === STUDY_ARCHIVED
         ? SAVE_COPY.archived
@@ -80,6 +110,75 @@ function stateText(state: SaveState): string {
 const LINK_INVALID = 'Enter a full web address starting with http:// or https://.';
 
 /**
+ * The editor's schema: the note allowlist and nothing else (no code, strike, underline, rule,
+ * image or HTML). Built once for every editor, so a render never reconfigures Tiptap. Pasted HTML
+ * goes through this schema too, so an image, script, table or unknown mark in it is dropped.
+ */
+const NOTE_EXTENSIONS = [
+  StarterKit.configure({
+    code: false,
+    codeBlock: false,
+    strike: false,
+    underline: false,
+    horizontalRule: false,
+    heading: { levels: [1, 2, 3] },
+    link: {
+      openOnClick: false,
+      autolink: true,
+      linkOnPaste: true,
+      defaultProtocol: 'https',
+      isAllowedUri: (url) => httpUrlSchema.safeParse(url).success,
+      HTMLAttributes: { rel: NOTE_LINK_REL, target: NOTE_LINK_TARGET },
+    },
+  }),
+];
+
+const EDITOR_CLASS =
+  'min-h-40 rounded border border-muted bg-canvas p-3 focus:outline-2 focus:outline-accent [&_h1]:text-2xl [&_h2]:text-xl [&_h3]:text-lg [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-6 [&_ol]:pl-6 [&_blockquote]:border-l-4 [&_blockquote]:pl-3 [&_a]:underline';
+
+/** Pasted content with every text run cleaned (`cleanNoteText`); empty runs dropped. */
+function cleanFragment(fragment: Fragment): Fragment {
+  const nodes: ProseMirrorNode[] = [];
+  fragment.forEach((node) => {
+    if (node.isText) {
+      const text = cleanNoteText(node.text ?? '');
+      if (text !== '') nodes.push(node.type.schema.text(text, node.marks));
+    } else {
+      nodes.push(node.copy(cleanFragment(node.content)));
+    }
+  });
+  return Fragment.fromArray(nodes);
+}
+
+/** Counts per document: ProseMirror documents are immutable, so a count never goes stale. */
+const counted = new WeakMap<ProseMirrorNode, number>();
+
+/**
+ * The note's plain-text length as the server counts it (`notePlainText`: a line break between
+ * text blocks and for each hard break), read straight from the editor's document without
+ * serializing it; once per document, however often it is asked for.
+ */
+function editorCharacters(editor: Editor): number {
+  const { doc } = editor.state;
+  const known = counted.get(doc);
+  if (known !== undefined) return known;
+  let count = 0;
+  for (const _ of doc.textBetween(0, doc.content.size, '\n', '\n')) count += 1;
+  counted.set(doc, count);
+  return count;
+}
+
+/** Closing (or switching away from) the open note. */
+export interface NoteEditorHandle {
+  /**
+   * Saves what is unsaved and resolves true once the server acknowledged it (the note may then
+   * close). Resolves false, keeping the note open with an explanation, when the draft can't be
+   * saved (too long, invalid, refused) or the save failed.
+   */
+  close(): Promise<boolean>;
+}
+
+/**
  * Edits one note (BIB-23; PRD sections 15, 27). The Tiptap editor is restricted to the note
  * allowlist (no code, strike, underline, rule, image or HTML), links accept http(s) only and
  * render with safe `rel`/`target`, and its JSON is normalized and validated before it is sent.
@@ -94,6 +193,7 @@ export function NoteEditor({
   studyId,
   note,
   autoFocus = false,
+  handle,
   onClose,
   onUnsavedChange,
   onReloadStudy,
@@ -102,6 +202,8 @@ export function NoteEditor({
   note: NoteResponse;
   /** Focus the text at once (a note just created). */
   autoFocus?: boolean;
+  /** Lets the panel close this note through the same save-first path before switching notes. */
+  handle?: RefObject<NoteEditorHandle | null>;
   onClose: () => void;
   /** Whether the editor holds unacknowledged work (the page blocks archive/trash meanwhile). */
   onUnsavedChange: (unsaved: boolean) => void;
@@ -111,8 +213,9 @@ export function NoteEditor({
   const queryClient = useQueryClient();
   const ids = { counter: useId(), status: useId(), link: useId(), linkError: useId() };
   const [state, setState] = useState<SaveState>({ kind: 'saved' });
-  const [count, setCount] = useState(() => characterCount(note.content));
   const [closing, setClosing] = useState(false);
+  const [closeProblem, setCloseProblem] = useState<string | null>(null);
+  const closeAttempt = useRef<Promise<boolean> | null>(null);
   const [linkOpen, setLinkOpen] = useState(false);
   const [linkValue, setLinkValue] = useState('');
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -129,13 +232,22 @@ export function NoteEditor({
         content: note.content,
         send: (body, key) => saveNote(studyId, note.id, body, key),
         onState: setState,
-        onSaved: (saved: NoteMutationResponse) => {
+        onSaved: (saved: NoteMutationResponse, content: NoteDocument) => {
           // Previews, the version list and library search reflect the saved text.
           void queryClient.invalidateQueries({ queryKey: noteListsKey(studyId) });
           void queryClient.invalidateQueries({ queryKey: noteVersionsQueryKey(studyId, note.id) });
+          // The cached note becomes exactly what the server acknowledged: the content sent with
+          // the revision it produced, never one version's content with another's revision.
           queryClient.setQueryData<NoteResponse>(noteQueryKey(studyId, note.id), (old) =>
             old && saved.revision >= old.revision
-              ? { ...old, revision: saved.revision, latestVersionNumber: saved.latestVersionNumber }
+              ? {
+                  ...old,
+                  content,
+                  revision: saved.revision,
+                  latestVersionNumber: saved.latestVersionNumber,
+                  characterCount: saved.characterCount,
+                  updatedAt: saved.updatedAt,
+                }
               : old,
           );
           void invalidateLibrary(queryClient);
@@ -143,44 +255,50 @@ export function NoteEditor({
       }),
   );
 
-  const editor = useEditor({
-    immediatelyRender: false,
-    autofocus: autoFocus ? 'end' : false,
-    extensions: [
-      StarterKit.configure({
-        code: false,
-        codeBlock: false,
-        strike: false,
-        underline: false,
-        horizontalRule: false,
-        heading: { levels: [1, 2, 3] },
-        link: {
-          openOnClick: false,
-          autolink: true,
-          linkOnPaste: true,
-          defaultProtocol: 'https',
-          isAllowedUri: (url) => httpUrlSchema.safeParse(url).success,
-          HTMLAttributes: { rel: NOTE_LINK_REL, target: NOTE_LINK_TARGET },
-        },
-      }),
-    ],
-    content: note.content,
-    editorProps: {
+  // Options built once: a render never reconfigures the editor.
+  const [initialContent] = useState(note.content);
+  const editorProps = useMemo(
+    () => ({
       attributes: {
         role: 'textbox',
         'aria-multiline': 'true',
         'aria-label': 'Note text',
         'aria-describedby': `${ids.counter} ${ids.status}`,
-        class:
-          'min-h-40 rounded border border-muted bg-canvas p-3 focus:outline-2 focus:outline-accent [&_h1]:text-2xl [&_h2]:text-xl [&_h3]:text-lg [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-6 [&_ol]:pl-6 [&_blockquote]:border-l-4 [&_blockquote]:pl-3 [&_a]:underline',
+        class: EDITOR_CLASS,
       },
-    },
+      // Pasted text and HTML: control characters become spaces before they reach the document.
+      transformPasted: (slice: Slice) =>
+        new Slice(cleanFragment(slice.content), slice.openStart, slice.openEnd),
+    }),
+    [ids.counter, ids.status],
+  );
+
+  const editor = useEditor({
+    immediatelyRender: false,
+    autofocus: autoFocus ? 'end' : false,
+    extensions: NOTE_EXTENSIONS,
+    content: initialContent,
+    editorProps,
     onUpdate: ({ editor: changed }) => {
-      const doc = toNoteDocument(changed.getJSON());
-      if (doc) setCount(characterCount(doc));
-      saver.edited(doc);
+      // A keystroke: count characters and mark the draft dirty; nothing is serialized here.
+      saver.touched(editorCharacters(changed));
     },
   });
+  // The document is serialized and checked only when a save is due, never per keystroke.
+  useEffect(() => {
+    if (editor) saver.attachReader(() => toNoteDraft(editor.getJSON()));
+  }, [editor, saver]);
+
+  // The note as loaded changed (a refetch, another tab's save) while nothing here is unsaved:
+  // show it, and save from its revision. Older copies are ignored.
+  useEffect(() => {
+    if (!editor || saver.unsaved) return;
+    const newer = note.revision > saver.currentRevision;
+    const differs = note.revision === saver.currentRevision && !saver.holds(note.content);
+    if (!newer && !differs) return;
+    editor.commands.setContent(note.content, { emitUpdate: false });
+    saver.reset(note.revision, note.content);
+  }, [editor, note.revision, note.content, saver]);
 
   const active = useEditorState({
     editor,
@@ -196,8 +314,10 @@ export function NoteEditor({
       link: current?.isActive('link') ?? false,
       canUndo: current?.can().undo() ?? false,
       canRedo: current?.can().redo() ?? false,
+      count: current ? editorCharacters(current) : null,
     }),
   });
+  const count = active?.count ?? characterCount(initialContent);
 
   const unsaved = saver.unsaved || state.kind === 'saving' || state.kind === 'pending';
   useEffect(() => {
@@ -219,11 +339,6 @@ export function NoteEditor({
   // Leaving the note (route change, closing) sends what is unsaved first.
   useEffect(() => () => saver.dispose(), [saver]);
 
-  // Close waits until the latest content is saved.
-  useEffect(() => {
-    if (closing && state.kind === 'saved') onClose();
-  }, [closing, state, onClose]);
-
   const stopped = state.kind === 'conflict' || state.kind === 'locked' || state.kind === 'gone';
   // Read-only once the study or note is locked or gone (the draft stays visible). No update
   // event: making the editor read-only is not an edit, and must not reach autosave.
@@ -232,10 +347,36 @@ export function NoteEditor({
     if (editor && editor.isEditable !== writable) editor.setEditable(writable, false);
   }, [editor, writable]);
 
-  function close() {
-    if (!saver.unsaved) return onClose();
+  /**
+   * Saves first, then resolves true; never drops unsaved work. Work that can't be saved (too
+   * long, refused content, a conflict, a locked study) or a save that fails resolves false, and
+   * the note stays open saying why.
+   */
+  function close(): Promise<boolean> {
+    if (closeAttempt.current) return closeAttempt.current;
+    setCloseProblem(null);
+    if (!saver.unsaved) return Promise.resolve(true);
     setClosing(true);
-    saver.flush();
+    const attempt = saver.saveForClose().then((ok) => {
+      closeAttempt.current = null;
+      setClosing(false);
+      if (!ok) {
+        setCloseProblem(
+          saver.current.kind === 'failed' ? SAVE_COPY.closeFailed : SAVE_COPY.closeBlocked,
+        );
+      }
+      return ok;
+    });
+    closeAttempt.current = attempt;
+    return attempt;
+  }
+
+  useImperativeHandle(handle, () => ({ close }));
+
+  /** Explicitly leaves without saving (offered only once a close was refused). */
+  function discardAndClose() {
+    saver.discard();
+    onClose();
   }
 
   async function reloadLatest() {
@@ -244,8 +385,8 @@ export function NoteEditor({
       const fresh = await fetchNote(studyId, note.id);
       queryClient.setQueryData(noteQueryKey(studyId, note.id), fresh);
       editor?.commands.setContent(fresh.content, { emitUpdate: false });
-      setCount(characterCount(fresh.content));
       saver.reset(fresh.revision, fresh.content);
+      setCloseProblem(null);
     } catch {
       setReloadProblem(true);
     }
@@ -263,7 +404,6 @@ export function NoteEditor({
 
   function restoreVersion(content: NoteDocument) {
     editor?.commands.setContent(content, { emitUpdate: false });
-    setCount(characterCount(content));
     saver.restore(content);
   }
 
@@ -336,7 +476,8 @@ export function NoteEditor({
     </button>
   );
 
-  const canSaveVersion = !stopped && state.kind !== 'too_long' && state.kind !== 'invalid';
+  const canSaveVersion =
+    !stopped && state.kind !== 'too_long' && state.kind !== 'too_large' && state.kind !== 'invalid';
   const overLimit = count > MAX_NOTE_CHARACTERS;
 
   return (
@@ -508,12 +649,24 @@ export function NoteEditor({
         <button
           type="button"
           aria-disabled={closing}
-          onClick={() => !closing && close()}
+          onClick={() => {
+            if (!closing) void close().then((ok) => ok && onClose());
+          }}
           className="rounded border border-muted px-3 py-1"
         >
           {closing ? 'Saving, then closing…' : 'Close note'}
         </button>
       </div>
+      {closeProblem ? (
+        <div role="alert" className="flex flex-wrap items-center gap-3">
+          <p className="text-sm font-medium text-accent">
+            {closeProblem} {stateText(state)}
+          </p>
+          <button type="button" onClick={discardAndClose} className="text-accent underline">
+            Close without saving
+          </button>
+        </div>
+      ) : null}
       {trashProblem ? (
         <p role="alert" className="text-sm font-medium text-accent">
           {trashProblem}

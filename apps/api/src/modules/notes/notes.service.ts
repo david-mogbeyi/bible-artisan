@@ -43,10 +43,9 @@ import { isResourceId } from '../../common/validation/resource-id';
 import { parseBody } from '../../common/validation/parse-body';
 import { NoteVersion } from '../../database/models/note-version.model';
 import { Note } from '../../database/models/note.model';
-import { StudyNode } from '../../database/models/study-node.model';
-import { Study } from '../../database/models/study.model';
 import { ReferenceService } from '../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study/study-access.service';
+import { StudyRevisionService } from '../study/study-revision.service';
 
 /**
  * Note events (BIB-23), one per mutation, ids only: never note text, previews, link targets or
@@ -123,6 +122,7 @@ export class NotesService {
   constructor(
     private readonly mutations: MutationService,
     private readonly access: StudyAccessService,
+    private readonly studyRevisions: StudyRevisionService,
     private readonly references: ReferenceService,
   ) {}
 
@@ -142,15 +142,10 @@ export class NotesService {
       studyId,
       bumpsContentRevision: true,
       work: async (m) => {
-        const study = await m.updateWithExpectedRevision(Study, {
-          id: m.studyId,
-          expectedRevision,
-          values: {},
-        });
+        const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
         const targetNodeId = body.targetNodeId ?? null;
-        if (targetNodeId !== null) await requireLiveTarget(m, targetNodeId);
-        const count = await Note.count({ where: { studyId: m.studyId, ownerId: m.ownerId } });
-        if (count >= MAX_NOTES_PER_STUDY) throw new NoteRuleError(NOTE_LIMIT_EXCEEDED);
+        if (targetNodeId !== null) await this.requireLiveTarget(m, targetNodeId);
+        await requireRoomForLiveNote(m);
 
         const created = await m.createChild(Note, {
           targetNodeId,
@@ -173,7 +168,7 @@ export class NotesService {
         });
         const response: CreateNoteResponse = {
           ...mutationBody(created, event.sequence),
-          studyRevision: study.revision,
+          studyRevision,
         };
         return { status: 201, body: response };
       },
@@ -294,6 +289,8 @@ export class NotesService {
         if (change === 'restore' && current.deletedAt === null) {
           throw new NoteRuleError(NOTE_NOT_TRASHED);
         }
+        // A restored note counts toward the cap again.
+        if (change === 'restore') await requireRoomForLiveNote(m);
         const updated = await m.updateWithExpectedRevision(Note, {
           id: current.id,
           expectedRevision,
@@ -334,6 +331,8 @@ export class NotesService {
         ['updatedAt', 'DESC'],
         ['id', 'DESC'],
       ],
+      // Live notes are capped at this many; the trash is not, so it lists its newest.
+      limit: MAX_NOTES_PER_STUDY,
     });
     const targets = await this.targets(
       ownerId,
@@ -426,6 +425,23 @@ export class NotesService {
     };
   }
 
+  /**
+   * A note's target must be a live node of this study, looked up through the Study context
+   * (`requireOwnedNode`: the locked study's id and the session owner, in the mutation's
+   * transaction). Another user's node, another study's, a deleted and an absent one are the same
+   * 422. The composite FK backs this up in the database.
+   */
+  private async requireLiveTarget(m: StudyMutation, nodeId: string): Promise<void> {
+    try {
+      await this.access.requireOwnedNode(m.ownerId, m.studyId, nodeId, {
+        transaction: m.transaction,
+      });
+    } catch (error) {
+      if (error instanceof NotFoundError) throw new NoteRuleError(NOTE_TARGET_NOT_FOUND);
+      throw error;
+    }
+  }
+
   /** A note of this (already resolved) study and owner, live or trashed; otherwise 404. */
   private async ownedNote(ownerId: string, studyId: string, noteId: string): Promise<Note> {
     if (!isResourceId(noteId)) throw new NotFoundError();
@@ -447,7 +463,7 @@ export class NotesService {
     const ids = [...new Set(nodeIds.filter((id): id is string => id !== null))];
     const found = new Map<string, NoteTarget>();
     if (ids.length === 0) return found;
-    const nodes = await StudyNode.findAll({ where: { id: ids, studyId, ownerId } });
+    const nodes = await this.access.ownedNodesIncludingDeleted(ownerId, studyId, ids);
     const references = await this.references.storedReferences(
       nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
     );
@@ -483,14 +499,12 @@ async function lockedNote(m: StudyMutation, noteId: string, expectedRevision: nu
 }
 
 /**
- * A note's target must be a live node of this study, queried by the locked study's id and the
- * session owner: another user's node, another study's, a deleted and an absent one are the same
- * 422. The composite FK backs this up in the database.
+ * The cap counts live notes only (`MAX_NOTES_PER_STUDY`): moving notes to the note trash makes
+ * room, and restoring one needs room again. Counted under the study lock, so it cannot race.
  */
-async function requireLiveTarget(m: StudyMutation, nodeId: string): Promise<void> {
-  const node = await StudyNode.findOne({
-    where: { id: nodeId, studyId: m.studyId, ownerId: m.ownerId, deletedAt: null },
-    attributes: ['id'],
+async function requireRoomForLiveNote(m: StudyMutation): Promise<void> {
+  const live = await Note.count({
+    where: { studyId: m.studyId, ownerId: m.ownerId, deletedAt: null },
   });
-  if (!node) throw new NoteRuleError(NOTE_TARGET_NOT_FOUND);
+  if (live >= MAX_NOTES_PER_STUDY) throw new NoteRuleError(NOTE_LIMIT_EXCEEDED);
 }

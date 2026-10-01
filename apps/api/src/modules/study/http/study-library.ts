@@ -21,6 +21,12 @@ import {
 /** Starting-reference labels for one page, keyed by reference id (`ReferenceService`). */
 export type ReferenceLookup = (ids: string[]) => Promise<Map<string, ScriptureReference>>;
 
+/**
+ * For each folded search word (in order), the ids of the owner's studies with a live note
+ * containing it (`NotesSearchService`: the Notes context owns the `note` table, BIB-23).
+ */
+export type NoteTextLookup = (ownerId: string, words: readonly string[]) => Promise<string[][]>;
+
 interface StudyRow {
   id: string;
   title: string;
@@ -97,16 +103,18 @@ function database(): Sequelize {
  *
  * Search: every folded query word must be a substring (`strpos`, a plain bound string, never a
  * pattern) of the study's folded title and description, of one of its tag keys, or of the folded
- * text of one of its live notes (BIB-23; trashed notes are not searched). The query reaches SQL
- * only as bind parameters, and the note subqueries are scoped by the session owner like the rest.
+ * text of one of its live notes (BIB-23; trashed notes are not searched). Note text is matched by
+ * the Notes context (`noteText`), once per word for the whole request, and arrives here as each
+ * word's study ids. The query reaches SQL only as bind parameters.
  *
- * Bounded: at most `limit + 1` studies, then one query for their tags and one batched reference
- * lookup.
+ * Bounded: with a search, one note-match query first; then at most `limit + 1` studies, one query
+ * for their tags and one batched reference lookup.
  */
 export async function listStudies(
   ownerId: string,
   query: ParsedListStudiesQuery,
   references: ReferenceLookup,
+  noteText: NoteTextLookup,
   cursorKey: Buffer,
 ): Promise<StudyListResponse> {
   const { state, sort, pinnedFirst, limit } = query;
@@ -124,7 +132,8 @@ export async function listStudies(
     if (!after) throw invalidCursor();
   }
 
-  const { sql, bind } = libraryQuery(listing, after, limit + 1);
+  const noteMatches = await noteText(ownerId, listing.tokens);
+  const { sql, bind } = libraryQuery(listing, after, limit + 1, noteMatches);
   const rows = await database().query<StudyRow>(sql, { bind, type: QueryTypes.SELECT });
 
   const page = rows.slice(0, limit);
@@ -187,11 +196,16 @@ export async function listStudies(
  * `state=trashed` (the Trash view, BIB-22) lists only studies inside their recovery window by
  * the database clock (`withinRecoveryWindowSql`); one trashed 30 or more days ago reads as absent
  * everywhere, here too.
+ *
+ * `noteMatches[i]` is the ids of the studies whose live notes contain `listing.tokens[i]`
+ * (`NoteTextLookup`; missing means none). Each is bound once and used by both the word's filter
+ * and `matchedInNotes`, so no note is matched twice.
  */
 export function libraryQuery(
   listing: LibraryListing,
   after: LibraryPosition | null,
   rowLimit: number,
+  noteMatches: readonly (readonly string[])[] = [],
 ): { sql: string; bind: unknown[] } {
   const bind: unknown[] = [listing.ownerId, listing.state];
   const param = (value: unknown): string => {
@@ -208,26 +222,22 @@ export function libraryQuery(
                 WHERE st.owner_id = $1 AND st.study_id = s.id AND st.tag_id = ${param(listing.tag)})`,
     );
   }
-  const liveNoteMatches = (word: string): string =>
-    `EXISTS (SELECT 1 FROM note n
-              WHERE n.owner_id = $1 AND n.study_id = s.id AND n.deleted_at IS NULL
-                AND strpos(n.search_text, ${word}) > 0)`;
-  const words: string[] = [];
-  for (const token of listing.tokens) {
+  const inNotes: string[] = [];
+  listing.tokens.forEach((token, index) => {
     const word = param(token);
-    words.push(word);
+    const noted = `s.id = ANY(${param([...(noteMatches[index] ?? [])])}::uuid[])`;
+    inNotes.push(noted);
     filters.push(
       `(strpos(s.search_text, ${word}) > 0
         OR EXISTS (SELECT 1 FROM study_tag st
                      JOIN tag t ON t.owner_id = st.owner_id AND t.id = st.tag_id
                     WHERE st.owner_id = $1 AND st.study_id = s.id
                       AND strpos(t.normalized_name, ${word}) > 0)
-        OR ${liveNoteMatches(word)})`,
+        OR ${noted})`,
     );
-  }
+  });
   // "Found in notes" (PRD section 14: separate result labels): some word matched a live note.
-  const matchedInNotes =
-    words.length === 0 ? 'false' : `(${words.map(liveNoteMatches).join(' OR ')})`;
+  const matchedInNotes = inNotes.length === 0 ? 'false' : `(${inNotes.join(' OR ')})`;
 
   const { order, direction, text, seekValue } = SORTS[listing.sort];
   const seek =

@@ -11,6 +11,7 @@ import {
   NoteAutosave,
   type SaveState,
 } from './note-autosave';
+import type { NoteDraft } from './note-document';
 
 const doc = (text: string): NoteDocument => ({
   type: 'doc',
@@ -44,7 +45,10 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
   let states: SaveState['kind'][];
   let keys: number;
 
-  function autosave(content = doc('')) {
+  let saved: [number, NoteDocument][];
+  let lastState: SaveState;
+
+  function autosave(content = doc(''), read?: () => NoteDraft) {
     return new NoteAutosave({
       revision: 1,
       content,
@@ -52,9 +56,13 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
         new Promise<NoteMutationResponse>((resolve, reject) => {
           sent.push({ body, key, resolve, reject });
         }),
-      onState: (state) => states.push(state.kind),
-      onSaved: () => undefined,
+      onState: (state) => {
+        lastState = state;
+        states.push(state.kind);
+      },
+      onSaved: (answer, acknowledged) => saved.push([answer.revision, acknowledged]),
       newKey: () => `key-${(keys += 1)}`,
+      ...(read ? { read } : {}),
     });
   }
 
@@ -65,6 +73,8 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     sent = [];
     states = [];
     keys = 0;
+    saved = [];
+    lastState = { kind: 'saved' };
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -206,5 +216,93 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     ]);
     await vi.advanceTimersByTimeAsync(AUTOSAVE_MAX_DELAY_MS);
     expect(sent).toHaveLength(1);
+  });
+  it('treats 422 NOTE_UNCHANGED as acknowledged: Saved, and no further request', async () => {
+    const saver = autosave(doc('kept'));
+    saver.edited(doc('same as the server'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    sent[0]?.reject(new ApiError(422, { code: 'NOTE_UNCHANGED' }));
+    await settle();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MAX_DELAY_MS * 2);
+    saver.dispose();
+    expect([sent.length, states.at(-1), saver.unsaved]).toStrictEqual([1, 'saved', false]);
+  });
+
+  it('after 422 NOTE_UNCHANGED, sends only edits made meanwhile, once', async () => {
+    const saver = autosave(doc('kept'));
+    saver.edited(doc('one'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    saver.edited(doc('two'));
+    sent[0]?.reject(new ApiError(422, { code: 'NOTE_UNCHANGED' }));
+    await settle();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    expect(sent.map((s) => s.body)).toStrictEqual([
+      { expectedRevision: 1, content: doc('one') },
+      { expectedRevision: 1, content: doc('two') },
+    ]);
+    sent[1]?.resolve(response(2));
+    await settle();
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MAX_DELAY_MS);
+    expect([sent.length, states.at(-1)]).toStrictEqual([2, 'saved']);
+  });
+
+  it('tells a note over the character limit (413 NOTE_TOO_LONG) from a request over the size limit (413 PAYLOAD_TOO_LARGE)', async () => {
+    const saver = autosave();
+    saver.edited(doc('x'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    sent[0]?.reject(new ApiError(413, { code: 'NOTE_TOO_LONG' }));
+    await settle();
+    expect(states.at(-1)).toBe('too_long');
+    saver.edited(doc('y'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    sent[1]?.reject(new ApiError(413, { code: 'PAYLOAD_TOO_LARGE' }));
+    await settle();
+    expect([states.at(-1), saver.unsaved]).toStrictEqual(['too_large', true]);
+  });
+
+  it('says which kind of content the server refused (400 field errors)', async () => {
+    const saver = autosave();
+    saver.edited(doc('x'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    sent[0]?.reject(
+      new ApiError(400, {
+        code: 'VALIDATION',
+        fieldErrors: { 'content.content.0.content.0.marks.0.attrs.href': ['Invalid URL'] },
+      }),
+    );
+    await settle();
+    expect(lastState).toStrictEqual({ kind: 'invalid', problem: 'link' });
+  });
+
+  it('reads the editor only when a save is due, never per keystroke', async () => {
+    const read = vi.fn((): NoteDraft => ({ ok: true, doc: doc('typed') }));
+    const saver = autosave(doc(''), read);
+    for (let i = 0; i < 20; i += 1) saver.touched(5);
+    expect([read.mock.calls.length, states.at(-1), saver.unsaved]).toStrictEqual([
+      0,
+      'pending',
+      true,
+    ]);
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(sent.map((s) => s.body)).toStrictEqual([{ expectedRevision: 1, content: doc('typed') }]);
+    // Over the limit shows at once, from the count alone.
+    saver.touched(50_001);
+    expect([read.mock.calls.length, states.at(-1)]).toStrictEqual([1, 'too_long']);
+  });
+
+  it('reports the acknowledged content with the revision it produced', async () => {
+    const saver = autosave();
+    saver.edited(doc('first'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    saver.edited(doc('second, typed during the save'));
+    sent[0]?.resolve(response(2));
+    await settle();
+    sent[1]?.resolve(response(3));
+    await settle();
+    expect(saved).toStrictEqual([
+      [2, doc('first')],
+      [3, doc('second, typed during the save')],
+    ]);
   });
 });

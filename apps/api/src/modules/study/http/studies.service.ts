@@ -33,6 +33,7 @@ import { StudyNode } from '../../../database/models/study-node.model';
 import { Study } from '../../../database/models/study.model';
 import type { AppendEventInput } from '../../thread/thread.service';
 import { ReferenceService } from '../../bible-content/reference/reference.service';
+import { NotesSearchService } from '../../notes/notes-search.service';
 import { StudyAccessService } from '../study-access.service';
 import type { StudyLifecycleTransition } from '../study-lifecycle';
 import { deriveStudyTitle } from '../study-title';
@@ -87,6 +88,7 @@ export class StudiesService {
     private readonly mutations: MutationService,
     private readonly access: StudyAccessService,
     private readonly references: ReferenceService,
+    private readonly notesSearch: NotesSearchService,
     @Inject(ENV) env: Env,
   ) {
     this.cursorKey = libraryCursorKey(cursorSecret(env));
@@ -170,6 +172,7 @@ export class StudiesService {
       ownerId,
       parseBody(listStudiesQuerySchema, query),
       (ids) => this.references.storedReferences(ids),
+      (owner, words) => this.notesSearch.studiesMatchingNoteText(owner, words),
       this.cursorKey,
     );
   }

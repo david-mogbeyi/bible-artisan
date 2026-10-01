@@ -270,7 +270,7 @@ export class StudyLifecycleError extends Error {
 
 const NOTE_MESSAGES: Record<NoteErrorCode, string> = {
   [NOTE_TARGET_NOT_FOUND]: 'That item is not part of this study',
-  [NOTE_LIMIT_EXCEEDED]: `A study can have at most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} notes`,
+  [NOTE_LIMIT_EXCEEDED]: `A study can have at most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} notes outside the note trash`,
   [NOTE_UNCHANGED]: 'The note already has this content and version',
   [NOTE_TRASHED]: 'This note is in the trash. Restore it to make changes',
   [NOTE_NOT_TRASHED]: 'This note is not in the trash',

@@ -27,7 +27,7 @@ import {
 } from '@/lib/notes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { NoteContent } from './note-content';
-import { NoteEditor } from './note-editor';
+import { NoteEditor, type NoteEditorHandle } from './note-editor';
 
 export const NOTES_COPY = {
   empty: 'No notes yet.',
@@ -37,7 +37,9 @@ export const NOTES_COPY = {
     'This study changed somewhere else, so the note was not created. Reload, then try again.',
   createUnknown: "Couldn't confirm the note was created. Retry won't create it twice.",
   createTarget: "That question isn't part of this study any more. Reload the study.",
-  createLimit: 'This study has the most notes it can hold. Move some to the trash first.',
+  createLimit: 'This study has the most notes it can hold. Move some to the note trash first.',
+  restoreLimit:
+    'This study has the most notes it can hold, so the note stays in the trash. Move another note to the note trash first.',
   createLocked: 'This study is archived or in the trash, so no note was created. Reload to see it.',
   createFailed: "Couldn't create the note.",
   restoreFailed: "Couldn't restore the note. Reload and try again.",
@@ -90,6 +92,8 @@ export function NotesPanel({
   const trashToggle = useRef<HTMLButtonElement>(null);
   /** Where focus returns once a closed editor has left the page. */
   const returnFocusTo = useRef<string | null>(null);
+  /** The open note's editor, closed (saving first) before another note opens or one is created. */
+  const editorHandle = useRef<NoteEditorHandle | null>(null);
 
   const listOf = (state: NoteListState, enabled = true) => ({
     queryKey: notesQueryKey(study.id, state),
@@ -114,8 +118,44 @@ export function NotesPanel({
 
   const refreshLists = () => queryClient.invalidateQueries({ queryKey: noteListsKey(study.id) });
 
-  async function create(retry = false) {
-    if (creating) return;
+  /**
+   * Leaves the open note the way its Close button does: unsaved work is saved first, and a draft
+   * that can't be saved keeps the note open (the editor says why). True when it is safe to move on.
+   */
+  async function leaveOpenNote(): Promise<boolean> {
+    const handle = editorHandle.current;
+    return handle ? handle.close() : true;
+  }
+
+  /** One switch or creation at a time (a second click while the open note saves does nothing). */
+  const switching = useRef(false);
+  async function exclusively(run: () => Promise<void>) {
+    if (switching.current) return;
+    switching.current = true;
+    try {
+      await run();
+    } finally {
+      switching.current = false;
+    }
+  }
+
+  function openNote(noteId: string) {
+    if (noteId === openId) return Promise.resolve();
+    return exclusively(async () => {
+      if (!(await leaveOpenNote())) return;
+      setFreshId(null);
+      setOpenId(noteId);
+    });
+  }
+
+  function create(retry = false) {
+    if (creating) return Promise.resolve();
+    return exclusively(async () => {
+      if (await leaveOpenNote()) await createNow(retry);
+    });
+  }
+
+  async function createNow(retry: boolean) {
     if (!retry || frozenCreate.current === null) {
       frozenCreate.current = {
         key: crypto.randomUUID(),
@@ -185,7 +225,13 @@ export function NotesPanel({
     } catch (error) {
       const definite = error instanceof ApiError && error.status < 500 && error.status !== 429;
       if (definite) frozenRestore.current = null;
-      setRestoreProblem(definite ? NOTES_COPY.restoreFailed : NOTES_COPY.restoreUnknown);
+      setRestoreProblem(
+        !definite
+          ? NOTES_COPY.restoreUnknown
+          : error.code === NOTE_LIMIT_EXCEEDED
+            ? NOTES_COPY.restoreLimit
+            : NOTES_COPY.restoreFailed,
+      );
     }
   }
 
@@ -210,7 +256,7 @@ export function NotesPanel({
           else itemButtons.current.delete(note.id);
         }}
         aria-pressed={openId === note.id}
-        onClick={() => setOpenId(note.id)}
+        onClick={() => void openNote(note.id)}
         className="text-left underline aria-pressed:font-semibold"
       >
         {note.preview || 'Empty note'}
@@ -309,6 +355,7 @@ export function NotesPanel({
               studyId={study.id}
               note={open.data}
               autoFocus={freshId === open.data.id}
+              handle={editorHandle}
               onClose={closeNote}
               onUnsavedChange={onUnsavedChange}
               onReloadStudy={() => void onReload()}

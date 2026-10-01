@@ -1,14 +1,16 @@
 import {
   EMPTY_NOTE_DOCUMENT,
   type NoteDocument,
+  noteDocumentSchema,
   type StudyResponse,
 } from '@bible-artisan/contracts';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { Editor } from '@tiptap/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { noteQueryKey } from '@/lib/notes';
 import { studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
-import { SAVE_COPY } from './note-editor';
+import { INVALID_COPY, SAVE_COPY } from './note-editor';
 import { NOTES_COPY, NotesPanel } from './notes-panel';
 
 const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
@@ -397,5 +399,254 @@ describe('NotesPanel (BIB-23)', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
     expect(await screen.findByText("Couldn't open this note.")).toBeTruthy();
     expect(container.querySelector('img')).toBeNull();
+  });
+  const OTHER_ID = 'ffffffff-2222-4333-8444-555555555555';
+  const OTHER = `${NOTES}/${OTHER_ID}`;
+  const patches = () => requests.filter((r) => r.method === 'PATCH');
+
+  it('reopening a saved note within the cache time shows the saved text, and the next save builds on its revision', async () => {
+    const afterSave = summary({ revision: 2, preview: 'Second thoughts' });
+    reply(
+      `GET ${NOTES}`,
+      jsonResponse(200, { items: [summary()] }),
+      // Refreshed after the save and after closing.
+      jsonResponse(200, { items: [afterSave] }),
+      jsonResponse(200, { items: [afterSave] }),
+    );
+    // Fetched once: the reopened note comes from the cache (30 s, as in the app).
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    reply(
+      `PATCH ${NOTE}`,
+      jsonResponse(200, mutation({ revision: 2 })),
+      jsonResponse(200, mutation({ revision: 3 })),
+    );
+    const { queryClient } = renderPanel();
+    queryClient.setDefaultOptions({ queries: { retry: false, staleTime: 30_000 } });
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    typeText(await noteEditor(), 'Second thoughts');
+    await waitFor(() => expect(patches()).toHaveLength(1), { timeout: 2000 });
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close note' }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Note editor' })).toBeNull());
+    fireEvent.click(await screen.findByRole('button', { name: 'Second thoughts' }));
+    const reopened = await noteEditor();
+    expect(reopened.getText()).toBe('Second thoughts');
+
+    typeText(reopened, 'Third thoughts');
+    await waitFor(() => expect(patches()).toHaveLength(2), { timeout: 2000 });
+    expect(patches()[1]?.body).toStrictEqual({
+      expectedRevision: 2,
+      content: doc('Third thoughts'),
+    });
+    expect(requests.filter((r) => r.method === 'GET' && r.path === NOTE)).toHaveLength(1);
+  });
+
+  it('shows a newer copy of the open note when nothing is unsaved, and saves from its revision', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation({ revision: 6 })));
+    const { queryClient } = renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    act(() => {
+      queryClient.setQueryData(
+        noteQueryKey(STUDY_ID, NOTE_ID),
+        note({ revision: 5, content: doc('Saved elsewhere') }),
+      );
+    });
+    await waitFor(() => expect(editor.getText()).toBe('Saved elsewhere'));
+    // An older copy never replaces it.
+    act(() => {
+      queryClient.setQueryData(noteQueryKey(STUDY_ID, NOTE_ID), note());
+    });
+    expect(editor.getText()).toBe('Saved elsewhere');
+    typeText(editor, 'Saved elsewhere, then here');
+    await waitFor(() => expect(patches()).toHaveLength(1), { timeout: 2000 });
+    expect(patches()[0]?.body).toStrictEqual({
+      expectedRevision: 5,
+      content: doc('Saved elsewhere, then here'),
+    });
+  });
+
+  it('opening another note saves the open one first, keeping it unsaved until the save commits', async () => {
+    reply(
+      `GET ${NOTES}`,
+      jsonResponse(200, {
+        items: [summary(), summary({ id: OTHER_ID, preview: 'Other note' })],
+      }),
+    );
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    reply(`GET ${OTHER}`, jsonResponse(200, note({ id: OTHER_ID, content: doc('Other note') })));
+    let answer: (response: Response) => void = () => undefined;
+    reply(`PATCH ${NOTE}`, new Promise<Response>((resolve) => (answer = resolve)));
+    const { unsaved } = renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    typeText(await noteEditor(), 'Unsaved words');
+
+    // Before the idle delay: switching sends the draft at once, and waits for it.
+    fireEvent.click(screen.getByRole('button', { name: 'Other note' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]?.body).toStrictEqual({
+      expectedRevision: 1,
+      content: doc('Unsaved words'),
+    });
+    expect((await noteEditor()).getText()).toBe('Unsaved words');
+    expect(unsaved.mock.lastCall).toStrictEqual([true]);
+    expect(requests.some((r) => r.path === OTHER)).toBe(false);
+
+    answer(jsonResponse(200, mutation({ revision: 2 })));
+    await waitFor(async () => expect((await noteEditor()).getText()).toBe('Other note'));
+    expect(unsaved.mock.lastCall).toStrictEqual([false]);
+  });
+
+  it('keeps a note that cannot be saved open, says why, and neither switches nor creates', async () => {
+    reply(
+      `GET ${NOTES}`,
+      jsonResponse(200, {
+        items: [summary(), summary({ id: OTHER_ID, preview: 'Other note' })],
+      }),
+    );
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    const { unsaved } = renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    typeText(editor, 'a'.repeat(50_001));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Other note' }));
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toContain(SAVE_COPY.closeBlocked);
+    expect(textOf(alert)).toContain(SAVE_COPY.tooLong);
+    fireEvent.click(screen.getByRole('button', { name: 'New note' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(requests.filter((r) => r.method !== 'GET' || r.path === OTHER)).toStrictEqual([]);
+    expect(editor.getText()).toHaveLength(50_001);
+    expect(unsaved.mock.lastCall).toStrictEqual([true]);
+
+    // Leaving without saving is an explicit choice.
+    fireEvent.click(
+      within(await screen.findByRole('alert')).getByRole('button', {
+        name: 'Close without saving',
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Note editor' })).toBeNull());
+    expect(patches()).toStrictEqual([]);
+  });
+
+  it('keeps the note open when the save made on switching fails', async () => {
+    reply(
+      `GET ${NOTES}`,
+      jsonResponse(200, {
+        items: [summary(), summary({ id: OTHER_ID, preview: 'Other note' })],
+      }),
+    );
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    reply(`PATCH ${NOTE}`, new TypeError('offline'));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    typeText(await noteEditor(), 'Fragile words');
+    fireEvent.click(screen.getByRole('button', { name: 'Other note' }));
+    expect(textOf(await screen.findByRole('alert'))).toContain(SAVE_COPY.closeFailed);
+    expect((await noteEditor()).getText()).toBe('Fragile words');
+    expect(requests.some((r) => r.path === OTHER)).toBe(false);
+  });
+
+  it('does not serialize or validate the document on a keystroke, only when it saves', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation()));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    const parse = vi.spyOn(noteDocumentSchema, 'safeParse');
+    try {
+      for (const text of ['S', 'Se', 'Sec', 'Seco', 'Second']) typeText(editor, text);
+      expect(parse).not.toHaveBeenCalled();
+      expect(screen.getByText('6 / 50,000 characters')).toBeTruthy();
+      await waitFor(() => expect(patches()).toHaveLength(1), { timeout: 2000 });
+      expect(parse).toHaveBeenCalledTimes(1);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('saves pasted text with control characters as spaces, pasted HTML without images or scripts, and a list typed as "0. "', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note({ content: EMPTY_NOTE_DOCUMENT })));
+    reply(
+      `PATCH ${NOTE}`,
+      jsonResponse(200, mutation({ revision: 2 })),
+      jsonResponse(200, mutation({ revision: 3 })),
+      jsonResponse(200, mutation({ revision: 4 })),
+    );
+    // jsdom has no ClipboardEvent; ProseMirror's programmatic paste makes one.
+    vi.stubGlobal(
+      'ClipboardEvent',
+      class extends Event {
+        readonly clipboardData = null;
+      },
+    );
+    const { container } = renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    const saveNext = async (count: number) =>
+      waitFor(() => expect(patches()).toHaveLength(count), { timeout: 2000 });
+
+    act(() => {
+      editor.commands.selectAll();
+      editor.view.pasteText('tab\there\vvertical\fform feed');
+    });
+    await saveNext(1);
+    expect(patches()[0]?.body).toStrictEqual({
+      expectedRevision: 1,
+      content: doc('tab\there vertical form feed'),
+    });
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
+
+    act(() => {
+      editor.commands.selectAll();
+      editor.view.pasteHTML(
+        '<p>Kept<img src="x" onerror="alert(1)"><script>alert(1)</script> <s>text</s></p>',
+      );
+    });
+    await saveNext(2);
+    expect(patches()[1]?.body).toStrictEqual({ expectedRevision: 2, content: doc('Kept text') });
+    expect(container.querySelector('img, script')).toBeNull();
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
+
+    act(() => {
+      editor.commands.setContent(EMPTY_NOTE_DOCUMENT, { emitUpdate: false });
+      editor.commands.insertContent('0. ', { applyInputRules: true });
+      editor.commands.insertContent('first');
+    });
+    // The input rule numbered the list from 0, which the server refuses; it is saved from 1.
+    await waitFor(() =>
+      expect(editor.getJSON().content?.[0]).toMatchObject({
+        type: 'orderedList',
+        attrs: { start: 0 },
+      }),
+    );
+    await saveNext(3);
+    expect(patches()[2]?.body).toStrictEqual({
+      expectedRevision: 3,
+      content: {
+        type: 'doc',
+        content: [
+          {
+            type: 'orderedList',
+            content: [
+              {
+                type: 'listItem',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }],
+              },
+            ],
+          },
+          { type: 'paragraph' },
+        ],
+      },
+    });
+    expect(Object.values(INVALID_COPY).some((copy) => textOf(saveStatus()).includes(copy))).toBe(
+      false,
+    );
   });
 });

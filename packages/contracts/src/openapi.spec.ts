@@ -469,6 +469,7 @@ describe('buildOpenApiDocument', () => {
             [
               'NOTE_TARGET_NOT_FOUND',
               'NOTE_LIMIT_EXCEEDED',
+              'live notes',
               'note_created',
               ...DOCUMENT,
               ...MUTATION,
@@ -525,7 +526,7 @@ describe('buildOpenApiDocument', () => {
         },
         '/studies/{studyId}/notes/{noteId}/restore': {
           post: noteOperation(
-            ['NOTE_NOT_TRASHED', 'note_restored', ...MUTATION],
+            ['NOTE_NOT_TRASHED', 'NOTE_LIMIT_EXCEEDED', 'note_restored', ...MUTATION],
             [idempotencyHeader, studyId, noteId],
             200,
             'The restored note',

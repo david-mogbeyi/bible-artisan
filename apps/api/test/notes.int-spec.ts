@@ -625,6 +625,34 @@ describe('notes (BIB-23)', () => {
       });
       expect([study200k.status, study200k.body]).toStrictEqual([413, PAYLOAD_TOO_LARGE]);
     });
+    it('reads a large note body only for a signed-in client: an anonymous or forged-cookie body past the default 100 kB is 413 before the guard, a small one 401', async () => {
+      const study = await createStudy(alice);
+      const note = await createNote(alice, study.studyId);
+      // About 120 kB of polytonic Greek: over the default 100 kB limit, under the note limit.
+      const large = { expectedRevision: 2, content: doc('ἀ'.repeat(40_000)) };
+      const forged: Owner = { ...alice, cookie: `ba_session=${'A'.repeat(43)}` };
+      const before = await ownerRows(alice);
+      const answers = [];
+      for (const who of [null, forged]) {
+        answers.push(
+          await send(who, 'post', notesPath(study.studyId), large),
+          await send(who, 'patch', notePath(study.studyId, note.id), large),
+          await send(who, 'post', notesPath(study.studyId), { expectedRevision: 2 }),
+        );
+      }
+      expect(answers.map((res): unknown[] => [res.status, res.body])).toStrictEqual([
+        [413, PAYLOAD_TOO_LARGE],
+        [413, PAYLOAD_TOO_LARGE],
+        [401, UNAUTHENTICATED],
+        [413, PAYLOAD_TOO_LARGE],
+        [413, PAYLOAD_TOO_LARGE],
+        [401, UNAUTHENTICATED],
+      ]);
+      expect(await ownerRows(alice)).toStrictEqual(before);
+      // The owner's identical body is read with the note limit and saved.
+      const created = await send(alice, 'post', notesPath(study.studyId), large);
+      expect(created.status).toBe(201);
+    });
   });
 
   describe('saving and versions', () => {
@@ -1040,22 +1068,49 @@ describe('notes (BIB-23)', () => {
       ]);
     });
 
-    it('caps a study at 1,000 notes with 422 NOTE_LIMIT_EXCEEDED', async () => {
+    it('caps a study at 1,000 live notes with 422 NOTE_LIMIT_EXCEEDED: trashed notes do not count, and a restore needs room', async () => {
       const study = await createStudy(alice);
-      await db.query(
-        `INSERT INTO note (study_id, owner_id, rich_text_json, plain_text, search_text)
-         SELECT $1, $2, '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, '', ''
-           FROM generate_series(1, 1000)`,
-        { bind: [study.studyId, alice.user.id], type: QueryTypes.INSERT },
-      );
-      const res = await send(alice, 'post', notesPath(study.studyId), {
-        expectedRevision: 1,
+      const limitEnvelope = envelope({
+        code: 'NOTE_LIMIT_EXCEEDED',
+        message: 'A study can have at most 1,000 notes outside the note trash',
+      });
+      const fill = (trashed: boolean) =>
+        db.query(
+          `INSERT INTO note (study_id, owner_id, rich_text_json, plain_text, search_text, deleted_at)
+           SELECT $1, $2, '{"type":"doc","content":[{"type":"paragraph"}]}'::jsonb, '', '',
+                  CASE WHEN $3::boolean THEN now() END
+             FROM generate_series(1, 999)`,
+          { bind: [study.studyId, alice.user.id, trashed], type: QueryTypes.INSERT },
+        );
+      // 999 notes in the note trash and 999 live: the 1,000th live note is still allowed.
+      await fill(true);
+      await fill(false);
+      const last = await createNote(alice, study.studyId, doc('the thousandth'));
+      const before = await ownerRows(alice);
+      const refused = await send(alice, 'post', notesPath(study.studyId), {
+        expectedRevision: await studyRevision(study.studyId),
         content: doc('one too many'),
       });
-      expect([res.status, res.body]).toStrictEqual([
-        422,
-        envelope({ code: 'NOTE_LIMIT_EXCEEDED', message: 'A study can have at most 1,000 notes' }),
-      ]);
+      expect([refused.status, refused.body]).toStrictEqual([422, limitEnvelope]);
+      expect(await ownerRows(alice)).toStrictEqual(before);
+
+      // Trashing one makes room; restoring one while 1,000 are live is refused, writing nothing.
+      const trashed = await send(alice, 'delete', notePath(study.studyId, last.id), {
+        expectedRevision: 1,
+      });
+      expect(trashed.status).toBe(200);
+      const filler = await createNote(alice, study.studyId, doc('room again'));
+      const restoreBefore = await ownerRows(alice);
+      const restore = await send(alice, 'post', `${notePath(study.studyId, last.id)}/restore`, {
+        expectedRevision: 2,
+      });
+      expect([restore.status, restore.body]).toStrictEqual([422, limitEnvelope]);
+      expect(await ownerRows(alice)).toStrictEqual(restoreBefore);
+      await send(alice, 'delete', notePath(study.studyId, filler.id), { expectedRevision: 1 });
+      const restored = await send(alice, 'post', `${notePath(study.studyId, last.id)}/restore`, {
+        expectedRevision: 2,
+      });
+      expect(restored.status).toBe(200);
       await Note.destroy({ where: { studyId: study.studyId } });
     });
   });

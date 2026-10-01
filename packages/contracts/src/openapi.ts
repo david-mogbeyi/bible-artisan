@@ -467,7 +467,7 @@ function buildDocument(): OpenApiDocument {
       },
       '/studies/{studyId}/notes': {
         post: {
-          description: `Creates a note on the study, or on one of its live nodes (targetNodeId; anything else is 422 NOTE_TARGET_NOT_FOUND), with version 1 (FR-NOTE-001). Creating a note is a study change: expectedRevision is the study's revision, which the creation bumps (studyRevision in the response); contentRevision moves. note_created. At most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} notes per study (422 NOTE_LIMIT_EXCEEDED). The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
+          description: `Creates a note on the study, or on one of its live nodes (targetNodeId; anything else is 422 NOTE_TARGET_NOT_FOUND), with version 1 (FR-NOTE-001). Creating a note is a study change: expectedRevision is the study's revision, which the creation bumps (studyRevision in the response); contentRevision moves. note_created. At most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} live notes per study (422 NOTE_LIMIT_EXCEEDED); notes in the note trash do not count. The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam],
           requestBody: jsonBody('CreateNoteRequest'),
@@ -477,7 +477,7 @@ function buildDocument(): OpenApiDocument {
           },
         },
         get: {
-          description: `Lists the study's notes, most recently updated first: state=active (default) the live notes, state=trashed the note trash. Each has a plain-text preview and its target node (deleted: true marks a note whose node was deleted, kept for orphaned-note review, FR-NOTE-002). Archived and trashed studies stay readable. ${NOTE_OWNERSHIP}`,
+          description: `Lists the study's notes, most recently updated first: state=active (default) the live notes, state=trashed the note trash (its ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} most recently trashed notes). Each has a plain-text preview and its target node (deleted: true marks a note whose node was deleted, kept for orphaned-note review, FR-NOTE-002). Archived and trashed studies stay readable. ${NOTE_OWNERSHIP}`,
           security: sessionCookie,
           parameters: [
             studyIdParam,
@@ -522,7 +522,7 @@ function buildDocument(): OpenApiDocument {
       },
       '/studies/{studyId}/notes/{noteId}/restore': {
         post: {
-          description: `Restores a note from the note trash with its content and versions. A live note is 422 NOTE_NOT_TRASHED. note_restored. ${NOTE_MUTATION_RULES}`,
+          description: `Restores a note from the note trash with its content and versions. A live note is 422 NOTE_NOT_TRASHED; when the study already has ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} live notes, 422 NOTE_LIMIT_EXCEEDED. note_restored. ${NOTE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('noteId')],
           requestBody: jsonBody('NoteStateRequest'),

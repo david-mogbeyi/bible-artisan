@@ -23,7 +23,11 @@ export const MAX_NOTE_DEPTH = 12;
 export const MAX_NOTE_NODES = 20_000;
 /** Largest JSON body the note routes accept; any larger request is 413 before parsing. */
 export const MAX_NOTE_BODY_BYTES = 1_048_576;
-/** Notes (live and trashed) one study may hold; the note list is one unpaginated response. */
+/**
+ * Live notes one study may hold (the note trash does not count: trashing a note makes room, and
+ * restoring one needs room). Each note list (live, or the trash) is one unpaginated response of
+ * at most this many notes.
+ */
 export const MAX_NOTES_PER_STUDY = 1000;
 /** PRD section 15: checkpoint versions are "capped at 100 versions per note". */
 export const MAX_NOTE_VERSIONS = 100;
@@ -40,7 +44,7 @@ export const NOTE_SCHEMA_VERSION = 1;
 export const NOTE_TOO_LONG = 'NOTE_TOO_LONG';
 /** 422: `targetNodeId` is not a live node of this study. */
 export const NOTE_TARGET_NOT_FOUND = 'NOTE_TARGET_NOT_FOUND';
-/** 422: the study already holds `MAX_NOTES_PER_STUDY` notes. */
+/** 422: the study already holds `MAX_NOTES_PER_STUDY` live notes (create, or restore from trash). */
 export const NOTE_LIMIT_EXCEEDED = 'NOTE_LIMIT_EXCEEDED';
 /** 422: the edit changes nothing (same content, and no new version to save). */
 export const NOTE_UNCHANGED = 'NOTE_UNCHANGED';
@@ -446,7 +450,10 @@ export const noteSummarySchema = z.object({
 
 export type NoteSummary = z.infer<typeof noteSummarySchema>;
 
-/** Most recently updated first (ties by id). Bounded by `MAX_NOTES_PER_STUDY`. */
+/**
+ * Most recently updated first (ties by id). At most `MAX_NOTES_PER_STUDY`: every live note, or
+ * the most recently trashed notes of the note trash.
+ */
 export const noteListResponseSchema = z.object({ items: z.array(noteSummarySchema) });
 
 export type NoteListResponse = z.infer<typeof noteListResponseSchema>;

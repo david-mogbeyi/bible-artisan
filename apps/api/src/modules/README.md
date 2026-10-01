@@ -70,7 +70,9 @@ What the pipeline guarantees, so a route must not re-implement any of it:
 4. `work` must call `m.updateWithExpectedRevision` (the study, or a child with `study_id`; owner
    and study scoping are added for you) and `m.appendEvent` at least once each, or `execute`
    throws (500) and rolls everything back. Creating a child counts as a study change: check the
-   study's revision (`m.updateWithExpectedRevision(Study, { id: studyId, … })`).
+   study's revision (`m.updateWithExpectedRevision(Study, { id: studyId, … })` inside the Study
+   context; from another module, `StudyRevisionService.checkStudyRevision(m, expectedRevision)`,
+   so that module never touches the `study` table).
 5. `content_revision`, `last_event_sequence` and `last_activity_at` (BIB-21) are written once, by
    the pipeline. Never update them, or `study_event`, yourself. When only the work knows whether it changed content (BIB-20:
    a study edit that may be just a pin or tag change), declare `bumpsContentRevision: false` and

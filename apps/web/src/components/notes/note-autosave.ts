@@ -1,5 +1,6 @@
 import {
   MAX_NOTE_CHARACTERS,
+  NOTE_TOO_LONG,
   NOTE_TRASHED,
   NOTE_UNCHANGED,
   noteCharacterCount,
@@ -11,6 +12,7 @@ import {
   type UpdateNoteRequest,
 } from '@bible-artisan/contracts';
 import { ApiError } from '@/lib/api-client';
+import { classifyNoteFieldErrors, type NoteContentProblem, type NoteDraft } from './note-document';
 
 /** PRD section 27: text saves after 750 ms idle, at most five seconds after the first change. */
 export const AUTOSAVE_IDLE_MS = 750;
@@ -31,8 +33,10 @@ export type SaveState =
   | { kind: 'conflict' }
   /** Over the character limit: nothing is sent; the draft stays. */
   | { kind: 'too_long' }
-  /** The document fails the allowlist (should not happen with the restricted editor). */
-  | { kind: 'invalid' }
+  /** 413 PAYLOAD_TOO_LARGE: the request (formatting, long links) is over the size limit. */
+  | { kind: 'too_large' }
+  /** The document fails the allowlist even after normalizing; `problem` says which content. */
+  | { kind: 'invalid'; problem: NoteContentProblem }
   /** The study was archived or trashed, or the note trashed, elsewhere. Autosave stops. */
   | { kind: 'locked'; code: typeof STUDY_ARCHIVED | typeof STUDY_TRASHED | typeof NOTE_TRASHED }
   /** 404: the note or study is gone. */
@@ -52,8 +56,17 @@ export interface NoteAutosaveOptions {
   content: NoteDocument;
   send: (body: UpdateNoteRequest, idempotencyKey: string) => Promise<NoteMutationResponse>;
   onState: (state: SaveState) => void;
-  /** After every acknowledged save (refresh lists, versions, library). */
-  onSaved: (response: NoteMutationResponse) => void;
+  /**
+   * After every acknowledged save, with the content the server now holds at `response.revision`
+   * (exactly what was sent), so a cached copy never pairs one version's content with another's
+   * revision.
+   */
+  onSaved: (response: NoteMutationResponse, content: NoteDocument) => void;
+  /**
+   * Reads the editor's current content, normalized and checked against the allowlist. Called
+   * only when a save is due (after `touched`), never per keystroke.
+   */
+  read?: () => NoteDraft;
   newKey?: () => string;
 }
 
@@ -71,6 +84,16 @@ const canonical = (value: unknown): string =>
 
 const sameContent = (a: NoteDocument, b: NoteDocument): boolean => canonical(a) === canonical(b);
 
+/** States in which unsaved work can't be sent by closing (the note stays open). */
+const CLOSE_BLOCKING: ReadonlySet<SaveState['kind']> = new Set([
+  'conflict',
+  'locked',
+  'gone',
+  'too_long',
+  'too_large',
+  'invalid',
+]);
+
 export const characterCount = (doc: NoteDocument): number => noteCharacterCount(notePlainText(doc));
 
 /**
@@ -85,8 +108,10 @@ export class NoteAutosave {
   private revision: number;
   /** The content the server holds, as far as this editor knows. */
   private acknowledged: NoteDocument;
-  /** The editor's current content (null when it fails the allowlist). */
-  private latest: NoteDocument | null;
+  /** The editor's content as last read. */
+  private latest: NoteDraft;
+  /** The editor changed since `latest` was read (`touched`): read it before deciding anything. */
+  private dirty = false;
   private inFlight: Attempt | null = null;
   private frozen: Attempt | null = null;
   private checkpointWanted = false;
@@ -96,12 +121,21 @@ export class NoteAutosave {
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
   private state: SaveState = { kind: 'saved' };
   private readonly newKey: () => string;
+  private read: (() => NoteDraft) | undefined;
+  /** A pending `saveForClose`, settled by the next decisive state. */
+  private closing: { promise: Promise<boolean>; settle: (ok: boolean) => void } | null = null;
 
   constructor(private readonly options: NoteAutosaveOptions) {
     this.revision = options.revision;
     this.acknowledged = options.content;
-    this.latest = options.content;
+    this.latest = { ok: true, doc: options.content };
     this.newKey = options.newKey ?? (() => crypto.randomUUID());
+    this.read = options.read;
+  }
+
+  /** Where the content comes from once the editor exists (see `NoteAutosaveOptions.read`). */
+  attachReader(read: () => NoteDraft): void {
+    this.read = read;
   }
 
   get current(): SaveState {
@@ -113,30 +147,92 @@ export class NoteAutosave {
     return this.revision;
   }
 
-  /** True while something the user wrote is not acknowledged by the server. */
+  /**
+   * True while something the user wrote is not acknowledged by the server. Cheap: an edit not
+   * read yet counts as unsaved without comparing documents.
+   */
   get unsaved(): boolean {
     return (
       this.inFlight !== null ||
       this.frozen !== null ||
-      this.latest === null ||
-      !sameContent(this.latest, this.acknowledged)
+      this.dirty ||
+      !this.latest.ok ||
+      !sameContent(this.latest.doc, this.acknowledged)
     );
   }
 
-  /** The editor changed: remember it and save after the idle delay. */
+  /**
+   * The editor changed (a keystroke): only a flag and the timers, no serializing or validation.
+   * `characters` is the editor's plain-text length, so the limit shows at once.
+   */
+  touched(characters: number): void {
+    this.dirty = true;
+    this.schedule(characters);
+  }
+
+  /** Whether `content` is what the server holds as far as this editor knows. */
+  holds(content: NoteDocument): boolean {
+    return sameContent(content, this.acknowledged);
+  }
+
+  /**
+   * The user chose to leave without saving: stop, and forget the unsaved request, so closing
+   * sends nothing.
+   */
+  discard(): void {
+    this.clearTimers();
+    this.stopped = true;
+    this.frozen = null;
+    this.dirty = false;
+    this.latest = { ok: true, doc: this.acknowledged };
+  }
+
+  /** The editor changed to `doc` (already converted; null when it can't be saved). */
   edited(doc: NoteDocument | null): void {
-    this.latest = doc;
+    this.latest = doc === null ? { ok: false, problem: 'structure' } : { ok: true, doc };
+    this.dirty = false;
+    if (doc === null) {
+      if (!this.stopped) this.setState({ kind: 'invalid', problem: 'structure' });
+      return;
+    }
+    if (!this.stopped && !this.unsaved) return this.setState({ kind: 'saved' });
+    this.schedule(characterCount(doc));
+  }
+
+  private schedule(characters: number): void {
     if (this.stopped) return;
-    if (doc === null) return this.setState({ kind: 'invalid' });
-    if (characterCount(doc) > MAX_NOTE_CHARACTERS) {
+    if (characters > MAX_NOTE_CHARACTERS) {
       this.clearTimers();
       return this.setState({ kind: 'too_long' });
     }
-    if (!this.unsaved) return this.setState({ kind: 'saved' });
     if (this.inFlight === null) this.setState({ kind: 'pending' });
     if (this.idleTimer !== null) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => this.flush(), AUTOSAVE_IDLE_MS);
     this.maxTimer ??= setTimeout(() => this.flush(), AUTOSAVE_MAX_DELAY_MS);
+  }
+
+  /** The editor's content now: read once per change, when a save needs it. */
+  private readLatest(): NoteDraft {
+    if (this.dirty && this.read) this.latest = this.read();
+    this.dirty = false;
+    return this.latest;
+  }
+
+  /**
+   * Closing the note: saves what is unsaved now and resolves true once the server acknowledged
+   * all of it. Resolves false, sending nothing more, when the work can't be saved this way: the
+   * draft is too long or refused, or autosave is stopped (conflict, locked, gone, too large), or
+   * the save failed. Never drops anything; the caller keeps the note open on false.
+   */
+  saveForClose(): Promise<boolean> {
+    if (this.closing) return this.closing.promise;
+    if (!this.unsaved) return Promise.resolve(true);
+    if (this.stopped || CLOSE_BLOCKING.has(this.state.kind)) return Promise.resolve(false);
+    let settle: (ok: boolean) => void = () => undefined;
+    const promise = new Promise<boolean>((resolve) => (settle = resolve));
+    this.closing = { promise, settle };
+    this.flush();
+    return promise;
   }
 
   /** "Save version": save the current content now as a checkpoint. */
@@ -151,8 +247,9 @@ export class NoteAutosave {
     if (this.stopped || this.inFlight !== null) return;
     let attempt = this.frozen;
     if (attempt === null) {
-      const doc = this.latest;
-      if (doc === null) return this.setState({ kind: 'invalid' });
+      const draft = this.readLatest();
+      if (!draft.ok) return this.setState({ kind: 'invalid', problem: draft.problem });
+      const doc = draft.doc;
       if (characterCount(doc) > MAX_NOTE_CHARACTERS) return this.setState({ kind: 'too_long' });
       const checkpoint = this.checkpointWanted;
       if (!checkpoint && sameContent(doc, this.acknowledged)) {
@@ -195,7 +292,8 @@ export class NoteAutosave {
     this.clearTimers();
     this.revision = revision;
     this.acknowledged = content;
-    this.latest = content;
+    this.latest = { ok: true, doc: content };
+    this.dirty = false;
     this.frozen = null;
     this.stopped = false;
     this.checkpointWanted = false;
@@ -204,7 +302,8 @@ export class NoteAutosave {
 
   /** Replaces the content (restoring a version) and saves it at once as a checkpoint. */
   restore(content: NoteDocument): void {
-    this.latest = content;
+    this.latest = { ok: true, doc: content };
+    this.dirty = false;
     this.checkpoint();
   }
 
@@ -219,7 +318,7 @@ export class NoteAutosave {
     if (this.frozen === attempt) this.frozen = null;
     this.revision = response.revision;
     if (attempt.body.content) this.acknowledged = attempt.body.content;
-    this.options.onSaved(response);
+    this.options.onSaved(response, this.acknowledged);
     if (this.checkpointWanted || this.unsaved) this.flush();
     else this.setState({ kind: 'saved' });
   }
@@ -240,7 +339,9 @@ export class NoteAutosave {
       this.stopped = true;
       return this.setState({ kind: 'gone' });
     }
-    if (error.status === 413) return this.setState({ kind: 'too_long' });
+    if (error.status === 413) {
+      return this.setState({ kind: error.code === NOTE_TOO_LONG ? 'too_long' : 'too_large' });
+    }
     if (error.status === 422) {
       const code = error.code;
       if (code === STUDY_ARCHIVED || code === STUDY_TRASHED || code === NOTE_TRASHED) {
@@ -248,17 +349,30 @@ export class NoteAutosave {
         return this.setState({ kind: 'locked', code });
       }
       if (code === NOTE_UNCHANGED) {
-        if (this.unsaved) return this.flush();
-        return this.setState({ kind: 'already_versioned' });
+        // The server already holds what was sent (at this revision, or the request would have
+        // been 409): acknowledge it. Only newer edits are sent next, so this never loops.
+        if (attempt.body.content) this.acknowledged = attempt.body.content;
+        if (this.unsaved) return this.schedule(0);
+        return this.setState({
+          kind: attempt.body.checkpoint === true ? 'already_versioned' : 'saved',
+        });
       }
     }
-    // Any other refusal (400): the content cannot be saved as it is.
-    this.setState({ kind: 'invalid' });
+    // Any other refusal (400): the content cannot be saved as it is; say which kind.
+    const body = error.body as { fieldErrors?: unknown } | null;
+    this.setState({ kind: 'invalid', problem: classifyNoteFieldErrors(body?.fieldErrors) });
   }
 
   private setState(state: SaveState): void {
     this.state = state;
     this.options.onState(state);
+    const closing = this.closing;
+    if (!closing) return;
+    const done = (state.kind === 'saved' || state.kind === 'already_versioned') && !this.unsaved;
+    if (done || state.kind === 'failed' || CLOSE_BLOCKING.has(state.kind)) {
+      this.closing = null;
+      closing.settle(done);
+    }
   }
 
   private clearTimers(): void {

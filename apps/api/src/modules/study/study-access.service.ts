@@ -79,6 +79,23 @@ export class StudyAccessService {
     if (!node) throw new NotFoundError();
     return node;
   }
+
+  /**
+   * Nodes of the owner's study `studyId` with these ids, soft-deleted ones included (BIB-23: a
+   * note keeps its target after the node is deleted, for orphaned-note review). Callers resolve
+   * the study first (`requireOwnedStudy`, or the mutation's lock); the query is still scoped by
+   * the node's own `study_id` and `owner_id`, so another study's or owner's id matches nothing.
+   * Ids that are not UUIDs are skipped.
+   */
+  async ownedNodesIncludingDeleted(
+    ownerId: string,
+    studyId: string,
+    nodeIds: readonly string[],
+  ): Promise<StudyNode[]> {
+    const ids = [...new Set(nodeIds)].filter(isResourceId);
+    if (ids.length === 0 || !isResourceId(studyId)) return [];
+    return StudyNode.findAll({ where: { id: ids, studyId, ownerId } });
+  }
 }
 
 function queryOptions({
