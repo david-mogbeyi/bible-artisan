@@ -11,6 +11,7 @@ import {
   OtpError,
   RateLimitedError,
   ReferenceInvalidError,
+  ReferenceNotFoundError,
   RevisionConflictError,
   RevisionMissingError,
   SearchQueryIsReferenceError,
@@ -140,6 +141,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof OtpError ||
       exception instanceof IdempotencyKeyReusedError ||
       exception instanceof ReferenceInvalidError ||
+      exception instanceof ReferenceNotFoundError ||
       exception instanceof AnchorInvalidError ||
       exception instanceof SearchQueryIsReferenceError
     ) {

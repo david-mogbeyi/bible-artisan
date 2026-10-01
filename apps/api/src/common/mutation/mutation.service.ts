@@ -4,7 +4,11 @@ import { DATABASE } from '../../database/database.module';
 import type { Database } from '../../database/database';
 import { MutationReceipt } from '../../database/models/mutation-receipt.model';
 import { activeTransaction } from '../../database/transaction-context';
-import { StudyRevisionService } from '../../modules/study/study-revision.service';
+import {
+  type NewStudy,
+  type StudyLock,
+  StudyRevisionService,
+} from '../../modules/study/study-revision.service';
 import { ThreadService } from '../../modules/thread/thread.service';
 import { IdempotencyKeyReusedError } from '../errors/domain-errors';
 import { requestFingerprint } from './fingerprint';
@@ -56,6 +60,18 @@ export interface StudyMutationSpec {
   work: (m: StudyMutation) => Promise<MutationResponse>;
 }
 
+/** A study creation, as declared to `MutationService.create` (BIB-19). */
+export interface StudyCreationSpec {
+  /** The new study's columns. The owner is `create`'s `ownerId`; counters are the pipeline's. */
+  study: NewStudy;
+  /**
+   * The domain work on the new study: create its children with `m.createChild`, set its root
+   * pointers with `m.updateCreatedStudy`, and append at least one event. Same transaction rules
+   * as `StudyMutationSpec.work`.
+   */
+  work: (m: StudyMutation) => Promise<MutationResponse>;
+}
+
 /**
  * Runs one study mutation exactly once per (owner, Idempotency-Key) (PRD §23, §24, §27;
  * FR-STUDY-002). The only way domain code mutates study data.
@@ -80,6 +96,8 @@ export interface StudyMutationSpec {
  * Any error from the work (404, 409, 422, …) or COMMIT rolls back the receipt with the domain
  * writes and events, so failures are never cached and a retry with the same key re-runs.
  * Receipts are keyed by owner; `ownerId` must come from the session.
+ *
+ * `create` is the same pipeline for a study that does not exist yet (see its comment).
  */
 @Injectable()
 export class MutationService {
@@ -94,10 +112,55 @@ export class MutationService {
     request: MutationRequestInfo,
     spec: StudyMutationSpec,
   ): Promise<MutationResult> {
-    // A nested execute would open a second transaction on another connection: not atomic with
+    return this.transact(ownerId, request, async (transaction) => {
+      const lock = await this.studyRevisions.lock(transaction, ownerId, spec.studyId);
+      if (spec.bumpsContentRevision) lock.bumpContentRevision();
+      return this.run(lock, spec.work, false);
+    });
+  }
+
+  /**
+   * Creates a study (BIB-19, FR-STUDY-001/002): the creation entry point of the same pipeline,
+   * with the same guarantees as `execute`. The steps differ only where there is no row yet:
+   *
+   * 1. Claim the receipt exactly as `execute` does (same fingerprint, replay, 422 on reuse), so a
+   *    retried or concurrent duplicate create replays the first one's study instead of making a
+   *    second.
+   * 2. INSERT the study for `ownerId` (from the session) in place of locking an existing row.
+   *    The insert holds the new row's lock, so lock order stays receipt → study → children.
+   * 3. Run `work` with a `StudyMutation` in creation mode: no revision check is required (there
+   *    is no earlier revision for a client to have seen, so no `expectedRevision` and never 428),
+   *    but at least one event still is. Children go in through `m.createChild`.
+   * 4. Write the counters in one UPDATE, store the response on the receipt, COMMIT.
+   *
+   * The study starts at revision 1 and content revision 1, which every root created in this
+   * transaction shares (PRD section 24); its first event is sequence 1.
+   */
+  async create(
+    ownerId: string,
+    request: MutationRequestInfo,
+    spec: StudyCreationSpec,
+  ): Promise<MutationResult> {
+    return this.transact(ownerId, request, async (transaction) => {
+      const lock = await this.studyRevisions.create(transaction, ownerId, spec.study);
+      return this.run(lock, spec.work, true);
+    });
+  }
+
+  /**
+   * Step 1 and the end of every mutation: one READ COMMITTED transaction, the receipt claimed
+   * first (or the committed response replayed), and the response stored on the receipt before
+   * COMMIT. `run` does everything in between.
+   */
+  private async transact(
+    ownerId: string,
+    request: MutationRequestInfo,
+    run: (transaction: Transaction) => Promise<MutationResponse>,
+  ): Promise<MutationResult> {
+    // A nested call would open a second transaction on another connection: not atomic with
     // the outer one, and able to wait on locks the outer one holds.
     if (activeTransaction() !== undefined) {
-      throw new Error('MutationService.execute cannot run inside another transaction');
+      throw new Error('MutationService cannot run inside another transaction');
     }
     return this.db.transaction(
       { isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED },
@@ -115,7 +178,7 @@ export class MutationService {
           if (!claimed) return this.replay(transaction, ownerId, idempotencyKey, requestHash);
         }
 
-        const response = await this.run(transaction, ownerId, spec);
+        const response = await run(transaction);
 
         if (idempotencyKey !== null) {
           await MutationReceipt.update(
@@ -128,22 +191,20 @@ export class MutationService {
     );
   }
 
-  /** Steps 2–4 above: lock, work, invariant checks, counters. */
+  /** Steps 3–4 on a held study lock: work, invariant checks, counters. */
   private async run(
-    transaction: Transaction,
-    ownerId: string,
-    { studyId, bumpsContentRevision, work }: StudyMutationSpec,
+    lock: StudyLock,
+    work: StudyMutationSpec['work'],
+    creating: boolean,
   ): Promise<MutationResponse> {
-    const lock = await this.studyRevisions.lock(transaction, ownerId, studyId);
-    if (bumpsContentRevision) lock.bumpContentRevision();
-    const mutation = new StudyMutation(lock, this.thread);
+    const mutation = new StudyMutation(lock, this.thread, creating);
     let response: MutationResponse;
     try {
       response = await runWork(work, mutation);
     } finally {
       mutation.finish();
     }
-    if (!mutation.revisionChecked) {
+    if (!creating && !mutation.revisionChecked) {
       throw new Error(
         'MutationService: work made no revision check (m.updateWithExpectedRevision)',
       );

@@ -425,6 +425,54 @@ The command is a separate step, not a migration: migrations only get `context.qu
 - **Client scope.** The web app calls only capture. `POST /bible/anchors/resolve` ships here as API (with its tests); the client call and the unresolved quote UI (original quote, said in words, with Reselect) ship with BIB-24, which stores anchors.
 - **Not in BIB-18:** saving highlights or notes (BIB-24), Scripture nodes from a selection (BIB-25/26), selection activity events (BIB-55), rendering saved highlights in the reader, and phone tabs (BIB-38).
 
+## Addendum (2026-10-01, BIB-19): creating a study
+
+`POST /v1/studies` and `GET /v1/studies/:studyId` (`modules/study/http/`). Creation makes, in **one transaction**: the study, a Scripture root node for the starting passage, a Question node for the question, the initial branch, and one `study_created` event. Each of the root node and branch exists only when the request supplies what it needs.
+
+**Creation is an entry point of the mutation pipeline, not a bypass.** `MutationService.create(ownerId, request, { study, work })` shares `execute`'s transaction shell:
+
+- one READ COMMITTED transaction, with the reply only after COMMIT;
+- the receipt claim, fingerprint and replay, and 422 on key reuse;
+- the counters written in one UPDATE.
+
+Only step 2 differs:
+
+- It INSERTs the study, with the owner from the session, instead of `SELECT … FOR UPDATE` on an existing row. Lock order stays receipt → study → children: the insert holds the new row's lock, and nobody else can see the row before COMMIT.
+- `StudyMutation` runs in creation mode. No revision check is required, since there is nothing a client could have seen, so there is no `expectedRevision` and never a 428. An `expectedRevision` in the body is an unknown key (400). At least one event is still required.
+- Children are inserted through `m.createChild`, which takes `study_id` and `owner_id` from the lock.
+- `m.updateCreatedStudy` sets the question pointers on the new row while the study stays at revision 1. It is refused for an existing study.
+- A concurrent duplicate with the same key blocks on the receipt's unique index and then replays the one study. Integration tests race six requests through a gate transaction that holds the `(owner, key)` receipt and then rolls back.
+
+**Data.**
+
+- `study_node` gains `title`, `question_status` and `scripture_reference_id`, with CHECKs:
+  - the six MVP types;
+  - `question_status` on, and only on, questions;
+  - a 1–4,000-character statement on questions;
+  - a reference on, and only on, Scripture nodes.
+- `study` gains `starting_reference_id` plus `original_question_node_id` and `main_question_node_id`. The two pointers are composite FKs `(owner_id, id, node) → study_node (owner_id, study_id, id)`, which needs the new `UNIQUE (owner_id, study_id, id)`. A pointer can therefore only name a node of the same study and owner.
+- New `study_branch` table (id, study, owner, root node, created_at), with composite FKs to the study and to its root node.
+- `scripture_reference` is edition-bound, so PRD section 23's `starting_translation_id` is unnecessary, and its "both or neither" rule holds by construction.
+- Since studies and nodes now reference `scripture_reference`, PostgreSQL itself refuses a plain `TRUNCATE` of it before the immutability trigger runs. `TRUNCATE … CASCADE` still reaches the trigger, and a test covers both.
+- The corpus-refusal reversibility test now reverts migrations newer than the search index (none of them corpus-bound) before asserting the refusal.
+
+**Decisions.**
+
+- **The passage is sent as `startingReferenceId`, not as text.** The form resolves typed input through `POST /bible/resolve` first, so ambiguity is handled in the UI, the create route never parses Scripture text, and only ids travel. PRD section 24's example sends `{ input, editionId }`.
+- **The reference is checked before the transaction.** `ReferenceService.storedReference` validates it: the row must exist and its edition must be active. A failure is 422 `REFERENCE_NOT_FOUND`, and nothing is written, not even a receipt. The check cannot go stale before COMMIT, because reference rows are immutable and an activated edition stays active. The FK is the backstop.
+- **Title.** The typed title; else the reference label; else the question cut to 200 UTF-16 units on a character boundary; else `Untitled study`.
+- **Branch root.** The question when there is one (PRD section 10), else the passage. A blank study has no node and no branch.
+- **Event payload.** `study_created` carries ids and the reference label only, never the title or question.
+- **Deferred to BIB-33.** `sessionId` in the 201 (PRD section 24 lists it), the `study_session` row, branch memberships, and `session_started` events. Sessions start on the first meaningful action and are per browser tab, which is BIB-33's model.
+- **Web.**
+  - The `/studies/new` form keeps its draft in page state only, never in localStorage.
+  - It sends one Idempotency-Key per draft and reuses it on every retry of the same body.
+  - A minimal `/studies/[studyId]` page reads the study back.
+
+**Privacy.** No new log lines. `log-redaction.int-spec.ts` covers both routes on 201, replay, 400, 422, 200 and 404.
+
+**Not in BIB-19:** editing the title or questions (BIB-20), the library and `last_activity_at` (BIB-21), archive and trash (BIB-22), notes (BIB-23), the node API and other node columns (BIB-25), canonical Scripture dedup (BIB-26), sessions and branch membership (BIB-33), the offline queue (BIB-36), and the workspace itself.
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

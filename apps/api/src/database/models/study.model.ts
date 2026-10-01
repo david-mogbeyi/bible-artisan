@@ -18,8 +18,8 @@ import {
  * Timestamps: `@CreatedAt`/`@UpdatedAt` on the declared columns make Sequelize manage exactly
  * these two attributes (no extra auto-added ones) and write them to created_at/updated_at.
  *
- * Kept minimal per this ticket's "Data changes": no starting-reference, archive, or summary
- * columns yet, since no flow in this ticket writes them.
+ * Starting reference and question pointers arrive with study creation (BIB-19); archive,
+ * activity and summary columns with the tickets that write them.
  */
 @Table({ tableName: 'study', timestamps: true })
 export class Study extends Model {
@@ -59,6 +59,21 @@ export class Study extends Model {
     defaultValue: '0',
   })
   declare lastEventSequence: string;
+
+  /** The shared, edition-bound starting passage (FK to `scripture_reference`), if any. */
+  @Column({ field: 'starting_reference_id', type: DataType.UUID, allowNull: true })
+  declare startingReferenceId: string | null;
+
+  /**
+   * The Question node the study was created with. Never rewritten (PRD section 23: "Original
+   * question is retained"). Composite FK to a node of this study and owner.
+   */
+  @Column({ field: 'original_question_node_id', type: DataType.UUID, allowNull: true })
+  declare originalQuestionNodeId: string | null;
+
+  /** The current main question (BIB-20 may change it). Composite FK like the original's. */
+  @Column({ field: 'main_question_node_id', type: DataType.UUID, allowNull: true })
+  declare mainQuestionNodeId: string | null;
 
   @CreatedAt
   @Column({ field: 'created_at', type: DataType.DATE, allowNull: false })

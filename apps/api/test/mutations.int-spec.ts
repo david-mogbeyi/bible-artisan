@@ -148,7 +148,7 @@ describe('revision-safe, event-atomic mutations', () => {
     return StudyNode.create({
       studyId: study.id,
       ownerId: owner.user.id,
-      type: 'question',
+      type: 'thought',
       deletedAt,
     });
   }
@@ -792,7 +792,7 @@ describe('revision-safe, event-atomic mutations', () => {
         execute(alice, study.id, async (m) => {
           await minimalWork(m);
           // No `{ transaction }`: it must still join the mutation transaction.
-          await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, type: 'question' });
+          await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, type: 'thought' });
           await db.query(`UPDATE study SET title = 'Stray' WHERE id = $1`, { bind: [study.id] });
           throw new Error('work failed after a stray write');
         }),
@@ -805,7 +805,7 @@ describe('revision-safe, event-atomic mutations', () => {
     it('commits a write inside work that did not pass the transaction together with the mutation', async () => {
       const study = await newStudy(alice);
       await execute(alice, study.id, async (m) => {
-        await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, type: 'question' });
+        await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, type: 'thought' });
         const [row] = await db.query<{ same: boolean }>(
           // Same transaction ⇒ it sees the uncommitted node and shares the backend's xid.
           `SELECT count(*) = 1 AS same FROM study_node WHERE study_id = $1`,
@@ -1023,6 +1023,117 @@ describe('revision-safe, event-atomic mutations', () => {
       expect(variant.headers['idempotent-replayed']).toBe('true');
       expect(variant.body).toStrictEqual(first.body);
       expect((await persisted(study)).events).toHaveLength(1);
+    });
+  });
+
+  describe('creation entry point (BIB-19)', () => {
+    /** A creation through `MutationService.create` for alice, without HTTP or a key. */
+    function create(title: string, work: (m: StudyMutation) => Promise<MutationResponse>) {
+      return mutations.create(alice.user.id, NO_KEY, {
+        study: { title, startingReferenceId: null },
+        work,
+      });
+    }
+
+    it('creates the study at revision 1 and content revision 1 with event 1, needing no revision check', async () => {
+      const title = `New ${randomUUID()}`;
+      const result = await create(title, async (m) => {
+        const node = await m.createChild(StudyNode, { type: 'thought' });
+        const event = await m.appendEvent({ eventType: 'study_created' });
+        return {
+          status: 201,
+          body: { creating: m.creating, studyId: m.studyId, nodeId: node.id, event },
+        };
+      });
+      const body = result.body as { studyId: string; nodeId: string };
+      expect([result.status, result.replayed, result.body]).toStrictEqual([
+        201,
+        false,
+        {
+          creating: true,
+          studyId: expect.stringMatching(UUID),
+          nodeId: expect.stringMatching(UUID),
+          event: { id: expect.stringMatching(UUID), sequence: '1' },
+        },
+      ]);
+      const study = await Study.findByPk(body.studyId, { rejectOnEmpty: true });
+      expect(await persisted(study)).toMatchObject({
+        title,
+        revision: 1,
+        contentRevision: 1,
+        lastEventSequence: '1',
+        events: [{ sequence: '1', eventType: 'study_created' }],
+      });
+      // The child carries the new study and the session owner, never anything from the caller.
+      const node = await StudyNode.findByPk(body.nodeId, { rejectOnEmpty: true });
+      expect([node.studyId, node.ownerId]).toStrictEqual([study.id, alice.user.id]);
+    });
+
+    it('writes no study when the work appends no event, or fails after writing children', async () => {
+      const title = `Rolled back ${randomUUID()}`;
+      await expect(
+        create(title, async (m) => {
+          await m.createChild(StudyNode, { type: 'thought' });
+          return { status: 201, body: {} };
+        }),
+      ).rejects.toThrow('work appended no StudyEvent');
+      await expect(
+        create(title, async (m) => {
+          await m.createChild(StudyNode, { type: 'thought' });
+          await m.appendEvent({ eventType: 'study_created' });
+          throw new Error('work failed after writing');
+        }),
+      ).rejects.toThrow('work failed after writing');
+      expect(await Study.count({ where: { title } })).toBe(0);
+    });
+
+    it('refuses a nested create, root pointers on an existing study, and children of tables that are not study-scoped', async () => {
+      await expect(
+        db.transaction(() =>
+          create('Nested', async (m) => {
+            await m.appendEvent({ eventType: 'study_created' });
+            return { status: 201, body: {} };
+          }),
+        ),
+      ).rejects.toThrow('cannot run inside another transaction');
+
+      const study = await newStudy(alice);
+      await expect(
+        execute(alice, study.id, async (m) => {
+          await minimalWork(m);
+          await m.updateCreatedStudy({ mainQuestionNodeId: null });
+          return { status: 200, body: {} };
+        }),
+      ).rejects.toThrow('only for the study being created');
+      expect((await persisted(study)).revision).toBe(1);
+
+      await expect(
+        create(`Bad child ${randomUUID()}`, async (m) => {
+          // A table without study_id/owner_id: refused before any insert.
+          await m.createChild(User, {});
+          return { status: 201, body: {} };
+        }),
+      ).rejects.toThrow('not a study-scoped child');
+    });
+
+    it('replays a keyed creation and never creates a second study', async () => {
+      const key = randomUUID();
+      const request: MutationRequestInfo = {
+        idempotencyKey: key,
+        method: 'POST',
+        route: '/service-level/studies',
+        params: {},
+        body: { title: 'Keyed' },
+      };
+      const work = async (m: StudyMutation): Promise<MutationResponse> => {
+        await m.appendEvent({ eventType: 'study_created' });
+        return { status: 201, body: { studyId: m.studyId } };
+      };
+      const spec = { study: { title: `Keyed ${key}`, startingReferenceId: null }, work };
+      const first = await mutations.create(alice.user.id, request, spec);
+      const second = await mutations.create(alice.user.id, request, spec);
+      expect([second.status, second.replayed, second.body]).toStrictEqual([201, true, first.body]);
+      expect(await Study.count({ where: { title: `Keyed ${key}` } })).toBe(1);
     });
   });
 });

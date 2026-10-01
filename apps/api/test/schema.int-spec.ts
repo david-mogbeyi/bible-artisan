@@ -35,6 +35,12 @@ describe('schema (composite-key owner isolation)', () => {
   afterAll(async () => {
     const bind = [created.studies];
     await db.query(`DELETE FROM study_event WHERE study_id = ANY($1)`, { bind });
+    await db.query(`DELETE FROM study_branch WHERE study_id = ANY($1)`, { bind });
+    await db.query(
+      `UPDATE study SET original_question_node_id = NULL, main_question_node_id = NULL
+        WHERE id = ANY($1)`,
+      { bind },
+    );
     await db.query(`DELETE FROM study_node WHERE study_id = ANY($1)`, { bind });
     await db.query(`DELETE FROM study WHERE id = ANY($1)`, { bind });
     await db.query(`DELETE FROM "user" WHERE id = ANY($1)`, { bind: [created.users] });
@@ -78,6 +84,12 @@ describe('schema (composite-key owner isolation)', () => {
 
     expect(fks).toStrictEqual([
       {
+        name: 'study_branch_study_owner_fk',
+        table: 'study_branch',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'study_event_study_owner_fk',
         table: 'study_event',
         columns: ['owner_id', 'study_id'],
@@ -98,7 +110,7 @@ describe('schema (composite-key owner isolation)', () => {
     const studyId = await insertStudy(owner);
 
     await expect(
-      db.query(`INSERT INTO study_node (study_id, owner_id, type) VALUES ($1, $2, 'scripture')`, {
+      db.query(`INSERT INTO study_node (study_id, owner_id, type) VALUES ($1, $2, 'thought')`, {
         bind: [studyId, otherOwner],
         type: QueryTypes.INSERT,
       }),
@@ -117,5 +129,90 @@ describe('schema (composite-key owner isolation)', () => {
         { bind: [studyId, otherOwner], type: QueryTypes.INSERT },
       ),
     ).rejects.toThrow(/study_event_study_owner_fk/);
+  });
+
+  async function insertNode(studyId: string, ownerId: string): Promise<string> {
+    const [row] = await db.query<{ id: string }>(
+      `INSERT INTO study_node (study_id, owner_id, type, title, question_status)
+       VALUES ($1, $2, 'question', 'Q', 'open') RETURNING id`,
+      { bind: [studyId, ownerId], type: QueryTypes.SELECT },
+    );
+    if (!row) throw new Error('no node');
+    return row.id;
+  }
+
+  it('rejects a study_branch whose owner or root node does not match its study (BIB-19)', async () => {
+    const owner = await insertUser();
+    const otherOwner = await insertUser();
+    const studyId = await insertStudy(owner);
+    const otherStudyId = await insertStudy(owner);
+    const nodeId = await insertNode(studyId, owner);
+    const otherStudyNodeId = await insertNode(otherStudyId, owner);
+    const insertBranch = (study: string, branchOwner: string, root: string) =>
+      db.query(`INSERT INTO study_branch (study_id, owner_id, root_node_id) VALUES ($1, $2, $3)`, {
+        bind: [study, branchOwner, root],
+        type: QueryTypes.INSERT,
+      });
+
+    await expect(insertBranch(studyId, otherOwner, nodeId)).rejects.toThrow(
+      /study_branch_study_owner_fk/,
+    );
+    await expect(insertBranch(studyId, owner, otherStudyNodeId)).rejects.toThrow(
+      /study_branch_root_node_fk/,
+    );
+    await expect(insertBranch(studyId, owner, nodeId)).resolves.toBeDefined();
+  });
+
+  it('only lets a study point at question nodes of its own study and owner (BIB-19)', async () => {
+    const owner = await insertUser();
+    const studyId = await insertStudy(owner);
+    const otherStudyId = await insertStudy(owner);
+    const nodeId = await insertNode(studyId, owner);
+    const otherStudyNodeId = await insertNode(otherStudyId, owner);
+    const point = (column: string, node: string) =>
+      db.query(`UPDATE study SET ${column} = $2 WHERE id = $1`, {
+        bind: [studyId, node],
+        type: QueryTypes.UPDATE,
+      });
+
+    await expect(point('original_question_node_id', otherStudyNodeId)).rejects.toThrow(
+      /study_original_question_node_fk/,
+    );
+    await expect(point('main_question_node_id', otherStudyNodeId)).rejects.toThrow(
+      /study_main_question_node_fk/,
+    );
+    await expect(point('main_question_node_id', nodeId)).resolves.toBeDefined();
+  });
+
+  it.each([
+    ['an unknown type', `'note', NULL, NULL, NULL`, /study_node_type_check/],
+    [
+      'a question without a statement',
+      `'question', NULL, 'open', NULL`,
+      /study_node_question_check/,
+    ],
+    ['a question without a status', `'question', 'Q', NULL, NULL`, /study_node_question_check/],
+    ['an unknown question status', `'question', 'Q', 'maybe', NULL`, /study_node_question_check/],
+    ['an empty question statement', `'question', '', 'open', NULL`, /study_node_question_check/],
+    [
+      'a question status on a thought',
+      `'thought', NULL, 'open', NULL`,
+      /study_node_question_check/,
+    ],
+    [
+      'a Scripture node without a reference',
+      `'scripture', NULL, NULL, NULL`,
+      /study_node_scripture_check/,
+    ],
+  ])('refuses %s in study_node (BIB-19)', async (_, values, constraint) => {
+    const owner = await insertUser();
+    const studyId = await insertStudy(owner);
+    await expect(
+      db.query(
+        `INSERT INTO study_node (study_id, owner_id, type, title, question_status, scripture_reference_id)
+         VALUES ($1, $2, ${values})`,
+        { bind: [studyId, owner], type: QueryTypes.INSERT },
+      ),
+    ).rejects.toThrow(constraint);
   });
 });

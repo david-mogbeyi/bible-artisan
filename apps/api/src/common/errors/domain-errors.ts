@@ -1,5 +1,6 @@
 import {
   type AnchorProblemCode,
+  REFERENCE_NOT_FOUND,
   type ReferenceErrorCode,
   SEARCH_QUERY_IS_REFERENCE,
 } from '@bible-artisan/contracts';
@@ -139,6 +140,20 @@ export class ReferenceInvalidError extends Error {
   constructor(readonly code: ReferenceErrorCode) {
     super(REFERENCE_MESSAGES[code]);
     this.name = 'ReferenceInvalidError';
+  }
+}
+
+/**
+ * A request body names a `scripture_reference` id that does not exist or whose edition is not
+ * active (BIB-19's starting passage; PRD section 24: 422 invalid reference). Not a 404: the
+ * request names no private resource, it carries an unusable value. Fixed message; never echoes
+ * the id, and no other passage is ever substituted.
+ */
+export class ReferenceNotFoundError extends Error {
+  readonly code = REFERENCE_NOT_FOUND;
+  constructor() {
+    super('That passage is not available in an active translation');
+    this.name = 'ReferenceNotFoundError';
   }
 }
 

@@ -9,6 +9,7 @@ import { GraphModule } from './modules/graph/graph.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { NotesModule } from './modules/notes/notes.module';
 import { ObservabilityModule } from './modules/observability/observability.module';
+import { StudyHttpModule } from './modules/study/http/study-http.module';
 import { StudyModule } from './modules/study/study.module';
 import { ThreadModule } from './modules/thread/thread.module';
 import { OpenapiModule } from './openapi/openapi.module';
@@ -21,6 +22,7 @@ import { OpenapiModule } from './openapi/openapi.module';
     OpenapiModule,
     IdentityModule,
     StudyModule,
+    StudyHttpModule,
     BibleContentModule,
     GraphModule,
     ThreadModule,

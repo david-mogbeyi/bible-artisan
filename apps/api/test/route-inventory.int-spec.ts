@@ -108,6 +108,22 @@ const ROUTES: Record<string, Access> = {
       test: 'answers 401 without a session and gives another user the same shared list',
     },
   },
+  // Creation has no existing resource to hide: the cross-user test proves receipts are per owner,
+  // so another user's identical Idempotency-Key creates their own study, never a replay.
+  'POST /v1/studies': {
+    access: 'private',
+    crossUserTest: {
+      file: 'studies.int-spec.ts',
+      test: 'POST /v1/studies keeps Idempotency-Keys per owner: another user reusing a key gets their own study',
+    },
+  },
+  'GET /v1/studies/:studyId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'studies.int-spec.ts',
+      test: 'GET /v1/studies/:studyId gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

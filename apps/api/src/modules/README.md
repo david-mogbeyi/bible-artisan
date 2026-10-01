@@ -67,6 +67,35 @@ What the pipeline guarantees, so a route must not re-implement any of it:
 7. Deadlocks and serialization failures (40P01/40001) answer 503 `TRANSIENT_CONFLICT`,
    `retryable: true`; the client retries with the same Idempotency-Key.
 
-Not covered yet: creating a study (POST /studies has no row to lock) and mutations that are not
-study-scoped. The ticket that adds the first of these extends `MutationService` with an entry
-point that keeps the same guarantees; it does not bypass it.
+### Creating a study (BIB-19): `MutationService.create`
+
+A new study has no row to lock and no revision a client could have seen, so creation has its own
+entry point on the same pipeline (`POST /v1/studies`, `modules/study/http/studies.service.ts`):
+
+```ts
+return this.mutations.create(ownerId, mutation, {
+  study: { title, startingReferenceId },          // owner = ownerId (session); counters are the pipeline's
+  work: async (m) => {                             // m.creating === true
+    const node = await m.createChild(StudyNode, { type: 'question', title, questionStatus: 'open' });
+    await m.updateCreatedStudy({ mainQuestionNodeId: node.id });  // root pointers, revision stays 1
+    const event = await m.appendEvent({ eventType: 'study_created', payload: { … } });
+    return { status: 201, body: dto };
+  },
+});
+```
+
+- Same transaction, receipt claim, fingerprint, replay, 422 on key reuse, and COMMIT-before-reply
+  as `execute`. Step 2 INSERTs the study (owner from the session) instead of locking an existing
+  row; the insert holds the new row's lock, so lock order stays receipt → study → children.
+- No `expectedRevision` (never 428) and no revision check is required; at least one event still
+  is. The study starts at revision 1 and content revision 1, shared by every root it creates, and
+  its first event is sequence 1.
+- `m.createChild(Model, values)` inserts into any study-scoped table with `studyId`/`ownerId`
+  from the lock. Use it for children in any mutation. `m.updateCreatedStudy` exists only while
+  creating; an existing study changes through `updateWithExpectedRevision`.
+- A concurrent duplicate with the same key blocks on the receipt and replays the one study;
+  validation that needs no lock (e.g. the starting reference) runs before `create`, so a refusal
+  writes nothing at all.
+
+Not covered yet: mutations that are not study-scoped. The ticket that adds the first one extends
+`MutationService` with an entry point that keeps the same guarantees; it does not bypass it.

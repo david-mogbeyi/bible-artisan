@@ -5,3 +5,4 @@ export * from './url';
 export * from './mutation';
 export * from './bible';
 export * from './anchor';
+export * from './study';

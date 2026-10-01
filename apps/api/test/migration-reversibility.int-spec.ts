@@ -13,6 +13,7 @@ import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-rel
 import { withCorpusDropAllowed } from './support/corpus-drop';
 
 const CORPUS_MIGRATION = '20261001094438_create_bible_corpus.ts';
+const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
 
 const DOMAIN_TABLES = [
   'auth_challenge',
@@ -24,6 +25,7 @@ const DOMAIN_TABLES = [
   'mutation_receipt',
   'scripture_reference',
   'study',
+  'study_branch',
   'study_event',
   'study_node',
   'user',
@@ -88,31 +90,45 @@ describe('migration reversibility', () => {
       ).map((row) => row.id);
     const referencesBefore = await references();
     expect(referencesBefore.length).toBeGreaterThan(0);
-    const before = await recordedMigrations(db);
     const migrator = createMigrator(db);
+    // Migrations after the search index are not corpus-bound (BIB-19's study roots): revert them
+    // normally first, so the next `down` is the first corpus-bound one.
+    const later = shippedMigrationNames().filter((name) => name > SEARCH_MIGRATION);
+    if (later[0]) {
+      const first = later[0];
+      await migrator.down({ to: first });
+    }
+    // Restore latest even when an assertion fails, so later tests and files see the full schema.
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(SEARCH_MIGRATION);
+      const tablesBefore = await publicTables(db, DOMAIN_TABLES);
 
-    // Every migration's `down` commits on its own, so the first one run on the way to the corpus
-    // (the latest: the search index) must refuse too, or this would leave a half-reverted database.
-    const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as { cause?: unknown }).cause).toMatchObject({
-      message:
-        'bible search index drop refused: an active edition exists (set ALLOW_CORPUS_DROP=1)',
-      parent: expect.objectContaining({ code: '23000' }),
-    });
-    expect(await recordedMigrations(db)).toStrictEqual(before);
-    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
-    expect(await references()).toStrictEqual(referencesBefore);
-    const [active] = await db.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM bible_edition WHERE activated_at IS NOT NULL`,
-      { type: QueryTypes.SELECT },
-    );
-    expect(active).toStrictEqual({ n: 1 });
+      // Every migration's `down` commits on its own, so the first corpus-bound one run on the way
+      // to the corpus (the search index) must refuse too, or this would leave a half-reverted
+      // database.
+      const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as { cause?: unknown }).cause).toMatchObject({
+        message:
+          'bible search index drop refused: an active edition exists (set ALLOW_CORPUS_DROP=1)',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(tablesBefore);
+      expect(await references()).toStrictEqual(referencesBefore);
+      const [active] = await db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM bible_edition WHERE activated_at IS NOT NULL`,
+        { type: QueryTypes.SELECT },
+      );
+      expect(active).toStrictEqual({ n: 1 });
+    } finally {
+      await migrator.up();
+    }
   });
 
   it('refuses to drop the shared reference ids without the opt-in once the search index is gone', async () => {
     const migrator = createMigrator(db);
-    const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
     const REFERENCE_MIGRATION = '20261001104810_create_scripture_reference.ts';
     await withCorpusDropAllowed(() => migrator.down({ to: SEARCH_MIGRATION }));
     // Restore latest even when an assertion fails, so later tests and files see the full schema.
