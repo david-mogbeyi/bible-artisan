@@ -336,7 +336,8 @@ The command is a separate step, not a migration: migrations only get `context.qu
 - NFR-PERF-002 (p95 ≤ 750 ms) is a production target. It is verified by the recorded measurements below and by BIB-52 on deployment hardware, not by a hard 750 ms gate on shared CI runners, which would flake. The test's hard assertions:
   - Each worst-case query, served alone (three times each), finishes within 750 ms. It takes tens of milliseconds, so this is robust.
   - The p95 of the 100 concurrent requests is computed and printed on every run (`[NFR-PERF-002] ...`, numbers only). It is held to `SEARCH_P95_BUDGET_MS`, 750 by default (local runs) and 2000 in CI (`.github/workflows/ci.yml`).
-- After the merge-gate fixes, locally: alone max 26 ms; concurrent p50 133 ms, p95 229 ms.
+- After the merge-gate fixes, locally (full file): alone max 26 ms; concurrent p50 133 ms, p95 227 to 255 ms over five runs. Run on its own, p95 is 152 to 180 ms with the query-side `translate` and 160 to 204 ms without it, so the `translate` costs nothing measurable.
+- On the shared 2-vCPU GitHub runner (run 36865819602): alone max 47 ms; concurrent p50 697 ms, p95 1,218 ms. The same code had passed a hard 750 ms gate one run earlier, which is why CI holds the concurrent p95 to 2,000 ms rather than to the production target.
 - Locally (PostgreSQL 16, Apple silicon), three runs measured server p95 171, 183 and 204 ms (p50 120 to 134 ms).
 - The first CI run timed requests from the in-process test client on a 2-vCPU GitHub runner: p95 922 ms, failing. That figure included client-side work in the same process, and it predates the phrase single-fetch below.
 - Changes made to get here:
