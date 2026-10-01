@@ -93,10 +93,24 @@ describe('Sequelize models against the real schema', () => {
       originalQuestionNodeId: null,
       mainQuestionNodeId: null,
       pinnedAt: null,
+      lastActivityAt: expect.any(Date),
+      searchText: '',
       questionNodeType: 'question',
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
+  });
+
+  it("writes and reads a Study's last activity and search text through the model (BIB-21)", async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const lastActivityAt = new Date('2026-10-01T12:34:56.789Z');
+    await study.update({ lastActivityAt, searchText: 'conscience in romans' });
+    const found = await Study.findByPk(study.id, { rejectOnEmpty: true });
+    expect([found.lastActivityAt, found.searchText]).toStrictEqual([
+      lastActivityAt,
+      'conscience in romans',
+    ]);
   });
 
   it('pins a Study and creates a Tag and StudyTag through the models (BIB-20)', async () => {

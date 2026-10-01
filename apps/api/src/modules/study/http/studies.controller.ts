@@ -1,5 +1,5 @@
-import { Controller, Get, Header, Param, Patch, Post } from '@nestjs/common';
-import type { StudyResponse } from '@bible-artisan/contracts';
+import { Controller, Get, Header, Param, Patch, Post, Query } from '@nestjs/common';
+import type { StudyListResponse, StudyResponse } from '@bible-artisan/contracts';
 import {
   MutationRequest,
   type MutationRequestInfo,
@@ -42,6 +42,16 @@ export class StudiesController {
     @MutationRequest() mutation: MutationRequestInfo,
   ): Promise<MutationResult> {
     return this.studies.update(ownerId, studyId, mutation);
+  }
+
+  /**
+   * The owner's library (BIB-21): their own studies only, pinned first, searchable, filterable by
+   * one of their tags, in keyset pages. Read-only.
+   */
+  @Get()
+  @Header('Cache-Control', 'no-store')
+  list(@CurrentUserId() ownerId: string, @Query() query: unknown): Promise<StudyListResponse> {
+    return this.studies.list(ownerId, query);
   }
 
   /** One of the owner's studies; another user's, absent and malformed ids are the same 404. */

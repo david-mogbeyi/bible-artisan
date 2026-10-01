@@ -60,8 +60,8 @@ What the pipeline guarantees, so a route must not re-implement any of it:
    and study scoping are added for you) and `m.appendEvent` at least once each, or `execute`
    throws (500) and rolls everything back. Creating a child counts as a study change: check the
    study's revision (`m.updateWithExpectedRevision(Study, { id: studyId, … })`).
-5. `content_revision` and `last_event_sequence` are written once, by the pipeline. Never update
-   them, or `study_event`, yourself. When only the work knows whether it changed content (BIB-20:
+5. `content_revision`, `last_event_sequence` and `last_activity_at` (BIB-21) are written once, by
+   the pipeline. Never update them, or `study_event`, yourself. When only the work knows whether it changed content (BIB-20:
    a study edit that may be just a pin or tag change), declare `bumpsContentRevision: false` and
    call `m.bumpContentRevision()` for a content change; it moves the counter by one at most.
 6. The global `MutationResultInterceptor` sends the stored status, `Idempotent-Replayed: true` on

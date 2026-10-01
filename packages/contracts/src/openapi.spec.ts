@@ -242,6 +242,56 @@ describe('buildOpenApiDocument', () => {
           },
         },
         '/studies': {
+          get: {
+            description:
+              "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z), ties broken by id. q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor works only for the same user, filters and sort, and anything else is 400. Trashed studies are never listed. No totals.",
+            security: [{ sessionCookie: [] }],
+            parameters: [
+              {
+                name: 'q',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', minLength: 1, maxLength: 200 },
+              },
+              {
+                name: 'tag',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', format: 'uuid' },
+              },
+              {
+                name: 'state',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', enum: ['active', 'archived'], default: 'active' },
+              },
+              {
+                name: 'sort',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', enum: ['recent', 'created', 'title'], default: 'recent' },
+              },
+              {
+                name: 'cursor',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' },
+              },
+              {
+                name: 'limit',
+                in: 'query',
+                required: false,
+                schema: { type: 'integer', minimum: 1, maximum: 50, default: 50 },
+              },
+            ],
+            responses: {
+              200: {
+                description: "One page of the owner's studies",
+                content: { 'application/json': { schema: ref('StudyListResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
           post: {
             description:
               'Creates a study for the signed-in user in one transaction: the study (revision 1, content revision 1), a Scripture root node for startingReferenceId, a Question node for question, the initial branch (rooted at the question, else the passage), and one study_created event (sequence 1). Needs a question or a starting reference, or blank: true for an untitled empty study. The title, when omitted, is derived from the reference label, else the question. No expectedRevision (nothing exists yet). Send an Idempotency-Key: a retry with the same key and body replays the original 201 (Idempotent-Replayed: true) and never creates a second study; the same key with a different body is 422 IDEMPOTENCY_KEY_REUSED. An unknown reference, or one whose edition is not active, is 422 REFERENCE_NOT_FOUND and nothing is written.',
@@ -448,6 +498,7 @@ describe('buildOpenApiDocument', () => {
       'CreateStudyRequest',
       'CreateStudyResponse',
       'StudyResponse',
+      'StudyListResponse',
       'UpdateStudyRequest',
       'UpdateStudyResponse',
     ]);

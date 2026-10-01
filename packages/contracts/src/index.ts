@@ -8,3 +8,4 @@ export * from './anchor';
 export * from './study';
 export * from './user-text';
 export * from './study-edit';
+export * from './study-library';

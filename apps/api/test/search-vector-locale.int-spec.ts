@@ -87,12 +87,14 @@ describe('search_vector is locale-independent (BIB-16)', () => {
     await importCorpus(cLocale, readCorpusArtifact(ENGWEBP_RELEASE), ENGWEBP_RELEASE);
   }, 300_000);
 
+  // DROP DATABASE forces a checkpoint, which can outlast the default 10 s hook timeout after a
+  // write-heavy run (corpus imports, the library's 20,000-study EXPLAIN seed).
   afterAll(async () => {
     await cLocale?.close();
     await admin.query(`DROP DATABASE IF EXISTS "${tempName}" WITH (FORCE)`);
     await admin.close();
     await main.close();
-  });
+  }, 60_000);
 
   it('blanks exactly the non-ASCII characters of the imported corpus, none a letter or digit', async () => {
     const rows = await main.query<{ text: string }>(`SELECT text FROM bible_verse`, {

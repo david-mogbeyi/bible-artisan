@@ -2,8 +2,11 @@ import { Injectable } from '@nestjs/common';
 import {
   type CreateStudyResponse,
   createStudyRequestSchema,
+  listStudiesQuerySchema,
   type ScriptureReference,
+  type StudyListResponse,
   type StudyResponse,
+  studySearchText,
   type UpdateStudyResponse,
   updateStudyRequestSchema,
 } from '@bible-artisan/contracts';
@@ -26,6 +29,7 @@ import type { AppendEventInput } from '../../thread/thread.service';
 import { ReferenceService } from '../../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study-access.service';
 import { deriveStudyTitle } from '../study-title';
+import { listStudies } from './study-library';
 import { readStudyState } from './study-state';
 import { applyTagChange } from './study-tags';
 
@@ -131,6 +135,16 @@ export class StudiesService {
     });
   }
 
+  /**
+   * The owner's library page (BIB-21): `GET /v1/studies` query parameters validated with the
+   * shared schema (400 before any query), then one owner-scoped listing.
+   */
+  list(ownerId: string, query: unknown): Promise<StudyListResponse> {
+    return listStudies(ownerId, parseBody(listStudiesQuerySchema, query), (ids) =>
+      this.references.storedReferences(ids),
+    );
+  }
+
   async get(ownerId: string, studyId: string): Promise<StudyResponse> {
     const study = await this.access.requireOwnedStudy(ownerId, studyId);
     const [state, reference] = await Promise.all([
@@ -229,6 +243,15 @@ export class StudiesService {
           values: {
             ...(titleChanged && body.title !== undefined ? { title: body.title } : {}),
             ...(descriptionChanged ? { description: body.description ?? null } : {}),
+            // The library matches the folded title and description (BIB-21); rewritten with them.
+            ...(titleChanged || descriptionChanged
+              ? {
+                  searchText: studySearchText(
+                    titleChanged && body.title !== undefined ? body.title : current.title,
+                    descriptionChanged ? (body.description ?? null) : current.description,
+                  ),
+                }
+              : {}),
             ...(pinChanged ? { pinnedAt: body.pinned ? new Date() : null } : {}),
             ...(mainChanged && newMainId !== null
               ? {
