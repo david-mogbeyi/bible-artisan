@@ -65,15 +65,21 @@ export class Study extends Model {
   declare startingReferenceId: string | null;
 
   /**
-   * The Question node the study was created with. Never rewritten (PRD section 23: "Original
-   * question is retained"). Composite FK to a node of this study and owner.
+   * The Question node the study was created with, or (for a study created without one) its first
+   * main question. Never rewritten once set (PRD section 23: "Original question is retained"):
+   * the `study_original_question_immutable` trigger refuses any change. Composite FK to a node of
+   * this study and owner.
    */
   @Column({ field: 'original_question_node_id', type: DataType.UUID, allowNull: true })
   declare originalQuestionNodeId: string | null;
 
-  /** The current main question (BIB-20 may change it). Composite FK like the original's. */
+  /** The current main question (changed by BIB-20 editing). Composite FK like the original's. */
   @Column({ field: 'main_question_node_id', type: DataType.UUID, allowNull: true })
   declare mainQuestionNodeId: string | null;
+
+  /** When the owner pinned the study (BIB-20); null when it is not pinned. */
+  @Column({ field: 'pinned_at', type: DataType.DATE, allowNull: true })
+  declare pinnedAt: Date | null;
 
   /**
    * Always 'question': a STORED GENERATED constant (BIB-19) that is the last column of both

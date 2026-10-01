@@ -5,6 +5,9 @@ import {
   IDEMPOTENCY_KEY_HEADER,
   type StudyResponse,
   studyResponseSchema,
+  type UpdateStudyRequest,
+  type UpdateStudyResponse,
+  updateStudyResponseSchema,
 } from '@bible-artisan/contracts';
 import { apiFetch } from './api-client';
 
@@ -34,6 +37,24 @@ export function studyQueryKey(studyId: string) {
 
 export function fetchStudy(studyId: string): Promise<StudyResponse> {
   return apiFetch(`/studies/${encodeURIComponent(studyId)}`, studyResponseSchema);
+}
+
+/**
+ * `PATCH /v1/studies/:studyId` (BIB-20). A retry must resend the frozen request: the same body
+ * (with its original `expectedRevision`) and the same `idempotencyKey`, so a retry after a lost
+ * response replays the original edit instead of applying it again on a revision the edit itself
+ * already moved.
+ */
+export function updateStudy(
+  studyId: string,
+  body: UpdateStudyRequest,
+  idempotencyKey: string,
+): Promise<UpdateStudyResponse> {
+  return apiFetch(`/studies/${encodeURIComponent(studyId)}`, updateStudyResponseSchema, {
+    method: 'PATCH',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+    body: JSON.stringify(body),
+  });
 }
 
 export function studyHref(studyId: string): string {

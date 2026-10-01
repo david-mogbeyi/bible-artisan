@@ -101,11 +101,15 @@ describe('study responses', () => {
     const study = {
       id: referenceId,
       title: 'Untitled study',
+      description: null,
       lifecycle: 'active',
+      pinned: false,
       revision: 1,
       contentRevision: 1,
       startingReference: null,
       mainQuestion: null,
+      originalQuestion: null,
+      tags: [],
       branchId: null,
       createdAt: '2026-10-01T12:00:00.000Z',
     };

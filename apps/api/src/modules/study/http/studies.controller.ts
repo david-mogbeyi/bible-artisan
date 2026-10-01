@@ -1,4 +1,4 @@
-import { Controller, Get, Header, Param, Post } from '@nestjs/common';
+import { Controller, Get, Header, Param, Patch, Post } from '@nestjs/common';
 import type { StudyResponse } from '@bible-artisan/contracts';
 import {
   MutationRequest,
@@ -28,6 +28,20 @@ export class StudiesController {
     @MutationRequest() mutation: MutationRequestInfo,
   ): Promise<MutationResult> {
     return this.studies.create(ownerId, mutation);
+  }
+
+  /**
+   * Edits the study's title, description, main question, pin or tags (BIB-20). Needs
+   * `expectedRevision` (428 / 409); an `Idempotency-Key` makes a retry replay the original 200.
+   * Returns the `MutationResult` itself: the global interceptor sends it after COMMIT.
+   */
+  @Patch(':studyId')
+  update(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.studies.update(ownerId, studyId, mutation);
   }
 
   /** One of the owner's studies; another user's, absent and malformed ids are the same 404. */

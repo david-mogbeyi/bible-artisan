@@ -72,17 +72,37 @@ export const STUDY_LIFECYCLES = ['active', 'archived', 'trashed'] as const;
 
 export const QUESTION_STATUSES = ['open', 'partially_answered', 'answered', 'deferred'] as const;
 
-/** `GET /v1/studies/:studyId`: what creation wrote, for the study page and reload. */
+/** A Question node as the study page shows it (the main or the original question). */
+export const studyQuestionSchema = z.object({
+  nodeId: z.uuid(),
+  text: z.string(),
+  status: z.enum(QUESTION_STATUSES),
+});
+
+export type StudyQuestion = z.infer<typeof studyQuestionSchema>;
+
+/** One of the owner's tags on a study (BIB-20). The name is private text: never logged. */
+export const studyTagSchema = z.object({ id: z.uuid(), name: z.string() });
+
+export type StudyTag = z.infer<typeof studyTagSchema>;
+
+/**
+ * `GET /v1/studies/:studyId`: the study's identity for the study page and reload. `mainQuestion`
+ * is the current main question; `originalQuestion` the one the study first had, which editing
+ * never rewrites (PRD section 23). Tags are sorted by their normalized name (BIB-20).
+ */
 export const studyResponseSchema = z.object({
   id: z.uuid(),
   title: z.string(),
+  description: z.string().nullable(),
   lifecycle: z.enum(STUDY_LIFECYCLES),
+  pinned: z.boolean(),
   revision: z.number().int().positive(),
   contentRevision: z.number().int().positive(),
   startingReference: scriptureReferenceSchema.nullable(),
-  mainQuestion: z
-    .object({ nodeId: z.uuid(), text: z.string(), status: z.enum(QUESTION_STATUSES) })
-    .nullable(),
+  mainQuestion: studyQuestionSchema.nullable(),
+  originalQuestion: studyQuestionSchema.nullable(),
+  tags: z.array(studyTagSchema),
   branchId: z.uuid().nullable(),
   createdAt: z.iso.datetime(),
 });

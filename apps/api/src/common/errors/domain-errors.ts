@@ -1,8 +1,12 @@
 import {
   type AnchorProblemCode,
+  MAX_STUDY_TAGS,
+  QUESTION_NOT_FOUND,
   REFERENCE_NOT_FOUND,
   type ReferenceErrorCode,
   SEARCH_QUERY_IS_REFERENCE,
+  STUDY_UNCHANGED,
+  TAG_LIMIT_EXCEEDED,
 } from '@bible-artisan/contracts';
 
 /**
@@ -190,5 +194,43 @@ export class AnchorInvalidError extends Error {
   constructor(readonly code: AnchorProblemCode) {
     super(ANCHOR_MESSAGES[code]);
     this.name = 'AnchorInvalidError';
+  }
+}
+
+/**
+ * A study edit names, as the new main question, a node that is not a live Question node of that
+ * study (BIB-20; PRD section 24: 422). Another user's node and an absent one take this same path,
+ * so the response says nothing about which. Fixed message; never echoes the id.
+ */
+export class QuestionNotFoundError extends Error {
+  readonly code = QUESTION_NOT_FOUND;
+  constructor() {
+    super('That question is not part of this study');
+    this.name = 'QuestionNotFoundError';
+  }
+}
+
+/**
+ * A study edit in which every field already has the submitted value (BIB-20; 422). Nothing is
+ * written: no revision, no event, no receipt.
+ */
+export class StudyUnchangedError extends Error {
+  readonly code = STUDY_UNCHANGED;
+  constructor() {
+    super('The study already has these values');
+    this.name = 'StudyUnchangedError';
+  }
+}
+
+/**
+ * A study edit whose tag change would leave the study with more than `MAX_STUDY_TAGS` tags
+ * (BIB-20; 422). The limit is checked after the deltas apply, under the study lock, so it holds
+ * whatever another device added meanwhile. Nothing is written.
+ */
+export class TagLimitExceededError extends Error {
+  readonly code = TAG_LIMIT_EXCEEDED;
+  constructor() {
+    super(`A study can have at most ${MAX_STUDY_TAGS} tags`);
+    this.name = 'TagLimitExceededError';
   }
 }

@@ -493,6 +493,74 @@ Only step 2 differs:
 
 **Not in BIB-19:** editing the title or questions (BIB-20), the library and `last_activity_at` (BIB-21), archive and trash (BIB-22), notes (BIB-23), the node API and other node columns (BIB-25), canonical Scripture dedup (BIB-26), sessions and branch membership (BIB-33), the offline queue (BIB-36), and the workspace itself.
 
+## Addendum (2026-10-01, BIB-20): editing a study
+
+`PATCH /v1/studies/:studyId` (`modules/study/http/`) edits the title, description, main question, pin and tag set through `MutationService.execute`.
+
+**One revision, checked first.**
+
+- `study.revision` covers every editable field. Any successful edit bumps it once, so a concurrent edit to a different field still gets 409. The client reloads and reapplies its draft; field-level merge is BIB-37.
+- The work compares revisions before anything else, so a stale edit is always 409, whatever else the body says.
+- The web form diffs its draft against `base`: the study as last saved (from the 200, including a replayed one) or reloaded, never a copy a background refetch brought in, and sends `base.revision`. "Reload latest" rebases: a field the user did not touch takes the reloaded value, a touched one stays a pending change. So Save sends only the fields the user changed, and never resends an untouched field's old value.
+- Every request is frozen once sent: its exact body (including `expectedRevision`) and its Idempotency-Key. After a failure whose outcome is unknown (network, 5xx), Retry, or Save with an unedited draft, resends it verbatim, so a save that committed but lost its response gets the original 200 replayed. Rebuilding it from a refetched study would carry a new revision, hence a new key, and apply the edit twice (a second Question node) or answer `STUDY_UNCHANGED`. Editing the draft discards the frozen request; the next Save is a new request with a new key from the current `base`.
+- On a 200 a field shows the saved value only if the draft still holds what the save assumed (the value sent, or the base value for an unsent field). Anything typed while the save was in flight stays as a pending change.
+
+**No-op edits.**
+
+- A field equal to its current value is not a change. Tag deltas that are already applied are no change.
+- An edit with no change at all is 422 `STUDY_UNCHANGED` and rolls back (no receipt). The pipeline requires an event, and there is nothing true to record.
+
+**Content revision.**
+
+- `content_revision` moves only for a new title, description or main question. Pin and tags are organizational and must not stale the summary.
+- `StudyMutation.bumpContentRevision()` lets the work decide this under the lock (`bumpsContentRevision: false` on the spec).
+
+**Main and original question.**
+
+- `mainQuestion: { text }` creates a new open Question node; `{ nodeId }` points at a live Question node of the study. Another study's node, another user's node, or an absent one is 422 `QUESTION_NOT_FOUND`, all the same.
+- Question text is never edited here (BIB-25), so the original question's text cannot change.
+- `original_question_node_id` is set once. A study created without a question takes its first main question as its original. The `study_original_question_immutable` trigger refuses any later change; a study DELETE is not an UPDATE, so hard delete still cascades.
+- A blank study's first question also roots its initial branch, as at creation.
+
+**Tags.**
+
+- `tag (owner_id, name, normalized_name)` is one vocabulary per owner, with `UNIQUE (owner_id, normalized_name)`.
+- `study_tag` has composite FKs `(owner_id, study_id) → study` and `(owner_id, tag_id) → tag`, both cascading, so another owner's tag is unwritable on a study.
+- Normalization (`normalizeTagName` / `tagKey` in contracts):
+  - the display name is NFC, trimmed, with whitespace runs collapsed; it otherwise keeps what the user typed;
+  - the key folds further: NFKC; format characters (`\p{Cf}`: zero-width space and joiners, BOM, bidi controls) and the characters `userTextSchema` refuses are removed; `İ` and `ı` become `i` (and `i` + U+0307 becomes `i`); then `toLowerCase().toUpperCase().toLowerCase()`, which approximates full case folding (`ß`/`ẞ` → `ss`, final sigma → `σ`); whitespace collapsed. The dotted/dotless I choice is language-neutral: "İstanbul", "Istanbul" and "istanbul" are one tag in every locale, at the cost of Turkish "ılık" and "ilik" also being one. Changing `tagKey` needs a data migration;
+  - names are 1–50 characters, and a name whose key is empty (only format characters) is refused.
+- **Tags travel as deltas**, `tags: { add?: string[], remove?: string[] }`, not as the whole set. A whole set built from a device's stale copy silently drops whatever another device added meanwhile; deltas compose. Additions are names (the user typed them, and an existing tag of the owner with the same key is reused); removals are tag ids from `StudyResponse.tags`, so a removal names exactly the tag the client saw. Removals apply first, so `remove: [id], add: ["New Casing"]` recases a tag no other study uses.
+  - An add whose key the study already carries, and a remove of an id it does not carry (removed already, another study's, another owner's, absent), is a no-op for that item. Same-key adds or repeated ids in one request are 400 `TAG_DUPLICATE`; an empty delta is 400.
+  - If the whole edit changes nothing it is 422 `STUDY_UNCHANGED`, as before. `study_tags_changed {addedTagIds, removedTagIds}` lists only real changes.
+  - At most 20 tags per study, checked after applying under the study lock: 422 `TAG_LIMIT_EXCEEDED`.
+  - The web form keeps pending adds and removes against the saved tags and shows saved tags minus pending removals plus pending adds, so after Reload latest the other device's tags appear next to the user's own pending changes.
+- **Unused tags are deleted.** When an edit removes a study's last reference to a tag, the tag row goes in the same transaction, so private tag text does not linger and a later add takes the new display casing. An existing tag otherwise keeps its first display name. Tag management is not in the MVP.
+- Concurrency between studies of one owner (different study locks):
+  - New tags are inserted with `INSERT … ON CONFLICT DO NOTHING` in key order, then selected `FOR KEY SHARE`. Two studies adding the same new tag converge on one row (a test races them through a gate transaction holding the tag key).
+  - The orphan cleanup locks the candidate rows `FOR UPDATE` first, then runs `DELETE … WHERE NOT EXISTS (study_tag)` as a new statement. An adder that locked first makes the cleanup wait and then see its pairing; a cleanup that locked first makes the adder's `FOR KEY SHARE` skip the deleted row, and the adder inserts it afresh. A single `DELETE … NOT EXISTS` would not do: after waiting on a lock PostgreSQL deletes the row without re-running the subquery, and the cascade would drop the other study's new pairing. A gate-pattern test races a remover against an adder.
+  - Two studies that each remove a tag the other adds at the same moment can deadlock; PostgreSQL aborts one, which answers the retryable 503 `TRANSIENT_CONFLICT`.
+
+**Pin.** `study.pinned_at`, a study-level pin for the library's pinned group (BIB-21). No per-owner cap: the PRD sets none. Pinned nodes and citations are a different concept and are not in this ticket.
+
+**Events** (ids and booleans only; the title, description, question and tag text never enter a payload):
+
+- `study_renamed`
+- `study_description_changed {cleared}`
+- `question_created {questionNodeId, branchId}`
+- `main_question_changed {fromNodeId, toNodeId, originalQuestionNodeId}`
+- `study_pinned` / `study_unpinned`
+- `study_tags_changed {addedTagIds, removedTagIds}`
+
+There is one event per real change. Intended visibility for BIB-55's column: renamed, question_created and main_question_changed are thread-visible; the rest are internal (PRD section 11: list actions make no reasoning events).
+
+**Data and down.**
+
+- New CHECKs: `study.title` 1–200 and `description` NULL or 1–2,000. The description limit is an assumption: the PRD sets none, and 2,000 matches the edge-note bound.
+- The migration's `down` refuses while any tag or pin exists unless `ALLOW_STUDY_DATA_DROP=1`. Descriptions survive a `down`, because the column predates it.
+
+**Not in BIB-20:** the library and tag filter (BIB-21), archive and trash with the `STUDY_ARCHIVED` guard (BIB-22), editing question text or status (BIB-25), the save coordinator and conflict-review UI (BIB-35, BIB-37), and the event visibility column (BIB-55).
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

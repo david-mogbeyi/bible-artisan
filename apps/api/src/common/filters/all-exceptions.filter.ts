@@ -9,12 +9,15 @@ import {
   IdempotencyKeyReusedError,
   NotFoundError,
   OtpError,
+  QuestionNotFoundError,
   RateLimitedError,
   ReferenceInvalidError,
   ReferenceNotFoundError,
   RevisionConflictError,
   RevisionMissingError,
   SearchQueryIsReferenceError,
+  StudyUnchangedError,
+  TagLimitExceededError,
   UnauthenticatedError,
   ValidationError,
 } from '../errors/domain-errors';
@@ -143,7 +146,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof ReferenceInvalidError ||
       exception instanceof ReferenceNotFoundError ||
       exception instanceof AnchorInvalidError ||
-      exception instanceof SearchQueryIsReferenceError
+      exception instanceof SearchQueryIsReferenceError ||
+      exception instanceof QuestionNotFoundError ||
+      exception instanceof StudyUnchangedError ||
+      exception instanceof TagLimitExceededError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,

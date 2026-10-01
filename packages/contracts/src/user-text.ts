@@ -23,6 +23,13 @@ export function hasForbiddenUserTextCharacter(text: string): boolean {
   return FORBIDDEN_USER_TEXT.test(text);
 }
 
+const FORBIDDEN_USER_TEXT_GLOBAL = new RegExp(FORBIDDEN_USER_TEXT.source, 'g');
+
+/** `text` without any character `userTextSchema` refuses (for derived keys, never for storage). */
+export function stripForbiddenUserTextCharacters(text: string): string {
+  return text.replace(FORBIDDEN_USER_TEXT_GLOBAL, '');
+}
+
 /**
  * A trimmed user-text string of `min`..`max` UTF-16 units (after trimming) with no forbidden
  * character. Compose `.optional()` etc. on the result as needed.

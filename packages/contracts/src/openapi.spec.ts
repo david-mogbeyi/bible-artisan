@@ -270,7 +270,7 @@ describe('buildOpenApiDocument', () => {
         '/studies/{studyId}': {
           get: {
             description:
-              "Returns one of the signed-in user's studies: title, lifecycle, revisions, starting reference, main question and initial branch. Another user's, an absent, and a malformed id are the same 404.",
+              "Returns one of the signed-in user's studies: title, description, lifecycle, pin, revisions, starting reference, main and original questions, tags and initial branch. Another user's, an absent, and a malformed id are the same 404.",
             security: [{ sessionCookie: [] }],
             parameters: [
               {
@@ -284,6 +284,36 @@ describe('buildOpenApiDocument', () => {
               200: {
                 description: 'The study',
                 content: { 'application/json': { schema: ref('StudyResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+          patch: {
+            description:
+              "Edits one of the signed-in user's studies (FR-STUDY-003): title, description (null clears it), main question ({text} creates a new open Question node and makes it main; {nodeId} makes an existing live Question node of the study main), pin, and tags as deltas (tags.add: names, reusing the owner's tag with the same normalized key; tags.remove: ids of the study's tags; an item that is already applied is a no-op, and a tag no study uses any more is deleted). The original question is never rewritten; a study that had none gets the first main question as its original. expectedRevision is the study's revision and covers every field: missing is 428, stale is 409 with currentRevision. One StudyEvent per real change (study_renamed, study_description_changed, question_created, main_question_changed, study_pinned/study_unpinned, study_tags_changed; ids only) commits with the edit; contentRevision moves only for title, description or main question changes. An edit that changes nothing is 422 STUDY_UNCHANGED; more than 20 tags after applying the change is 422 TAG_LIMIT_EXCEEDED; a nodeId that is not a live question of this study is 422 QUESTION_NOT_FOUND. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, and a malformed id are the same 404.",
+            security: [{ sessionCookie: [] }],
+            parameters: [
+              {
+                name: 'Idempotency-Key',
+                in: 'header',
+                required: false,
+                schema: { type: 'string', format: 'uuid' },
+              },
+              {
+                name: 'studyId',
+                in: 'path',
+                required: true,
+                schema: { type: 'string', format: 'uuid' },
+              },
+            ],
+            requestBody: {
+              required: true,
+              content: { 'application/json': { schema: ref('UpdateStudyRequest') } },
+            },
+            responses: {
+              200: {
+                description: 'The study as edited',
+                content: { 'application/json': { schema: ref('UpdateStudyResponse') } },
               },
               default: errorResponse,
             },
@@ -418,6 +448,8 @@ describe('buildOpenApiDocument', () => {
       'CreateStudyRequest',
       'CreateStudyResponse',
       'StudyResponse',
+      'UpdateStudyRequest',
+      'UpdateStudyResponse',
     ]);
   });
 });

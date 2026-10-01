@@ -92,6 +92,12 @@ describe('schema (composite-key owner isolation)', () => {
         columns: ['owner_id', 'study_id'],
         refs: ['owner_id', 'id'],
       },
+      {
+        name: 'study_tag_study_owner_fk',
+        table: 'study_tag',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
     ]);
   });
 
@@ -212,13 +218,14 @@ describe('schema (composite-key owner isolation)', () => {
     ).rejects.toThrow(/study_main_question_node_fk/);
   });
 
-  it('cascades hard deletes from user to study to every study-scoped row (BIB-19)', async () => {
+  it('cascades hard deletes from user to study to every study-scoped row (BIB-19, BIB-20 tags)', async () => {
     const actions = await db.query<{ name: string; action: string }>(
       `SELECT conname AS name, confdeltype::text AS action
          FROM pg_constraint
         WHERE contype = 'f'
           AND conrelid::regclass::text IN
-              ('study', 'study_node', 'study_event', 'study_branch', 'mutation_receipt', 'auth_session')
+              ('study', 'study_node', 'study_event', 'study_branch', 'mutation_receipt', 'auth_session',
+               'tag', 'study_tag')
         ORDER BY conname`,
       { type: QueryTypes.SELECT },
     );
@@ -235,6 +242,9 @@ describe('schema (composite-key owner isolation)', () => {
       { name: 'study_original_question_node_fk', action: 'a' },
       { name: 'study_owner_id_fkey', action: 'c' },
       { name: 'study_starting_reference_id_fkey', action: 'a' },
+      { name: 'study_tag_study_owner_fk', action: 'c' },
+      { name: 'study_tag_tag_owner_fk', action: 'c' },
+      { name: 'tag_owner_id_fkey', action: 'c' },
     ]);
   });
 
