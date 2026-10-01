@@ -5,6 +5,7 @@ import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
+import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
@@ -44,6 +45,7 @@ describe('Sequelize models against the real schema', () => {
     await Study.destroy({ where: { id: studyId } });
     await AuthChallenge.destroy({ where: { id: created.challenges } });
     await AuthSession.destroy({ where: { userId: created.users } });
+    await MutationReceipt.destroy({ where: { ownerId: created.users } });
     await User.destroy({ where: { id: created.users } });
     await db.close();
   });
@@ -74,9 +76,72 @@ describe('Sequelize models against the real schema', () => {
       lifecycle: 'active',
       revision: 1,
       contentRevision: 1,
+      lastEventSequence: '0',
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
+  });
+
+  it('creates a MutationReceipt through the model; keys are unique per owner, not globally', async () => {
+    const owner = await createUser();
+    const other = await createUser();
+    const idempotencyKey = randomUUID();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const required = {
+      idempotencyKey,
+      route: 'POST /v1/studies',
+      requestHash: 'f'.repeat(64),
+      expiresAt,
+    };
+    await MutationReceipt.create({ ownerId: owner.id, ...required });
+    const found = await MutationReceipt.findOne({
+      where: { ownerId: owner.id, idempotencyKey },
+      rejectOnEmpty: true,
+    });
+    expect(found.get({ plain: true })).toStrictEqual({
+      ownerId: owner.id,
+      idempotencyKey,
+      route: 'POST /v1/studies',
+      requestHash: 'f'.repeat(64),
+      responseStatus: null,
+      responseBody: null,
+      createdAt: expect.any(Date),
+      expiresAt,
+    });
+
+    await found.update({ responseStatus: 201, responseBody: { id: 'x', nested: { n: 1 } } });
+    const completed = await MutationReceipt.findOne({
+      where: { ownerId: owner.id, idempotencyKey },
+      rejectOnEmpty: true,
+    });
+    expect([completed.responseStatus, completed.responseBody]).toStrictEqual([
+      201,
+      { id: 'x', nested: { n: 1 } },
+    ]);
+
+    await expect(MutationReceipt.create({ ownerId: owner.id, ...required })).rejects.toBeInstanceOf(
+      UniqueConstraintError,
+    );
+    await expect(MutationReceipt.create({ ownerId: other.id, ...required })).resolves.toBeDefined();
+  });
+
+  it.each([
+    ['a request hash that is not 64 hex characters', { requestHash: 'not-a-hash' }],
+    ['a non-2xx response status', { responseStatus: 409, responseBody: {} }],
+    ['a status without a body', { responseStatus: 200 }],
+    ['an expiry not after creation', { expiresAt: new Date(Date.now() - 1000) }],
+  ])('rejects a MutationReceipt with %s', async (_, override) => {
+    const owner = await createUser();
+    await expect(
+      MutationReceipt.create({
+        ownerId: owner.id,
+        idempotencyKey: randomUUID(),
+        route: 'POST /v1/studies',
+        requestHash: 'f'.repeat(64),
+        expiresAt: new Date(Date.now() + 60_000),
+        ...override,
+      }),
+    ).rejects.toBeInstanceOf(DatabaseError);
   });
 
   it('creates a StudyNode with only required fields and reads it back', async () => {

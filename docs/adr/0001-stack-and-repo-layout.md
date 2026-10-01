@@ -95,6 +95,36 @@ A synchronizer or double-submit token would add web and API plumbing without clo
 
 **Safe URLs.** `httpUrlSchema` in `@bible-artisan/contracts` accepts only http/https URLs without credentials or embedded whitespace/control characters (NFR-SEC-002). Every stored URL (note links in BIB-23, Source URLs) must use it. The Tiptap allowlist schema and link `rel` rendering belong to BIB-23.
 
+## Addendum (2026-10-01, BIB-12): revisions, idempotency, and event sequences
+
+Every study mutation route reuses one pipeline; none builds its own variant. The exact contract
+routes follow lives in `apps/api/src/modules/README.md` ("Mutation contract"):
+
+```ts
+const expectedRevision = requireExpectedRevision(mutation.body); // 400 / 428, before anything else
+const body = parseBody(schema, mutation.body);
+return mutations.execute(ownerId, mutation, {
+  // returns a MutationResult; the global
+  studyId, // interceptor applies status + replay header
+  bumpsContentRevision: true,
+  work: async (m) => {
+    const row = await m.updateWithExpectedRevision(Model, { id, expectedRevision, values }); // 404 / 409
+    await m.appendEvent({ eventType });
+    return { status: 200, body: dto };
+  },
+});
+```
+
+- **Conflict detection is one conditional statement**: `UPDATE … SET revision = revision + 1 WHERE id AND owner_id [AND study_id] AND revision = :expected RETURNING *`. Owner/study scoping comes from the mutation's lock, not the caller. Zero rows → owner-scoped re-read: absent → 404, present → 409 with `currentRevision`.
+- **Lock order is enforced, not documented**: receipt claim → study row (`SELECT … FOR UPDATE`, taken by `execute` before `work` runs) → child rows. All mutations of a study queue on its row first, so a child mutation and a study-level mutation touching the same child cannot deadlock. If PostgreSQL ever reports 40P01 (deadlock) or 40001 (serialization failure) anyway, the filter answers 503 `TRANSIENT_CONFLICT` with `retryable: true` and `Retry-After: 1`. Not 409: §24 reserves 409 for revision/uniqueness conflicts, which the client resolves with the user and never retries automatically. The whole transaction (receipt included) rolled back, so retrying with the same key is safe.
+- **The pipeline enforces the invariants itself**: `work` must make ≥1 revision check and append ≥1 event, or `execute` throws and rolls back. Every query inside `work` joins the transaction through Sequelize CLS (`Sequelize.useCLS` with an `AsyncLocalStorage` namespace, no extra dependency), so a forgotten `{ transaction }` cannot autocommit outside the mutation. A nested `execute` inside another transaction is refused. The transaction is explicitly READ COMMITTED, whatever the database default.
+- **Event sequences come from a counter column**, `study.last_event_sequence` (PRD §23 "transactional per-study counter"), backfilled from `max(study_event.sequence)` by its migration. With the study row locked, sequences are allocated in memory (`last + 1, …`) and the pipeline writes `content_revision` and `last_event_sequence` in ONE UPDATE at the end of the mutation. A rollback discards both, so committed sequences are 1..N with no gaps; unique `(study_id, sequence)` stays as the backstop. `bigint` comes back from pg as a decimal string and stays a string, in TypeScript and on the wire (`eventSequenceSchema`).
+- **Receipts** (`mutation_receipt`, PK `(owner_id, idempotency_key)`, so keys never collide or replay across users). `MutationService.execute` runs everything in one transaction and resolves only after COMMIT, so nothing is acknowledged before it is durable (NFR-REL-001). It claims the receipt first with `INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= now()`. A concurrent duplicate blocks on the first request's uncommitted unique-index entry and then replays (committed) or runs (rolled back), so there is no "in progress" state and no double execution. Failed work rolls the receipt back with everything else, so errors are never cached. Same key with a different request → 422 `IDEMPOTENCY_KEY_REUSED` (the IETF idempotency-key draft's status for this; PRD §24 lists 422 for a request that cannot be applied in the current state). Replays carry `Idempotent-Replayed: true` (a CORS-exposed header) and the original status. Receipts live 7 days (PRD §23); an expired key can be claimed again, and physical purge waits for the job runner (BIB-39).
+- **Request fingerprint**: SHA-256 hex of canonical JSON of `{ method, route, params, body }`. `route` is the matched route pattern (e.g. `/v1/studies/:studyId`), and `params` are the router-decoded params with UUIDs lower-cased, so case, trailing-slash, percent-encoding, and query-string variants of one resource replay instead of 422. `body` is the raw parsed JSON (not the Zod output, so every submitted field counts, `expectedRevision` included). Canonical JSON sorts object keys recursively on null-prototype objects (so an own `__proto__` member counts), keeps array order, drops `undefined` members, and compares numbers by value (`1`, `1.0`, `1e0` are the same). The receipt's `route` column stores `METHOD pattern`, never IDs.
+- `Idempotency-Key` is optional per PRD §24 ("accept"), must be a UUID when sent, and is stored lower-cased. A request without one is not deduplicated, so the web save coordinator (BIB-35) must always send one.
+- `mutation_receipt` is owned by `src/common/mutation/MutationModule`, not a domain module: it is owner-scoped rather than study-scoped (POST /studies has no study yet) and every domain module writes through it.
+- `study_event.client_mutation_id` and the activity endpoint's dedupe are BIB-55's; domain-mutation retries are already deduplicated by the receipt.
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

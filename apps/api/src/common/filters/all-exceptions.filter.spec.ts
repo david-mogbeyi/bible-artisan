@@ -16,6 +16,7 @@ import {
 import { AllExceptionsFilter, resolveCorrelationId } from './all-exceptions.filter';
 import {
   DependencyUnavailableError,
+  IdempotencyKeyReusedError,
   NotFoundError,
   OtpError,
   RateLimitedError,
@@ -158,6 +159,18 @@ describe('AllExceptionsFilter', () => {
     });
   });
 
+  it('maps IdempotencyKeyReusedError to 422 with a fixed message, not retryable', () => {
+    expect(run(new IdempotencyKeyReusedError())).toStrictEqual({
+      status: 422,
+      body: {
+        code: 'IDEMPOTENCY_KEY_REUSED',
+        message: 'This Idempotency-Key was already used for a different request',
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+      },
+    });
+  });
+
   it('maps RateLimitedError to 429, retryable, with a Retry-After header', () => {
     expect(runWithHeaders(new RateLimitedError(42))).toStrictEqual({
       result: {
@@ -204,6 +217,25 @@ describe('AllExceptionsFilter', () => {
     ['an unwrapped driver error (57P01)', pgError('57P01')],
   ])('maps %s to 503 DEPENDENCY_UNAVAILABLE, retryable', (_name, error) => {
     expect(run(error)).toStrictEqual(DEPENDENCY_UNAVAILABLE);
+  });
+
+  it.each([
+    ['a deadlock victim (40P01)', new DatabaseError(pgError('40P01'))],
+    ['a serialization failure (40001)', new DatabaseError(pgError('40001'))],
+    ['an unwrapped deadlock (40P01)', pgError('40P01')],
+  ])('maps %s to 503 TRANSIENT_CONFLICT, retryable, with Retry-After', (_name, error) => {
+    expect(runWithHeaders(error)).toStrictEqual({
+      result: {
+        status: 503,
+        body: {
+          code: 'TRANSIENT_CONFLICT',
+          message: 'The request collided with a concurrent change. Retry it',
+          retryable: true,
+          correlationId: expect.stringMatching(UUID),
+        },
+      },
+      setHeaders: [['Retry-After', '1']],
+    });
   });
 
   it('does not map an ordinary query error (e.g. unique violation 23505) to 503', () => {

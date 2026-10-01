@@ -2,7 +2,7 @@ import { METHODS, type Server } from 'node:http';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { type INestApplication, RequestMethod, type Type } from '@nestjs/common';
+import { type INestApplication, Module, RequestMethod, type Type } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { MetadataScanner, ModulesContainer, Reflector } from '@nestjs/core';
 import request from 'supertest';
@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { IS_PUBLIC } from '../src/modules/identity/public.decorator';
 import { createTestApp } from './app';
 import { UNAUTHENTICATED } from './support/envelopes';
+import { MutationProbeModule } from './support/mutation-probe';
 import { OwnerIsolationProbeModule } from './support/owner-isolation-probe';
 
 /**
@@ -53,7 +54,7 @@ const ROUTES: Record<string, Access> = {
   },
 };
 
-/** Test-only private routes mounted by `OwnerIsolationProbeModule` (never by AppModule). */
+/** Test-only private routes mounted by the probe modules (never by AppModule). */
 const PROBE_ROUTES: Record<string, PrivateAccess> = {
   'GET /v1/__test/studies/:studyId': {
     access: 'private',
@@ -63,7 +64,25 @@ const PROBE_ROUTES: Record<string, PrivateAccess> = {
     access: 'private',
     crossUserTest: { file: OWNER_ISOLATION, test: 'gets the neutral 404 for %s' },
   },
+  'POST /v1/__test/studies/:studyId/mutations': {
+    access: 'private',
+    crossUserTest: {
+      file: 'mutations.int-spec.ts',
+      test: 'gets the neutral 404 when another user mutates a study they do not own',
+    },
+  },
+  'POST /v1/__test/studies/:studyId/nodes/:nodeId/mutations': {
+    access: 'private',
+    crossUserTest: {
+      file: 'mutations.int-spec.ts',
+      test: 'gets the neutral 404 when another user mutates a node of a study they do not own',
+    },
+  },
 };
+
+/** Every test-only probe on top of the real AppModule. */
+@Module({ imports: [OwnerIsolationProbeModule, MutationProbeModule] })
+class AllProbesModule {}
 
 interface RouteLayer {
   route?: { path: string; methods: Record<string, boolean> };
@@ -296,7 +315,7 @@ describe('route inventory', () => {
 
   beforeAll(async () => {
     app = await createTestApp();
-    probe = await createTestApp(OwnerIsolationProbeModule);
+    probe = await createTestApp(AllProbesModule);
   });
 
   afterAll(async () => {

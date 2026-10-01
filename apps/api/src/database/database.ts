@@ -1,10 +1,12 @@
 import { Sequelize } from 'sequelize-typescript';
 import { AuthChallenge } from './models/auth-challenge.model';
 import { AuthSession } from './models/auth-session.model';
+import { MutationReceipt } from './models/mutation-receipt.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
 import { Study } from './models/study.model';
 import { User } from './models/user.model';
+import { enableTransactionPropagation } from './transaction-context';
 
 export type Database = Sequelize;
 
@@ -14,8 +16,10 @@ export type Database = Sequelize;
  * amendment); register every model here so each new one only needs adding to this list.
  */
 export function createDatabase(connectionString: string): Database {
+  // Queries inside a managed transaction join it without passing `{ transaction }` (BIB-12).
+  enableTransactionPropagation();
   return new Sequelize(connectionString, {
-    models: [User, Study, StudyNode, StudyEvent, AuthChallenge, AuthSession],
+    models: [User, Study, StudyNode, StudyEvent, AuthChallenge, AuthSession, MutationReceipt],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous
     // pg Pool setting. A request that can't get a connection within 10 s fails fast with

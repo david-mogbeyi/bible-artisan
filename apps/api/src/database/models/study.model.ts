@@ -46,6 +46,20 @@ export class Study extends Model {
   @Column({ field: 'content_revision', type: DataType.INTEGER, allowNull: false, defaultValue: 1 })
   declare contentRevision: number;
 
+  /**
+   * The per-study event counter (migration 20261001074053): the sequence of the study's latest
+   * committed event, 0 before the first. Allocated only through
+   * the mutation pipeline (`MutationService` → `StudyRevisionService.writeCounters`). bigint, so pg returns a decimal string; typed
+   * `string` so it is never silently rounded.
+   */
+  @Column({
+    field: 'last_event_sequence',
+    type: DataType.BIGINT,
+    allowNull: false,
+    defaultValue: '0',
+  })
+  declare lastEventSequence: string;
+
   @CreatedAt
   @Column({ field: 'created_at', type: DataType.DATE, allowNull: false })
   declare createdAt: Date;
