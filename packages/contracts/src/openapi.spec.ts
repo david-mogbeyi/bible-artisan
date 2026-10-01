@@ -135,6 +135,58 @@ describe('buildOpenApiDocument', () => {
             },
           },
         },
+        '/bible/search': {
+          get: {
+            description:
+              'Searches verse text of an active edition. terms: every word must occur (whole words, case-insensitive, no stemming). phrase: the words occur consecutively with matching punctuation. Every result is verified against the stored verse text, which is returned unchanged with code-point highlight ranges. Relevance order, then canonical order; bounded, cursor-paged. A terms query that is a Bible reference is 422 SEARCH_QUERY_IS_REFERENCE.',
+            security: [{ sessionCookie: [] }],
+            parameters: [
+              {
+                name: 'q',
+                in: 'query',
+                required: true,
+                schema: { type: 'string', minLength: 1, maxLength: 200 },
+              },
+              {
+                name: 'mode',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', enum: ['terms', 'phrase'], default: 'terms' },
+              },
+              {
+                name: 'editionId',
+                in: 'query',
+                required: true,
+                schema: { type: 'string', format: 'uuid' },
+              },
+              {
+                name: 'book',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', pattern: '^[1-4A-Z][A-Z0-9]{2}$' },
+              },
+              {
+                name: 'cursor',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' },
+              },
+              {
+                name: 'limit',
+                in: 'query',
+                required: false,
+                schema: { type: 'integer', minimum: 1, maximum: 100, default: 25 },
+              },
+            ],
+            responses: {
+              200: {
+                description: 'One page of verified results',
+                content: { 'application/json': { schema: ref('SearchBibleResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
       },
     });
     expect(doc.components.securitySchemes).toStrictEqual({
@@ -210,6 +262,7 @@ describe('buildOpenApiDocument', () => {
       'MeResponse',
       'ResolveReferenceRequest',
       'ResolveReferenceResponse',
+      'SearchBibleResponse',
     ]);
   });
 });

@@ -270,6 +270,68 @@ The command is a separate step, not a migration: migrations only get `context.qu
   - Its `down` refuses while rows exist unless `ALLOW_CORPUS_DROP=1` is set, the corpus opt-in, so a `down` past the corpus can't drop the ids and then stop at the corpus guard half-reverted.
   - The resolver inserts or selects in one statement (a CTE with `ON CONFLICT DO NOTHING`), with a second SELECT only when a concurrent insert won the race. Each edition's book index is loaded single-flight and a failed load is evicted. The route is authenticated but not owner-scoped, and it takes no `Idempotency-Key` or revision: it is a read plus a naturally idempotent upsert, not a study mutation.
 
+## Addendum (2026-10-01, BIB-16): keyword search
+
+`GET /v1/bible/search?q=&mode=terms|phrase&editionId=&book=&cursor=&limit=` (`modules/bible-content/search/`) searches verse text of an active edition. It is authenticated, not owner-scoped (shared corpus), read-only, and writes nothing.
+
+**Index: a stored generated column, not a new table or an expression index.**
+
+- `bible_verse.search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED`, with a GIN index (migration `add_bible_verse_search_vector`). This is PRD section 23's `search_vector`.
+- PostgreSQL computes it from `text` on insert, and refuses any written value (SQLSTATE 428C9). It is a pure function of the text the edition checksum already covers.
+- Adding it rewrote the table without firing row triggers. The BIB-14 immutability triggers stay enabled, no `bible_verse` row was UPDATEd, and the edition content checksum is unchanged. A test asserts all three, plus `search_vector = to_tsvector('simple', text)` for every row.
+- Measured on the full corpus (PostgreSQL 16, ranking the commonest word's 23,875 matches): about 230 ms with an expression index, because `to_tsvector` is recomputed per row for `ts_rank`; about 10 ms with the stored column.
+- `down` drops the column and index; nothing is lost, since `up` rebuilds them. It still refuses while an active edition exists unless `ALLOW_CORPUS_DROP=1`. Each migration's `down` commits on its own, so an unguarded step would commit before a `down` toward the corpus is refused further on, leaving a half-reverted database.
+
+**The index only narrows; the stored text decides.**
+
+- Candidates come from `search_vector @@ plainto_tsquery('simple', <tokens>)`, an AND of every query token.
+- `search-text.ts` decides every result against the verse text exactly as stored. A candidate the text does not support is dropped, never shown, so a stale or tampered vector could only hide a verse, never invent one.
+- The prefilter never loses a true match. An integration test proves that, for every verse, the PostgreSQL lexemes of each of its tokens are in its `search_vector`.
+
+**`simple`, not `english`.** PRD section 14 asks for "all entered terms" and "no inferred synonym expansion". The `english` stemmer returns verses that do not contain the typed word, and its stopword list silently drops words such as "the" or "I". With `simple`, a term is the literal word, lower-cased. Tradeoff: `loves` does not find `love`; a test asserts no inflection is returned.
+
+**Tokens.** A query is NFC-normalized, invisible characters (zero-width, BOM, soft hyphen) are removed, and full-width ASCII is folded. A _token_ is then a maximal run of Unicode letters, marks or digits, compared lower-cased; everything between two tokens is their separator. Query operators (`& | ! : * ( ) < > ' \`) are separators, never syntax. The query reaches SQL only as these tokens, as a bind parameter, through `plainto_tsquery`; there is no `to_tsquery` and no regular expression built from input. A query needs 1 to 20 tokens and at most 200 characters.
+
+**Terms mode:** every distinct query token is one of the verse's tokens. Highlights mark every occurrence.
+
+**Phrase mode, "contiguous" defined:**
+
+- The query tokens occur as consecutive verse tokens, and each separator between them equals the query's after normalization.
+- Normalization removes whitespace (including the publisher's U+00A0), quotation marks and apostrophes, and hyphens, and maps en dash, em dash, figure dash, horizontal bar and minus to one dash.
+- All other punctuation must match. A phrase never matches across a full stop, comma or dash the user did not type: punctuation normalization never invents adjacency.
+- Consequences: `Lord's` finds `Lord’s`, and a space finds `Beth-shemesh` or a no-break space.
+- Punctuation before the first or after the last token is ignored, so surrounding quotes are optional.
+- Tsquery `<->` is not used. PostgreSQL gives a hyphenated compound an extra position, so `<->` would miss true phrases across one, and it ignores punctuation, which would invent adjacency.
+
+**Highlights** are `[start, end)` offsets in Unicode code points into the returned `text`, which is the stored text, byte for byte. Nothing is reconstructed, and `ts_headline` is not used.
+
+**Order, pages, bounds.**
+
+- Order is `ts_rank` descending, then canonical order (book sequence, chapter, verse).
+- The cursor is an opaque keyset: the last scanned candidate's rank, exactly as PostgreSQL printed the float4, plus its canonical position. It is bound to a fingerprint of mode, tokens, separators, edition and book filter, so a cursor from another query is refused with 400.
+- `limit` is 1 to 100 (default 25). One request examines at most 1,000 candidates in at most three round trips: `limit + 1` first, then the rest of the bound, then a one-row look-ahead. A page may therefore hold fewer than `limit` results.
+- `nextCursor` is non-null exactly when unscanned candidates remain. Following it never repeats or skips a result; a test traverses whole result sets against an independent oracle.
+
+**Reference precedence (PRD section 14).**
+
+- In terms mode, input the BIB-15 parser recognizes as a reference gets 422 `SEARCH_QUERY_IS_REFERENCE` (fixed message) and no keyword results. This covers references that resolve, are ambiguous, or have an invalid reference shape (`Rom 9:1`, `John`, `Phil 4:1`, `Gen 99:1`).
+- Checking uses `ReferenceService.isReference`, which reads the cached book index and persists nothing.
+- Phrase mode is explicit literal text and is never treated as a reference.
+- A client with one input box calls `POST /bible/resolve` first and searches on `not_reference`. The search UI belongs to the reader work (BIB-17); this ticket ships the API only.
+
+**Performance (NFR-PERF-002).**
+
+- An integration test sends 100 concurrent requests through one app instance (pool of 10 connections, client and server in one Node process) over a worst-case mix: the commonest word, the two commonest with `limit=100`, the commonest word twice as a phrase (maximum scan), a common phrase, and a mid-frequency word.
+- Locally (PostgreSQL 16, Apple silicon), three runs measured p95 306, 314 and 324 ms (p50 160 to 180 ms) against the 750 ms budget.
+- Two changes got there from about 640 ms. The scan bound went from 2,000 to 1,000 candidates. Separators are now canonicalized only where a phrase's words already match, since the plain space takes a fast path. Verification now costs about 3.4 µs of Node CPU per candidate verse, down from about 6.
+- `ts_rank` is computed once per row in an inner query.
+- `EXPLAIN` of the production candidate query shows the GIN index (`bible_verse_search_vector_idx`); a test asserts it for a selective query.
+- Full-scale benchmarking belongs to BIB-52.
+
+**Privacy.** The query travels in the URL (PRD section 24), but `requestLogging` logs only the route pattern. Errors are fixed strings. `test/log-redaction.int-spec.ts` sends sentinel queries and cursors on 200, 400, 404 and 422, and asserts that neither they nor the returned verse text, labels or cursor appear in any log line.
+
+**Not in BIB-16:** the search screen (BIB-17), anchors (BIB-18), `search_performed` events (BIB-55), study/library search (BIB-21), searching Psalm superscriptions (verse text only in MVP), and semantic search (post-MVP).
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

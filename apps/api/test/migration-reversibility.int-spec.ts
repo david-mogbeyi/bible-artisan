@@ -91,13 +91,13 @@ describe('migration reversibility', () => {
     const before = await recordedMigrations(db);
     const migrator = createMigrator(db);
 
-    // Every migration's `down` commits on its own, so the first one past the corpus (the shared
-    // reference ids) must refuse too, or this would leave a half-reverted database.
+    // Every migration's `down` commits on its own, so the first one run on the way to the corpus
+    // (the latest: the search index) must refuse too, or this would leave a half-reverted database.
     const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
     expect((error as { cause?: unknown }).cause).toMatchObject({
       message:
-        'scripture_reference drop refused: shared reference ids exist (set ALLOW_CORPUS_DROP=1)',
+        'bible search index drop refused: an active edition exists (set ALLOW_CORPUS_DROP=1)',
       parent: expect.objectContaining({ code: '23000' }),
     });
     expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -108,6 +108,24 @@ describe('migration reversibility', () => {
       { type: QueryTypes.SELECT },
     );
     expect(active).toStrictEqual({ n: 1 });
+  });
+
+  it('refuses to drop the shared reference ids without the opt-in once the search index is gone', async () => {
+    const migrator = createMigrator(db);
+    const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
+    const REFERENCE_MIGRATION = '20261001104810_create_scripture_reference.ts';
+    await withCorpusDropAllowed(() => migrator.down({ to: SEARCH_MIGRATION }));
+    const before = await recordedMigrations(db);
+    expect(before.at(-1)).toBe(REFERENCE_MIGRATION);
+
+    const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
+    expect((error as { cause?: unknown }).cause).toMatchObject({
+      message:
+        'scripture_reference drop refused: shared reference ids exist (set ALLOW_CORPUS_DROP=1)',
+      parent: expect.objectContaining({ code: '23000' }),
+    });
+    expect(await recordedMigrations(db)).toStrictEqual(before);
+    await migrator.up();
   });
 
   it("refuses the corpus migration's own down while an edition is active, changing nothing", async () => {

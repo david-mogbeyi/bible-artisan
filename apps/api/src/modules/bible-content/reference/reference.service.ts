@@ -57,6 +57,21 @@ export class ReferenceService {
     }
   }
 
+  /** The active edition's book index (cached). Unknown or not-yet-active edition: 404. */
+  bookIndex(editionId: string): Promise<BookIndex> {
+    return this.indexFor(editionId);
+  }
+
+  /**
+   * Whether the input is a Bible reference: one that resolves, is ambiguous, or has a reference
+   * shape that fails validation (PRD §14: reference lookup takes precedence over keywords).
+   * Read-only: nothing is persisted. Unknown or not-yet-active edition: 404.
+   */
+  async isReference(editionId: string, input: string): Promise<boolean> {
+    const index = await this.indexFor(editionId);
+    return resolveParsedReference(index, parseReference(input)).outcome !== 'not_reference';
+  }
+
   /**
    * Single flight: the first caller stores one promise covering the active-edition check and the
    * corpus load, and every concurrent caller awaits that same promise, so the full-corpus

@@ -68,3 +68,79 @@ export const REFERENCE_ERROR_CODES = [
 ] as const;
 
 export type ReferenceErrorCode = (typeof REFERENCE_ERROR_CODES)[number];
+
+/**
+ * Bible keyword search DTOs (BIB-16; PRD sections 14, 24; FR-BIBLE-004/005, NFR-PERF-002).
+ * Query parameters arrive as strings, so `limit` is parsed from its decimal form.
+ */
+
+/** Longest search input accepted (characters, after trimming). */
+export const MAX_SEARCH_QUERY_LENGTH = 200;
+/** Most words (tokens) one search may contain. */
+export const MAX_SEARCH_TOKENS = 20;
+export const DEFAULT_SEARCH_LIMIT = 25;
+export const MAX_SEARCH_LIMIT = 100;
+/** Longest opaque cursor accepted. */
+export const MAX_SEARCH_CURSOR_LENGTH = 512;
+
+export const SEARCH_MODES = ['terms', 'phrase'] as const;
+export type SearchMode = (typeof SEARCH_MODES)[number];
+
+export const searchBibleQuerySchema = z.object({
+  q: z.string().trim().min(1).max(MAX_SEARCH_QUERY_LENGTH),
+  /** `terms`: every word must occur. `phrase`: the words occur together, in order. */
+  mode: z.enum(SEARCH_MODES).default('terms'),
+  editionId: z.uuid(),
+  /** Optional USFM book code filter, e.g. `ROM`. */
+  book: z
+    .string()
+    .regex(/^[1-4A-Z][A-Z0-9]{2}$/, 'Enter a book code such as ROM')
+    .optional(),
+  cursor: z
+    .string()
+    .max(MAX_SEARCH_CURSOR_LENGTH)
+    .regex(/^[A-Za-z0-9_-]+$/, 'Invalid cursor')
+    .optional(),
+  limit: z
+    .string()
+    .regex(/^[1-9][0-9]{0,2}$/, `Enter a whole number from 1 to ${MAX_SEARCH_LIMIT}`)
+    .transform(Number)
+    .refine((n) => n <= MAX_SEARCH_LIMIT, `Enter a whole number from 1 to ${MAX_SEARCH_LIMIT}`)
+    .optional(),
+});
+
+export type SearchBibleQuery = z.infer<typeof searchBibleQuerySchema>;
+
+/** A half-open `[start, end)` range of Unicode code points into the result's `text`. */
+export const searchHighlightSchema = z.object({
+  start: z.number().int().nonnegative(),
+  end: z.number().int().positive(),
+});
+
+export const searchResultSchema = z.object({
+  /** One verse, verified against the imported corpus. */
+  reference: z.object({
+    bookCode: z.string(),
+    chapter: z.number().int().positive(),
+    verse: z.number().int().positive(),
+    /** e.g. `Romans 9:1`, from the edition's book name. */
+    label: z.string(),
+  }),
+  /** The verse text exactly as stored in the corpus (never altered or reconstructed). */
+  text: z.string(),
+  highlights: z.array(searchHighlightSchema),
+});
+
+export type SearchResult = z.infer<typeof searchResultSchema>;
+
+export const searchBibleResponseSchema = z.object({
+  /** Relevance order, then canonical Bible order. May hold fewer than `limit` results. */
+  results: z.array(searchResultSchema),
+  /** Pass back as `cursor` with the same query for the next page; null when nothing remains. */
+  nextCursor: z.string().nullable(),
+});
+
+export type SearchBibleResponse = z.infer<typeof searchBibleResponseSchema>;
+
+/** 422: the terms-mode input is a Bible reference; resolve it instead (PRD section 14). */
+export const SEARCH_QUERY_IS_REFERENCE = 'SEARCH_QUERY_IS_REFERENCE';

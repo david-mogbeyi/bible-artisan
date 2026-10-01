@@ -373,6 +373,77 @@ describe('content-redacted operational logs', () => {
     await expectLogged(resolved, { method: 'POST', route: '/v1/bible/resolve', status: 200 });
   });
 
+  it('logs Bible search without the query, cursor, results or reference', async () => {
+    const edition = await BibleEdition.findOne({ where: { code: 'engwebp' }, rejectOnEmpty: true });
+    const route = { method: 'GET', route: '/v1/bible/search' };
+    const searchFor = (params: Record<string, string>): Test =>
+      withPrivateChannels(http().get('/v1/bible/search').query(params), cookie);
+
+    // A private query that matches nothing: 200 with an empty page.
+    const empty = await searchFor({ q: `${secret('search')} faith`, editionId: edition.id });
+    expect(empty.body).toStrictEqual({ results: [], nextCursor: null });
+    await expectLogged(empty, { ...route, status: 200 });
+
+    // A query with results: the returned verse text, labels and cursor are never logged either.
+    const found = await searchFor({ q: 'faith', editionId: edition.id, limit: '2' });
+    const page = found.body as {
+      results: { text: string; reference: { label: string } }[];
+      nextCursor: string;
+    };
+    expect(page.results).toHaveLength(2);
+    for (const result of page.results) {
+      track(result.text);
+      track(result.reference.label);
+    }
+    track(page.nextCursor);
+    await expectLogged(found, { ...route, status: 200 });
+    const next = await searchFor({
+      q: 'faith',
+      editionId: edition.id,
+      limit: '2',
+      cursor: page.nextCursor,
+    });
+    await expectLogged(next, { ...route, status: 200 });
+
+    const invalid = await searchFor({
+      q: secret('search'),
+      editionId: edition.id,
+      cursor: secret('cursor'), // letters, digits and hyphens: passes the shape check
+    });
+    await expectLogged(
+      invalid,
+      { ...route, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { cursor: ['Invalid cursor'] },
+        }),
+      },
+    );
+
+    const unknown = await searchFor({ q: secret('search'), editionId: randomUUID() });
+    await expectLogged(
+      unknown,
+      { ...route, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+
+    const reference = await searchFor({ q: track('Romans 8:28'), editionId: edition.id });
+    await expectLogged(
+      reference,
+      { ...route, status: 422 },
+      {
+        errorType: 'SearchQueryIsReferenceError',
+        body: envelope({
+          code: 'SEARCH_QUERY_IS_REFERENCE',
+          message: 'This is a Bible reference. Look it up as a reference instead',
+        }),
+      },
+    );
+  });
+
   it('logs a cross-site mutation refused before routing (403)', async () => {
     const res = await withPrivateChannels(http().post(`/v1/auth/logout${query()}`))
       .set('Origin', `https://${secret('origin').toLowerCase()}.example`)

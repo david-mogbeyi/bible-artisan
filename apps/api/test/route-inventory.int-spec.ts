@@ -62,6 +62,14 @@ const ROUTES: Record<string, Access> = {
       test: 'gives another user the same shared reference for the same input',
     },
   },
+  // Shared corpus data, not owner-scoped: another user gets the same results.
+  'GET /v1/bible/search': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-search.int-spec.ts',
+      test: 'gives another user the same shared results for the same query',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

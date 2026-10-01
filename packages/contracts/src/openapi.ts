@@ -5,7 +5,16 @@ import {
   otpStartResponseSchema,
   otpVerifyRequestSchema,
 } from './auth';
-import { resolveReferenceRequestSchema, resolveReferenceResponseSchema } from './bible';
+import {
+  DEFAULT_SEARCH_LIMIT,
+  MAX_SEARCH_CURSOR_LENGTH,
+  MAX_SEARCH_LIMIT,
+  MAX_SEARCH_QUERY_LENGTH,
+  resolveReferenceRequestSchema,
+  resolveReferenceResponseSchema,
+  SEARCH_MODES,
+  searchBibleResponseSchema,
+} from './bible';
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema, livenessResponseSchema } from './health';
 
@@ -53,6 +62,12 @@ const jsonResponse = (description: string, name: string): Record<string, unknown
   description,
   content: { 'application/json': { schema: ref(name) } },
 });
+
+const queryParam = (
+  name: string,
+  required: boolean,
+  schema: SchemaObject,
+): Record<string, unknown> => ({ name, in: 'query', required, schema });
 
 /** Routes that require the session cookie declare it; every other route is public. */
 const sessionCookie = [{ sessionCookie: [] }];
@@ -151,6 +166,42 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/bible/search': {
+        get: {
+          description:
+            'Searches verse text of an active edition. terms: every word must occur (whole words, case-insensitive, no stemming). phrase: the words occur consecutively with matching punctuation. Every result is verified against the stored verse text, which is returned unchanged with code-point highlight ranges. Relevance order, then canonical order; bounded, cursor-paged. A terms query that is a Bible reference is 422 SEARCH_QUERY_IS_REFERENCE.',
+          security: sessionCookie,
+          parameters: [
+            queryParam('q', true, {
+              type: 'string',
+              minLength: 1,
+              maxLength: MAX_SEARCH_QUERY_LENGTH,
+            }),
+            queryParam('mode', false, {
+              type: 'string',
+              enum: [...SEARCH_MODES],
+              default: 'terms',
+            }),
+            queryParam('editionId', true, { type: 'string', format: 'uuid' }),
+            queryParam('book', false, { type: 'string', pattern: '^[1-4A-Z][A-Z0-9]{2}$' }),
+            queryParam('cursor', false, {
+              type: 'string',
+              maxLength: MAX_SEARCH_CURSOR_LENGTH,
+              pattern: '^[A-Za-z0-9_-]+$',
+            }),
+            queryParam('limit', false, {
+              type: 'integer',
+              minimum: 1,
+              maximum: MAX_SEARCH_LIMIT,
+              default: DEFAULT_SEARCH_LIMIT,
+            }),
+          ],
+          responses: {
+            200: jsonResponse('One page of verified results', 'SearchBibleResponse'),
+            default: errorResponse,
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {
@@ -166,6 +217,7 @@ function buildDocument(): OpenApiDocument {
         MeResponse: toSchema(meResponseSchema),
         ResolveReferenceRequest: toSchema(resolveReferenceRequestSchema),
         ResolveReferenceResponse: toSchema(resolveReferenceResponseSchema),
+        SearchBibleResponse: toSchema(searchBibleResponseSchema),
       },
     },
   };
