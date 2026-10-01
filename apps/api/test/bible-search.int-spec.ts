@@ -636,7 +636,9 @@ describe('GET /v1/bible/search', () => {
       await search({ q: name, cursor: 'bm90LWEtY3Vyc29y' }).expect(400);
       await searchAs(alice, { q: name, editionId: randomUUID() }).expect(404);
       expect(await ScriptureReference.count()).toBe(count);
-    });
+      // About 400 sequential requests (a search and a resolve per book key): allow for a slow,
+      // shared CI runner, so the test never times out with requests still in flight.
+    }, 120_000);
 
     it('rejects malformed parameters with fixed messages that never echo the input', async () => {
       const cases: [Record<string, string>, Record<string, string[]>][] = [
