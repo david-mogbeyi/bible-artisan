@@ -86,6 +86,8 @@ describe('Sequelize models against the real schema', () => {
       title: 'Conscience in Romans',
       description: null,
       lifecycle: 'active',
+      archivedAt: null,
+      deletedAt: null,
       revision: 1,
       contentRevision: 1,
       lastEventSequence: '0',
@@ -123,6 +125,40 @@ describe('Sequelize models against the real schema', () => {
     ]).toStrictEqual([lastActivityAt, 'conscience in romans', 'conscience in romans', true]);
     await found.update({ pinnedAt: null });
     expect((await Study.findByPk(study.id, { rejectOnEmpty: true })).isPinned).toBe(false);
+  });
+
+  it('archives, trashes and restores a Study through the model, and the database refuses lifecycle dates or transitions that disagree (BIB-22)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const archivedAt = new Date('2026-10-01T12:00:00.000Z');
+    const deletedAt = new Date('2026-10-02T12:00:00.000Z');
+    await study.update({ lifecycle: 'archived', archivedAt });
+    await study.update({ lifecycle: 'trashed', deletedAt });
+    let found = await Study.findByPk(study.id, { rejectOnEmpty: true });
+    expect([found.lifecycle, found.archivedAt, found.deletedAt]).toStrictEqual([
+      'trashed',
+      archivedAt,
+      deletedAt,
+    ]);
+    // Trashed from archived: restore may only return it to archived.
+    await expect(
+      found.update({ lifecycle: 'active', archivedAt: null, deletedAt: null }),
+    ).rejects.toThrow('study lifecycle transition refused');
+    found = await Study.findByPk(study.id, { rejectOnEmpty: true });
+    await found.update({ lifecycle: 'archived', deletedAt: null });
+    found = await Study.findByPk(study.id, { rejectOnEmpty: true });
+    expect([found.lifecycle, found.archivedAt, found.deletedAt]).toStrictEqual([
+      'archived',
+      archivedAt,
+      null,
+    ]);
+    // Dates that disagree with the state.
+    await expect(found.update({ archivedAt: null })).rejects.toThrow(
+      'study_lifecycle_timestamps_check',
+    );
+    await expect(
+      Study.create({ ownerId: owner.id, title: 'Trashed without a date', lifecycle: 'trashed' }),
+    ).rejects.toThrow('study_lifecycle_timestamps_check');
   });
 
   it('pins a Study and creates a Tag and StudyTag through the models (BIB-20)', async () => {

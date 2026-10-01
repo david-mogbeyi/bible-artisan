@@ -16,6 +16,7 @@ import {
   RevisionConflictError,
   RevisionMissingError,
   SearchQueryIsReferenceError,
+  StudyLifecycleError,
   StudyUnchangedError,
   TagLimitExceededError,
   UnauthenticatedError,
@@ -149,7 +150,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof SearchQueryIsReferenceError ||
       exception instanceof QuestionNotFoundError ||
       exception instanceof StudyUnchangedError ||
-      exception instanceof TagLimitExceededError
+      exception instanceof TagLimitExceededError ||
+      exception instanceof StudyLifecycleError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,

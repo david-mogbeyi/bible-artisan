@@ -68,6 +68,10 @@ What the pipeline guarantees, so a route must not re-implement any of it:
    a replay, and `Cache-Control: no-store`.
 7. Deadlocks and serialization failures (40P01/40001) answer 503 `TRANSIENT_CONFLICT`,
    `retryable: true`; the client retries with the same Idempotency-Key.
+8. The lifecycle guard (BIB-22) runs under the study lock, before `work`: a study past its 30-day
+   trash window is 404, an archived one 422 `STUDY_ARCHIVED`, a trashed one 422 `STUDY_TRASHED`.
+   Never check lifecycle in a route. Only the lifecycle routes set `lifecycleTransition` on the
+   spec, which allows exactly that transition's starting states.
 
 ### Creating a study (BIB-19): `MutationService.create`
 

@@ -113,7 +113,7 @@ export async function applyTagChange(
  * PostgreSQL deletes the row without re-running the subquery, and the cascade would silently
  * drop the other study's new pairing.)
  */
-async function deleteOrphanedTags(ownerId: string, tagIds: string[]): Promise<void> {
+export async function deleteOrphanedTags(ownerId: string, tagIds: string[]): Promise<void> {
   const sequelize = database();
   await sequelize.query(
     `SELECT id FROM tag WHERE owner_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE`,

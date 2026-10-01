@@ -140,6 +140,7 @@ describe('Home recent studies', () => {
     tags: [],
     lastActivityAt: '2026-10-01T12:00:00.000Z',
     createdAt: '2026-09-30T12:00:00.000Z',
+    purgeAt: null,
   });
 
   it('asks for the three most recently active studies whatever their pin, shows them in that order, and links to the library', async () => {

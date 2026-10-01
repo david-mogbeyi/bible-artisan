@@ -4,6 +4,7 @@ import { NotFoundError } from '../../common/errors/domain-errors';
 import { isResourceId } from '../../common/validation/resource-id';
 import { StudyNode } from '../../database/models/study-node.model';
 import { Study } from '../../database/models/study.model';
+import { withinRecoveryWindow } from './study-lifecycle';
 
 export interface StudyAccessOptions {
   /** Run the lookup inside this transaction (required with `lock`). */
@@ -26,8 +27,9 @@ export interface StudyAccessOptions {
  * `owner_id`. The composite FK `(owner_id, study_id) -> study(owner_id, id)` guarantees a child's
  * owner is its study's owner, so this needs no join and never compares owners in application code.
  *
- * Lifecycle (archived/trashed) is not filtered here; the tickets that own those rules (BIB-22)
- * decide what each route allows.
+ * Lifecycle (BIB-22): archived and trashed studies stay readable by their owner (the mutation
+ * pipeline, not this service, refuses writes to them), but a study trashed 30 or more days ago is
+ * past its recovery window and is the same 404 as an absent one, even before the purge removes it.
  */
 @Injectable()
 export class StudyAccessService {
@@ -38,14 +40,17 @@ export class StudyAccessService {
   ): Promise<Study> {
     if (!isResourceId(studyId)) throw new NotFoundError();
     const study = await Study.findOne({
-      where: { id: studyId, ownerId },
+      where: { id: studyId, ownerId, ...withinRecoveryWindow() },
       ...queryOptions(options),
     });
     if (!study) throw new NotFoundError();
     return study;
   }
 
-  /** A live (not soft-deleted) node of `studyId`, owned by `ownerId`. */
+  /**
+   * A live (not soft-deleted) node of `studyId`, owned by `ownerId`. The study is checked first
+   * (unlocked), so a node of a study past its trash window is the same 404 as its study (BIB-22).
+   */
   async requireOwnedNode(
     ownerId: string,
     studyId: string,
@@ -53,6 +58,11 @@ export class StudyAccessService {
     options: StudyAccessOptions = {},
   ): Promise<StudyNode> {
     if (!isResourceId(studyId) || !isResourceId(nodeId)) throw new NotFoundError();
+    await this.requireOwnedStudy(
+      ownerId,
+      studyId,
+      options.transaction ? { transaction: options.transaction } : {},
+    );
     const node = await StudyNode.findOne({
       where: { id: nodeId, studyId, ownerId, deletedAt: null },
       ...queryOptions(options),

@@ -37,9 +37,27 @@ export class Study extends Model {
   @Column({ type: DataType.TEXT, allowNull: true })
   declare description: string | null;
 
-  /** CHECK-constrained in the migration to 'active' | 'archived' | 'trashed'. */
+  /**
+   * CHECK-constrained in the migration to 'active' | 'archived' | 'trashed'. Changed only by the
+   * lifecycle routes (BIB-22); the `study_lifecycle_transition` trigger refuses any other change
+   * of state, and `study_lifecycle_timestamps_check` ties it to the two dates below.
+   */
   @Column({ type: DataType.TEXT, allowNull: false, defaultValue: 'active' })
   declare lifecycle: 'active' | 'archived' | 'trashed';
+
+  /**
+   * When the study was archived (BIB-22): set exactly while it is archived, and kept while it is
+   * in the trash if it was archived when trashed, so restore returns it to archived.
+   */
+  @Column({ field: 'archived_at', type: DataType.DATE, allowNull: true })
+  declare archivedAt: Date | null;
+
+  /**
+   * When the study was moved to the trash (BIB-22): set exactly while it is trashed. 30 days
+   * later it is treated as absent everywhere and purged (`STUDY_TRASH_RETENTION_DAYS`).
+   */
+  @Column({ field: 'deleted_at', type: DataType.DATE, allowNull: true })
+  declare deletedAt: Date | null;
 
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 1 })
   declare revision: number;

@@ -110,9 +110,13 @@ describe('listStudiesQuerySchema', () => {
     });
   });
 
-  it('refuses unknown parameters, trashed, bad sorts and out-of-range limits', () => {
+  it('accepts the trashed state (the Trash view, BIB-22)', () => {
+    expect(listStudiesQuerySchema.parse({ state: 'trashed' }).state).toBe('trashed');
+  });
+
+  it('refuses unknown parameters, unknown states, bad sorts and out-of-range limits', () => {
     expect(issuesOf({ ownerId: 'x' }).length).toBe(1);
-    expect(issuesOf({ state: 'trashed' }).map((i) => i.path)).toStrictEqual([['state']]);
+    expect(issuesOf({ state: 'deleted' }).map((i) => i.path)).toStrictEqual([['state']]);
     expect(issuesOf({ sort: 'updated' }).map((i) => i.path)).toStrictEqual([['sort']]);
     for (const limit of ['0', '51', '-1', '1.5', '05', '', 'ten']) {
       expect(issuesOf({ limit }).map((i) => i.path)).toStrictEqual([['limit']]);

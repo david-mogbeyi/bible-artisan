@@ -111,8 +111,11 @@ describe('study responses', () => {
       originalQuestion: null,
       tags: [],
       branchId: null,
+      purgeAt: null,
       createdAt: '2026-10-01T12:00:00.000Z',
     };
     expect(studyResponseSchema.parse(study)).toStrictEqual(study);
+    const trashed = { ...study, lifecycle: 'trashed', purgeAt: '2026-10-31T12:00:00.000Z' };
+    expect(studyResponseSchema.parse(trashed)).toStrictEqual(trashed);
   });
 });

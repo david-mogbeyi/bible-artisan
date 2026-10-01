@@ -4,6 +4,7 @@ import { Transaction } from 'sequelize';
 import { NotFoundError } from '../../common/errors/domain-errors';
 import { isResourceId } from '../../common/validation/resource-id';
 import { Study } from '../../database/models/study.model';
+import { type StudyLifecycle, withinRecoveryWindow } from './study-lifecycle';
 
 /** The columns a new study is created with; owner and counters are never the caller's. */
 export interface NewStudy {
@@ -32,6 +33,11 @@ export class StudyLock {
     private readonly lockedContentRevision: number,
     /** `study.last_event_sequence` when the lock was taken. */
     readonly lockedEventSequence: bigint,
+    /**
+     * `study.lifecycle` when the lock was taken (BIB-22). The row is locked, so it cannot change
+     * under this mutation except through this mutation's own work.
+     */
+    readonly lifecycle: StudyLifecycle,
   ) {
     this.eventSequence = lockedEventSequence;
   }
@@ -97,7 +103,11 @@ export class StudyLock {
  */
 @Injectable()
 export class StudyRevisionService {
-  /** Locks the owner's study row until the transaction ends. Absent or another owner's → 404. */
+  /**
+   * Locks the owner's study row until the transaction ends. Absent, another owner's, or trashed
+   * past its 30-day recovery window (BIB-22) → 404. The lock records the study's lifecycle for
+   * the pipeline's lifecycle guard.
+   */
   async lock(transaction: Transaction, ownerId: string, studyId: string): Promise<StudyLock> {
     // A row lock outside a transaction is released at once, so it would protect nothing.
     if (!(transaction instanceof Transaction)) {
@@ -105,8 +115,8 @@ export class StudyRevisionService {
     }
     if (!isResourceId(studyId)) throw new NotFoundError();
     const study = await Study.findOne({
-      where: { id: studyId, ownerId },
-      attributes: ['contentRevision', 'lastEventSequence'],
+      where: { id: studyId, ownerId, ...withinRecoveryWindow() },
+      attributes: ['contentRevision', 'lastEventSequence', 'lifecycle'],
       transaction,
       lock: Transaction.LOCK.UPDATE,
     });
@@ -117,6 +127,7 @@ export class StudyRevisionService {
       studyId,
       study.contentRevision,
       BigInt(study.lastEventSequence),
+      study.lifecycle,
     );
   }
 
@@ -148,6 +159,7 @@ export class StudyRevisionService {
       study.id,
       study.contentRevision,
       BigInt(study.lastEventSequence),
+      study.lifecycle,
     );
   }
 

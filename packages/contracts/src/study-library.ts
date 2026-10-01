@@ -34,8 +34,11 @@ export const MAX_LIBRARY_CURSOR_LENGTH = 2048;
 export const STUDY_SORTS = ['recent', 'created', 'title'] as const;
 export type StudySort = (typeof STUDY_SORTS)[number];
 
-/** Lifecycles the library lists. Trashed studies are never listed here (BIB-22 owns trash). */
-export const LIBRARY_STATES = ['active', 'archived'] as const;
+/**
+ * Lifecycles the library lists: one state per listing. `trashed` is the Trash view (BIB-22): it
+ * lists only studies still inside their recovery window.
+ */
+export const LIBRARY_STATES = ['active', 'archived', 'trashed'] as const;
 export type LibraryState = (typeof LIBRARY_STATES)[number];
 
 /** Field-error copy. Fixed: never the submitted text. */
@@ -127,6 +130,8 @@ export const studyListItemSchema = z.object({
   tags: z.array(studyTagSchema),
   lastActivityAt: z.iso.datetime(),
   createdAt: z.iso.datetime(),
+  /** As on `GET /studies/:id`: when a trashed study is permanently deleted, else null. */
+  purgeAt: z.iso.datetime().nullable(),
 });
 
 export type StudyListItem = z.infer<typeof studyListItemSchema>;
