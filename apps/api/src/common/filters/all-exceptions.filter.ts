@@ -52,12 +52,13 @@ const CONNECTION_LOSS_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * PostgreSQL SQLSTATEs for a transaction PostgreSQL aborted because of a concurrent one, not
- * because the request is wrong: 40P01 deadlock_detected, 40001 serialization_failure. The whole
- * transaction (domain writes, event, receipt) was rolled back, so retrying the identical request
- * with the same Idempotency-Key is safe and normally succeeds.
+ * PostgreSQL SQLSTATEs for a transaction PostgreSQL aborted for a reason other than the request
+ * being wrong: 40P01 deadlock_detected, 40001 serialization_failure, 57014 query_canceled (our
+ * statement_timeout, e.g. a waiter behind a long-held row lock), 25P03
+ * idle_in_transaction_session_timeout. The whole transaction (domain writes, event, receipt) was
+ * rolled back, so retrying the identical request with the same Idempotency-Key is safe.
  */
-const TRANSIENT_CONFLICT_CODES: ReadonlySet<string> = new Set(['40P01', '40001']);
+const TRANSIENT_CONFLICT_CODES: ReadonlySet<string> = new Set(['40P01', '40001', '57014', '25P03']);
 
 /** Seconds a client should wait before retrying a transient conflict. */
 const TRANSIENT_CONFLICT_RETRY_AFTER_SECONDS = 1;
@@ -293,7 +294,7 @@ function sqlStatesOf(exception: unknown): string[] {
   );
 }
 
-/** True when PostgreSQL aborted the transaction as a deadlock victim or serialization failure. */
+/** True when PostgreSQL aborted the transaction for a transient reason (see TRANSIENT_CONFLICT_CODES). */
 function isTransientConflict(exception: unknown): boolean {
   return sqlStatesOf(exception).some((code) => TRANSIENT_CONFLICT_CODES.has(code));
 }

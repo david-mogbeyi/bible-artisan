@@ -210,7 +210,7 @@ describe('AllExceptionsFilter', () => {
 
   it.each([
     ['ConnectionAcquireTimeoutError', new ConnectionAcquireTimeoutError(new Error('pool'))],
-    ['TimeoutError', new TimeoutError(pgError('57014'))],
+    ['TimeoutError', new TimeoutError(pgError('XX000'))],
     ['admin shutdown (57P01)', new DatabaseError(pgError('57P01'))],
     ['crash shutdown (57P02)', new DatabaseError(pgError('57P02'))],
     ['cannot connect now (57P03)', new DatabaseError(pgError('57P03'))],
@@ -226,6 +226,11 @@ describe('AllExceptionsFilter', () => {
     ['a deadlock victim (40P01)', new DatabaseError(pgError('40P01'))],
     ['a serialization failure (40001)', new DatabaseError(pgError('40001'))],
     ['an unwrapped deadlock (40P01)', pgError('40P01')],
+    [
+      'a statement_timeout cancel (57014), as Sequelize surfaces it',
+      new DatabaseError(pgError('57014')),
+    ],
+    ['an idle-in-transaction termination (25P03)', new DatabaseError(pgError('25P03'))],
   ])('maps %s to 503 TRANSIENT_CONFLICT, retryable, with Retry-After', (_name, error) => {
     expect(runWithHeaders(error)).toStrictEqual({
       result: {
