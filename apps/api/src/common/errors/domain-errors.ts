@@ -1,4 +1,4 @@
-import type { ReferenceErrorCode } from '@bible-artisan/contracts';
+import { type ReferenceErrorCode, SEARCH_QUERY_IS_REFERENCE } from '@bible-artisan/contracts';
 
 /**
  * Domain exception classes the global exception filter maps to the shared error envelope
@@ -135,5 +135,18 @@ export class ReferenceInvalidError extends Error {
   constructor(readonly code: ReferenceErrorCode) {
     super(REFERENCE_MESSAGES[code]);
     this.name = 'ReferenceInvalidError';
+  }
+}
+
+/**
+ * A terms-mode search input is a Bible reference (PRD §14: reference lookup takes precedence, and
+ * a malformed reference gets a correction rather than a misleading keyword result). Mapped to
+ * 422; the client resolves the input with POST /bible/resolve instead. Fixed message only.
+ */
+export class SearchQueryIsReferenceError extends Error {
+  readonly code = SEARCH_QUERY_IS_REFERENCE;
+  constructor() {
+    super('This is a Bible reference. Look it up as a reference instead');
+    this.name = 'SearchQueryIsReferenceError';
   }
 }

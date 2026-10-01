@@ -1,4 +1,5 @@
 import { MAX_REFERENCE_INPUT_LENGTH } from '@bible-artisan/contracts';
+import { foldTypedInput } from '../typed-input';
 
 /**
  * Pure, syntax-only parsing of a typed Bible reference (BIB-15, PRD §14). It knows nothing about
@@ -43,17 +44,12 @@ export type ParsedReference =
   | ({ kind: 'malformed'; multiple: boolean } & BookToken)
   | { kind: 'not_reference' };
 
-/** Zero-width space/joiners and the BOM: invisible, so never meaningful in a reference. */
-const ZERO_WIDTH = /[\u200B-\u200D\uFEFF]/g;
 /**
  * Hyphen and dash variants a range may be typed with: hyphen, non-breaking hyphen, figure dash,
  * en dash, em dash, horizontal bar (U+2010..U+2015), minus sign, small em dash, small and
  * full-width hyphen-minus.
  */
 const DASHES = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g;
-/** Full-width ASCII (U+FF01..U+FF5E): digits, letters and punctuation typed with an IME. */
-const FULL_WIDTH_ASCII = /[\uFF01-\uFF5E]/g;
-const FULL_WIDTH_OFFSET = 0xfee0;
 /**
  * Any numeric code point (Unicode N: Nd, Nl, No) other than ASCII 0-9, checked after full-width
  * digits have been folded. Superscripts, subscripts, circled and other-script digits are never
@@ -62,15 +58,14 @@ const FULL_WIDTH_OFFSET = 0xfee0;
 const FOREIGN_NUMBER = /(?![0-9])\p{N}/u;
 
 /**
- * An explicit, minimal fold (deliberately not NFKC, which turns `²` into `2`): remove zero-width
- * characters, map full-width ASCII to ASCII, unify dashes, collapse every Unicode whitespace run
- * to one space, and lower-case ASCII letters only. Every other non-ASCII character is kept, so
- * the ASCII-only grammar rejects it.
+ * An explicit, minimal fold (deliberately not NFKC, which turns `²` into `2`): the typed-input fold
+ * search uses too (`foldTypedInput`: NFC, invisible characters removed, full-width ASCII to
+ * ASCII), then unify dashes, collapse every Unicode whitespace run to one space, and lower-case
+ * ASCII letters only. Every other non-ASCII character is kept, so the ASCII-only grammar rejects
+ * it.
  */
 export function normalizeReferenceInput(input: string): string {
-  return input
-    .replace(ZERO_WIDTH, '')
-    .replace(FULL_WIDTH_ASCII, (ch) => String.fromCharCode(ch.charCodeAt(0) - FULL_WIDTH_OFFSET))
+  return foldTypedInput(input)
     .replace(DASHES, '-')
     .replace(/\s+/gu, ' ')
     .trim()

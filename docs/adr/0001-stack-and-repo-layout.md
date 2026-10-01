@@ -270,6 +270,89 @@ The command is a separate step, not a migration: migrations only get `context.qu
   - Its `down` refuses while rows exist unless `ALLOW_CORPUS_DROP=1` is set, the corpus opt-in, so a `down` past the corpus can't drop the ids and then stop at the corpus guard half-reverted.
   - The resolver inserts or selects in one statement (a CTE with `ON CONFLICT DO NOTHING`), with a second SELECT only when a concurrent insert won the race. Each edition's book index is loaded single-flight and a failed load is evicted. The route is authenticated but not owner-scoped, and it takes no `Idempotency-Key` or revision: it is a read plus a naturally idempotent upsert, not a study mutation.
 
+## Addendum (2026-10-01, BIB-16): keyword search
+
+`GET /v1/bible/search?q=&mode=terms|phrase&editionId=&book=&cursor=&limit=` (`modules/bible-content/search/`) searches verse text of an active edition. It is authenticated, not owner-scoped (shared corpus), read-only, and writes nothing.
+
+**Index: a stored generated column, not a new table or an expression index.**
+
+- `bible_verse.search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, translate(text, <corpus non-ASCII chars>, <as many spaces>))) STORED`, with a GIN index (migration `add_bible_verse_search_vector`). This is PRD section 23's `search_vector`.
+- PostgreSQL computes it from `text` on insert, and refuses any written value (SQLSTATE 428C9). It is a pure function of the text the edition checksum already covers.
+- Adding it rewrote the table without firing row triggers. The BIB-14 immutability triggers stay enabled, no `bible_verse` row was UPDATEd, and the edition content checksum is unchanged. A test asserts all three, plus `search_vector` equals the shared expression for every row.
+- Measured on the full corpus (PostgreSQL 16, ranking the commonest word's 23,875 matches): about 230 ms with an expression index, because `to_tsvector` is recomputed per row for `ts_rank`; about 10 ms with the stored column.
+- `down` drops the column and index; nothing is lost, since `up` rebuilds them. It still refuses while an active edition exists unless `ALLOW_CORPUS_DROP=1`. Each migration's `down` commits on its own, so an unguarded step would commit before a `down` toward the corpus is refused further on, leaving a half-reverted database.
+
+**Locale independence.**
+
+- PostgreSQL's default text-search parser classifies non-ASCII characters through the database's `LC_CTYPE`. Under `C` (common for containers and managed databases) every non-ASCII character counts as a letter. A raw `to_tsvector('simple', text)` then keeps `lord’s` or `“behold—you` as one lexeme, and the prefilter silently drops every verse where a word touches a curly quote or an em dash. Under `en_US.UTF-8` they split.
+- Fix: `translate` blanks every non-ASCII character of the corpus to an ASCII space before parsing. ASCII is classified the same in every locale. The list is `SEARCH_VECTOR_BLANKED_CHARS` (`search/search-vector.ts`): U+00A0 no-break space, U+2014 em dash, U+2018/U+2019 single quotation marks, U+201C/U+201D double quotation marks. None is a letter, mark or digit. The candidate query applies the same `translate` to its tokens (a no-op, since tokens never contain them, kept as defense in depth).
+- The list was derived from the corpus, not typed from memory. `test/search-vector-locale.int-spec.ts` re-derives it from the imported `bible_verse.text` and fails if any non-ASCII character is added or removed. A non-ASCII letter would also fail it: `C` lower-cases ASCII only, so it needs its own decision and a migration.
+- The migration freezes the expression as a literal (a migration never imports code that may change). Tests assert the live column expression equals the one built from the constant, and that every row's vector equals it.
+- Defense in depth: the migration's `up` probes `to_tsvector` on a fixed string with one word on each side of every blanked character, and refuses to finish (fixed, content-free error) unless each word is its own lexeme.
+- The same suite creates a temporary `LC_CTYPE 'C'` database (`template0`, UTF8), runs every migration and imports the pinned corpus there. It shows the raw expression loses more than 1,000 verses there, and asserts the stored vectors equal the test database's (en_US) for all 31,103 verses. It also asserts no token is lost, and runs the production candidate query for word pairs touching a blanked character. It drops the database afterwards; it needs `CREATEDB`, which `pnpm db:setup` and CI already have. Against the old expression, three of its five tests fail.
+
+**The index only narrows; the stored text decides.**
+
+- Candidates come from `search_vector @@ plainto_tsquery('simple', <tokens>)`, an AND of every query token.
+- `search-text.ts` decides every result against the verse text exactly as stored. A candidate the text does not support is dropped, never shown, so a stale or tampered vector could only hide a verse, never invent one.
+- The prefilter never loses a true match. An integration test proves that, for every verse, the PostgreSQL lexemes of each of its tokens are in its `search_vector`.
+
+**`simple`, not `english`.** PRD section 14 asks for "all entered terms" and "no inferred synonym expansion". The `english` stemmer returns verses that do not contain the typed word, and its stopword list silently drops words such as "the" or "I". With `simple`, a term is the literal word, lower-cased. Tradeoff: `loves` does not find `love`; a test asserts no inflection is returned.
+
+**Tokens.** A query first goes through `foldTypedInput` (`bible-content/typed-input.ts`), the one fold the BIB-15 reference parser applies too, so an input is a reference in search exactly when `POST /bible/resolve` reads it as one. The fold applies NFC, removes invisible characters (soft hyphen U+00AD, zero-width space/joiners U+200B..U+200D, word joiner U+2060, BOM U+FEFF), and folds full-width ASCII. NFC means a canonical equivalent such as the Kelvin sign U+212A reads as `K` in references too. Compatibility characters (`²`, `Ⅱ`) are still kept as typed, never NFKC. A _token_ is then a maximal run of Unicode letters, marks or digits, compared lower-cased; everything between two tokens is their separator. Query operators (`& | ! : * ( ) < > ' \`) are separators, never syntax. The query reaches SQL only as these tokens, as a bind parameter, through `plainto_tsquery`; there is no `to_tsquery` and no regular expression built from input. A query needs 1 to 20 tokens and at most 200 characters.
+
+**Terms mode:** every distinct query token is one of the verse's tokens. Highlights mark every occurrence.
+
+**Phrase mode, "contiguous" defined:**
+
+- The query tokens occur as consecutive verse tokens, and each separator between them equals the query's after normalization.
+- Normalization removes whitespace (including the publisher's U+00A0), quotation marks and apostrophes, and hyphens, and maps en dash, em dash, figure dash, horizontal bar and minus to one dash.
+- All other punctuation must match. A phrase never matches across a full stop, comma or dash the user did not type: punctuation normalization never invents adjacency.
+- Consequences: `Lord's` finds `Lord’s`, and a space finds `Beth-shemesh` or a no-break space.
+- Punctuation before the first or after the last token is ignored, so surrounding quotes are optional.
+- Tsquery `<->` is not used. PostgreSQL gives a hyphenated compound an extra position, so `<->` would miss true phrases across one, and it ignores punctuation, which would invent adjacency.
+
+**Highlights** are `[start, end)` offsets in Unicode code points into the returned `text`, which is the stored text, byte for byte. Nothing is reconstructed, and `ts_headline` is not used.
+
+**Order, pages, bounds.**
+
+- Order is `ts_rank` descending, then canonical order (book sequence, chapter, verse).
+- The cursor is an opaque keyset: the last scanned candidate's rank, exactly as PostgreSQL printed the float4, plus its canonical position. It is bound to a fingerprint of mode, tokens, separators, edition and book filter, so a cursor from another query is refused with 400.
+- `limit` is 1 to 100 (default 25). One request examines at most 1,000 candidates in at most three round trips: `limit + 1` first, then the rest of the bound, then a one-row look-ahead. A page may therefore hold fewer than `limit` results.
+- `nextCursor` is non-null exactly when unscanned candidates remain. Following it never repeats or skips a result; a test traverses whole result sets against an independent oracle.
+
+**Reference precedence (PRD section 14).**
+
+- In terms mode, a reference with a chapter or verse gets 422 `SEARCH_QUERY_IS_REFERENCE` (fixed message) and no keyword results, as does an invalid reference shape. Examples: `Dan 3`, `Rom 9:1`, `Phil 4:1`, `Gen 99:1`, `Rom 9:1, 3`.
+- Product decision (pipeline owner, merge gate): book-only input is not refused. That is a book name, abbreviation, code or alias with no numbers (`Job`, `Acts`, `Dan`, `Mark`, `Joshua`). Many book names are also ordinary words, and refusing them would make those words unsearchable. Such input is searched as keywords normally. The response also carries `referenceSuggestion`: exactly what `POST /bible/resolve` answers for that input. That is either `resolved` (the book's first chapter, as BIB-15 resolves a book-only reference) or `ambiguous` (the candidate books), so the client can offer "Open <Book>". `referenceSuggestion` is `null` otherwise and in phrase mode, and is repeated on every page.
+- Classification uses `ReferenceService.searchPrecedence`, which reads the cached book index and persists nothing. The suggestion is built only after the page is ready, so a refused request (bad cursor, unknown edition) writes nothing. A `resolved` suggestion upserts the shared `scripture_reference` row exactly as `resolve` does, the endpoint's only write; an `ambiguous` one writes nothing. A test drives every book name, abbreviation, code and alias from the corpus: each returns 200 with first-page results matching an independent oracle and a suggestion equal to `resolve`'s, and never 422.
+- Phrase mode is explicit literal text and is never treated as a reference.
+- A client with one input box calls `POST /bible/resolve` first and searches on `not_reference`. The search UI belongs to the reader work (BIB-17); this ticket ships the API only.
+
+**Performance (NFR-PERF-002).**
+
+- An integration test sends 100 concurrent requests to one app instance (pool of 10 connections) over a worst-case mix: the commonest word, the two commonest with `limit=100`, the commonest word twice as a phrase (full scan bound, almost nothing verifies), a common phrase, and a mid-frequency word.
+- Latency is **server** latency, as the NFR states it: each request's `durationMs` from its own access line, from the first middleware to response finish.
+- NFR-PERF-002 (p95 ≤ 750 ms) is a production target. It is verified by the recorded measurements below and by BIB-52 on deployment hardware, not by a hard 750 ms gate on shared CI runners, which would flake. The test's hard assertions:
+  - Each worst-case query, served alone (three times each), finishes within 750 ms. It takes tens of milliseconds, so this is robust.
+  - The p95 of the 100 concurrent requests is computed and printed on every run (`[NFR-PERF-002] ...`, numbers only). It is held to `SEARCH_P95_BUDGET_MS`, 750 by default (local runs) and 2000 in CI (`.github/workflows/ci.yml`).
+- After the merge-gate fixes, locally (full file): alone max 26 ms; concurrent p50 133 ms, p95 227 to 255 ms over five runs. Run on its own, p95 is 152 to 180 ms with the query-side `translate` and 160 to 204 ms without it, so the `translate` costs nothing measurable.
+- On the shared 2-vCPU GitHub runner (run 36865819602): alone max 47 ms; concurrent p50 697 ms, p95 1,218 ms. The same code had passed a hard 750 ms gate one run earlier, which is why CI holds the concurrent p95 to 2,000 ms rather than to the production target.
+- Locally (PostgreSQL 16, Apple silicon), three runs measured server p95 171, 183 and 204 ms (p50 120 to 134 ms).
+- The first CI run timed requests from the in-process test client on a 2-vCPU GitHub runner: p95 922 ms, failing. That figure included client-side work in the same process, and it predates the phrase single-fetch below.
+- Changes made to get here:
+  - The scan bound went from 2,000 to 1,000 candidates.
+  - Phrase mode fetches its whole bound in one query instead of ranking all matches again per batch.
+  - `ts_rank` is computed once per row.
+  - Separators are canonicalized only where a phrase's words already match, with a fast path for the plain space.
+  - Verification costs about 3.4 µs of Node CPU per candidate verse.
+- `EXPLAIN` of the production candidate query shows the GIN index (`bible_verse_search_vector_idx`); a test asserts it for a selective query. For the commonest words the planner may choose a sequential scan (about 10 ms).
+- Benchmarks on deployment hardware belong to BIB-52.
+
+**Privacy.** The query travels in the URL (PRD section 24), but `requestLogging` logs only the route pattern. Errors are fixed strings. `test/log-redaction.int-spec.ts` sends sentinel queries and cursors on 200, 400, 404 and 422, and asserts that neither they nor the returned verse text, labels or cursor appear in any log line.
+
+**Not in BIB-16:** the search screen (BIB-17), anchors (BIB-18), `search_performed` events (BIB-55), study/library search (BIB-21), searching Psalm superscriptions (verse text only in MVP), and semantic search (post-MVP).
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

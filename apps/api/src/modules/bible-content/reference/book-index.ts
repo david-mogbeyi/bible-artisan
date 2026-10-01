@@ -81,6 +81,11 @@ export class BookIndex {
     this.nameKeys = this.books.map((book) => [normalizeBookKey(book.name), book]);
   }
 
+  /** The book with this USFM code, if the edition has it. */
+  book(code: string): IndexBook | undefined {
+    return this.books.find((book) => book.code === code);
+  }
+
   /**
    * Every book the token could mean, in canon order: exact key matches plus (for a token of at
    * least two letters) books whose normalized name starts with it. Book-only input never matches

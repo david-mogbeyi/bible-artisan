@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { ResolveReferenceResponse } from '@bible-artisan/contracts';
+import type { ResolveReferenceResponse, SearchReferenceSuggestion } from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import { NotFoundError, ReferenceInvalidError } from '../../../common/errors/domain-errors';
 import { DATABASE } from '../../../database/database.module';
@@ -10,9 +10,22 @@ import {
   BookIndex,
   type IndexBook,
   type ReferenceRange,
+  type Resolution,
   resolveParsedReference,
 } from './book-index';
 import { parseReference } from './parse-reference';
+
+/** A book-only input's resolution: the book's first chapter, or the books it could mean. */
+export type BookOnlyResolution = Extract<Resolution, { outcome: 'resolved' | 'ambiguous' }>;
+
+/**
+ * How a terms search treats its input (PRD section 14, BIB-16):
+ * - `keywords`: not a reference; search it.
+ * - `book`: only a book name, abbreviation or code; search it, and suggest the book.
+ * - `reference`: a reference with a chapter or verse, or an invalid reference; refuse (422).
+ */
+export type SearchPrecedence =
+  { kind: 'keywords' } | { kind: 'book'; resolution: BookOnlyResolution } | { kind: 'reference' };
 
 interface ChapterRow {
   bookCode: string;
@@ -46,15 +59,58 @@ export class ReferenceService {
       case 'not_reference':
         return { outcome: 'not_reference' };
       case 'ambiguous':
-        return { outcome: 'ambiguous', candidates: resolution.candidates };
-      case 'resolved': {
-        const id = await this.persist(editionId, resolution.range);
-        return {
-          outcome: 'resolved',
-          reference: { id, editionId, ...resolution.range, label: resolution.label },
-        };
-      }
+      case 'resolved':
+        return this.outcome(editionId, resolution);
     }
+  }
+
+  /** The active edition's book index (cached). Unknown or not-yet-active edition: 404. */
+  bookIndex(editionId: string): Promise<BookIndex> {
+    return this.indexFor(editionId);
+  }
+
+  /**
+   * How a terms search treats the input (PRD §14: reference lookup takes precedence over
+   * keywords; product decision for BIB-16: book-only input is searched and suggested, not
+   * refused). Uses the same parse and resolution as `resolve`. Read-only: nothing is persisted.
+   * Unknown or not-yet-active edition: 404.
+   */
+  async searchPrecedence(editionId: string, input: string): Promise<SearchPrecedence> {
+    const index = await this.indexFor(editionId);
+    const parsed = parseReference(input);
+    const resolution = resolveParsedReference(index, parsed);
+    if (resolution.outcome === 'not_reference') return { kind: 'keywords' };
+    const bookOnly = parsed.kind === 'reference' && parsed.spec.form === 'book';
+    // A book-only reference always names a valid range (the first chapter); `invalid` here would
+    // be a resolver change, and is refused rather than searched.
+    if (bookOnly && resolution.outcome !== 'invalid') return { kind: 'book', resolution };
+    return { kind: 'reference' };
+  }
+
+  /**
+   * The suggestion for a book-only search input: exactly what `resolve` answers for it. Only a
+   * resolved book persists its shared `scripture_reference` row (an idempotent upsert, as in
+   * `resolve`); an ambiguous one writes nothing.
+   */
+  suggestion(
+    editionId: string,
+    resolution: BookOnlyResolution,
+  ): Promise<SearchReferenceSuggestion> {
+    return this.outcome(editionId, resolution);
+  }
+
+  private async outcome(
+    editionId: string,
+    resolution: BookOnlyResolution,
+  ): Promise<SearchReferenceSuggestion> {
+    if (resolution.outcome === 'ambiguous') {
+      return { outcome: 'ambiguous', candidates: resolution.candidates };
+    }
+    const id = await this.persist(editionId, resolution.range);
+    return {
+      outcome: 'resolved',
+      reference: { id, editionId, ...resolution.range, label: resolution.label },
+    };
   }
 
   /**

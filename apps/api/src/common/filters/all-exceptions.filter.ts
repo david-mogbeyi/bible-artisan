@@ -12,6 +12,7 @@ import {
   ReferenceInvalidError,
   RevisionConflictError,
   RevisionMissingError,
+  SearchQueryIsReferenceError,
   UnauthenticatedError,
   ValidationError,
 } from '../errors/domain-errors';
@@ -137,7 +138,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
     if (
       exception instanceof OtpError ||
       exception instanceof IdempotencyKeyReusedError ||
-      exception instanceof ReferenceInvalidError
+      exception instanceof ReferenceInvalidError ||
+      exception instanceof SearchQueryIsReferenceError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,
