@@ -40,9 +40,10 @@ export function fetchStudy(studyId: string): Promise<StudyResponse> {
 }
 
 /**
- * `PATCH /v1/studies/:studyId` (BIB-20). `idempotencyKey` is reused only for a byte-identical
- * body, so a retry after a lost response replays the original edit instead of failing on a
- * revision the edit itself already moved.
+ * `PATCH /v1/studies/:studyId` (BIB-20). A retry must resend the frozen request: the same body
+ * (with its original `expectedRevision`) and the same `idempotencyKey`, so a retry after a lost
+ * response replays the original edit instead of applying it again on a revision the edit itself
+ * already moved.
  */
 export function updateStudy(
   studyId: string,

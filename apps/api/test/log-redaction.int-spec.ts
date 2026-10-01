@@ -847,7 +847,7 @@ describe('content-redacted operational logs', () => {
       description: track(`SENTINEL-description-${randomUUID()}`),
       mainQuestion: { text: track(`SENTINEL-new-question-${randomUUID()}`) },
       pinned: true,
-      tags: [track(`SENTINEL-tag-${randomUUID()}`)],
+      tags: { add: [track(`SENTINEL-tag-${randomUUID()}`)] },
     };
     const key = track(randomUUID());
     const edited = await edit(body, key);
@@ -873,7 +873,7 @@ describe('content-redacted operational logs', () => {
     );
     const duplicated = secret('tag');
     const badTag = await edit(
-      { expectedRevision: 2, tags: [duplicated, duplicated.toUpperCase()] },
+      { expectedRevision: 2, tags: { add: [duplicated, duplicated.toUpperCase()] } },
       track(randomUUID()),
     );
     expect(badTag.status).toBe(400);

@@ -1,87 +1,171 @@
-import { tagKey } from '@bible-artisan/contracts';
-import { Op, QueryTypes } from 'sequelize';
+import { MAX_STUDY_TAGS, tagKey } from '@bible-artisan/contracts';
+import { QueryTypes, type Sequelize } from 'sequelize';
+import { TagLimitExceededError } from '../../../common/errors/domain-errors';
 import type { StudyMutation } from '../../../common/mutation/study-mutation';
 import { StudyTag } from '../../../database/models/study-tag.model';
 import { Tag } from '../../../database/models/tag.model';
 
-/** How a submitted tag set differs from a study's current one. */
-export interface TagSetChange {
-  /** Submitted names (normalized) whose key the study does not carry yet, sorted by key. */
-  add: { name: string; key: string }[];
-  /** Ids of the study's tags whose key is not in the submitted set. */
-  removeTagIds: string[];
+/** One of a study's tags as stored. `name` and `normalizedName` are private text: never logged. */
+export interface StudyTagRow {
+  id: string;
+  name: string;
+  normalizedName: string;
 }
 
-/**
- * Compares the submitted names (already normalized by `tagNameSchema`, with distinct keys) with
- * the study's tags, by key, without writing anything. Null when the sets are the same, so
- * submitting "grace" for a study tagged "Grace" is no change.
- */
-export async function planTagSet(m: StudyMutation, names: string[]): Promise<TagSetChange | null> {
-  const pairs = await StudyTag.findAll({
-    where: { studyId: m.studyId, ownerId: m.ownerId },
-    attributes: ['tagId'],
-  });
-  const current =
-    pairs.length === 0
-      ? []
-      : await Tag.findAll({
-          where: { ownerId: m.ownerId, id: { [Op.in]: pairs.map((p) => p.tagId) } },
-          attributes: ['id', 'normalizedName'],
-        });
-  const currentKeys = new Set(current.map((tag) => tag.normalizedName));
-  const wanted = new Map(names.map((name) => [tagKey(name), name]));
-  const add = [...wanted]
-    .filter(([key]) => !currentKeys.has(key))
-    .map(([key, name]) => ({ key, name }))
-    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  const removeTagIds = current
-    .filter((tag) => !wanted.has(tag.normalizedName))
-    .map((tag) => tag.id)
-    .sort();
-  return add.length === 0 && removeTagIds.length === 0 ? null : { add, removeTagIds };
+/** What a tag change really did: the ids that joined and left the study, each sorted. */
+export interface AppliedTagChange {
+  addedTagIds: string[];
+  removedTagIds: string[];
 }
 
-/**
- * Applies a planned change in the mutation's transaction and returns the added tags' ids, sorted.
- *
- * New names become the owner's tags through `INSERT … ON CONFLICT (owner_id, normalized_name)
- * DO NOTHING`, in key order, then one SELECT reads the ids. Two mutations of different studies of
- * the same owner (they hold different study locks) adding the same new name converge on one tag:
- * the second INSERT waits on the first's uncommitted row, then skips it once it commits, and READ
- * COMMITTED lets the following SELECT see it (or inserts it, if the first rolled back). Key order
- * keeps two such mutations from waiting on each other's rows in opposite orders. An existing tag
- * keeps its stored display name.
- */
-export async function applyTagSet(m: StudyMutation, change: TagSetChange): Promise<string[]> {
-  if (change.removeTagIds.length > 0) {
-    await StudyTag.destroy({
-      where: { studyId: m.studyId, ownerId: m.ownerId, tagId: { [Op.in]: change.removeTagIds } },
-      transaction: m.transaction,
-    });
-  }
-  if (change.add.length === 0) return [];
+function database(): Sequelize {
   const sequelize = Tag.sequelize;
   if (!sequelize) throw new Error('Tag model is not initialized');
-  await sequelize.query(
-    `INSERT INTO tag (owner_id, name, normalized_name)
-     SELECT $1, t.name, t.normalized_name
-       FROM unnest($2::text[], $3::text[]) WITH ORDINALITY AS t(name, normalized_name, ord)
-      ORDER BY t.ord
-     ON CONFLICT (owner_id, normalized_name) DO NOTHING`,
-    {
-      bind: [m.ownerId, change.add.map((t) => t.name), change.add.map((t) => t.key)],
-      transaction: m.transaction,
-      type: QueryTypes.INSERT,
-    },
+  return sequelize;
+}
+
+/**
+ * The study's tags, sorted by normalized name (then id, for a total order). One query, scoped by
+ * the study's own `study_id` and `owner_id` on both tables (the composite FKs guarantee they
+ * agree). Inside a mutation it joins the transaction (database/transaction-context.ts). Shared by
+ * `GET`/`PATCH` responses (study-state.ts) and tag planning below.
+ */
+export function studyTagRows(studyId: string, ownerId: string): Promise<StudyTagRow[]> {
+  return database().query<StudyTagRow>(
+    `SELECT t.id, t.name, t.normalized_name AS "normalizedName"
+       FROM study_tag st
+       JOIN tag t ON t.owner_id = st.owner_id AND t.id = st.tag_id
+      WHERE st.study_id = $1 AND st.owner_id = $2
+      ORDER BY t.normalized_name, t.id`,
+    { bind: [studyId, ownerId], type: QueryTypes.SELECT },
   );
-  const tags = await Tag.findAll({
-    where: { ownerId: m.ownerId, normalizedName: { [Op.in]: change.add.map((t) => t.key) } },
-    attributes: ['id'],
-    transaction: m.transaction,
-  });
-  if (tags.length !== change.add.length) throw new Error('applyTagSet: a tag row is missing');
-  const ids = tags.map((tag) => tag.id).sort();
-  for (const tagId of ids) await m.createChild(StudyTag, { tagId });
-  return ids;
+}
+
+/**
+ * Applies a tag delta (`tags.add` names, already normalized by `tagNameSchema` with distinct keys;
+ * `tags.remove` ids) to the locked study, in the mutation's transaction. Returns null when the
+ * study's tag set ends up as it was, so the caller can answer STUDY_UNCHANGED (its rollback undoes
+ * any interim write).
+ *
+ * - An id the study does not carry, and a name whose key it already carries (and keeps), is a
+ *   no-op for that item. Removals apply first, so removing a tag by id and adding a name with the
+ *   same key recases it when no other study uses the old row.
+ * - The 20-tag limit is checked on the result, under the study lock (only this study's mutations
+ *   write its `study_tag` rows, and they all hold that lock), so it holds whatever another device
+ *   added first: 422 TAG_LIMIT_EXCEEDED.
+ * - A removed tag that no study references any more is deleted, so private tag text never
+ *   lingers in the owner's vocabulary (see `deleteOrphanedTags`).
+ */
+export async function applyTagChange(
+  m: StudyMutation,
+  change: { add?: string[]; remove?: string[] },
+): Promise<AppliedTagChange | null> {
+  const before = await studyTagRows(m.studyId, m.ownerId);
+  const beforeIds = new Set(before.map((tag) => tag.id));
+  const removeIds = new Set((change.remove ?? []).filter((id) => beforeIds.has(id)));
+  const kept = before.filter((tag) => !removeIds.has(tag.id));
+  const keptKeys = new Set(kept.map((tag) => tag.normalizedName));
+  const add = (change.add ?? [])
+    .map((name) => ({ name, key: tagKey(name) }))
+    .filter((tag) => !keptKeys.has(tag.key))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  if (removeIds.size === 0 && add.length === 0) return null;
+  if (kept.length + add.length > MAX_STUDY_TAGS) throw new TagLimitExceededError();
+
+  if (removeIds.size > 0) {
+    const ids = [...removeIds].sort();
+    await StudyTag.destroy({ where: { studyId: m.studyId, ownerId: m.ownerId, tagId: ids } });
+    await deleteOrphanedTags(m.ownerId, ids);
+  }
+  const addedIds = add.length === 0 ? [] : await ownerTagIds(m.ownerId, add);
+  for (const tagId of addedIds) await m.createChild(StudyTag, { tagId });
+
+  const after = new Set([...kept.map((tag) => tag.id), ...addedIds]);
+  const addedTagIds = [...after].filter((id) => !beforeIds.has(id)).sort();
+  const removedTagIds = [...beforeIds].filter((id) => !after.has(id)).sort();
+  return addedTagIds.length === 0 && removedTagIds.length === 0
+    ? null
+    : { addedTagIds, removedTagIds };
+}
+
+/**
+ * Deletes those of `tagIds` (the owner's, in id order) that no study references any more.
+ *
+ * Another study of the same owner (a different study lock) may be adding one of these tags at
+ * the same moment, so the delete must never remove a row that study is about to pair with:
+ *
+ * 1. `SELECT … FOR UPDATE` locks the rows first. It conflicts with the `FOR KEY SHARE` lock an
+ *    adder takes (`ownerTagIds`) and holds until it commits, so it waits for any adder that got
+ *    there first.
+ * 2. The `DELETE … NOT EXISTS` is a new statement, so under READ COMMITTED it sees every pairing
+ *    committed before the lock was granted, and keeps a tag that another study now uses. No new
+ *    pairing can commit meanwhile: the adder's `FOR KEY SHARE` waits for this transaction.
+ *
+ * (A single `DELETE … WHERE NOT EXISTS` would not do: after waiting on an adder's lock,
+ * PostgreSQL deletes the row without re-running the subquery, and the cascade would silently
+ * drop the other study's new pairing.)
+ */
+async function deleteOrphanedTags(ownerId: string, tagIds: string[]): Promise<void> {
+  const sequelize = database();
+  await sequelize.query(
+    `SELECT id FROM tag WHERE owner_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE`,
+    { bind: [ownerId, tagIds], type: QueryTypes.SELECT },
+  );
+  await sequelize.query(
+    `DELETE FROM tag t
+      WHERE t.owner_id = $1 AND t.id = ANY($2::uuid[])
+        AND NOT EXISTS (
+          SELECT 1 FROM study_tag st WHERE st.owner_id = t.owner_id AND st.tag_id = t.id
+        )`,
+    { bind: [ownerId, tagIds], type: QueryTypes.DELETE },
+  );
+}
+
+/** Attempts at finding or creating the tags before giving up (see `ownerTagIds`). */
+const TAG_UPSERT_ATTEMPTS = 3;
+
+/**
+ * The ids of the owner's tags for `tags` (key order), creating the missing ones, each locked
+ * `FOR KEY SHARE` until commit so no concurrent orphan cleanup can delete it before this
+ * transaction pairs it with the study. Sorted by id.
+ *
+ * - `INSERT … ON CONFLICT (owner_id, normalized_name) DO NOTHING` in key order: two studies of
+ *   one owner adding the same new name converge on one row (the second INSERT waits on the
+ *   first's uncommitted row, then skips it once it commits). An existing tag keeps its stored
+ *   display name.
+ * - The locking SELECT skips a row another transaction deleted while this one waited for it (an
+ *   orphan cleanup that won the race), so the loop inserts it afresh, with this request's
+ *   display name. Bounded: each retry needs another study to delete the same tag again.
+ */
+async function ownerTagIds(
+  ownerId: string,
+  tags: { name: string; key: string }[],
+): Promise<string[]> {
+  const sequelize = database();
+  let missing = tags;
+  const found = new Map<string, string>();
+  for (let attempt = 1; missing.length > 0; attempt += 1) {
+    if (attempt > TAG_UPSERT_ATTEMPTS) throw new Error('ownerTagIds: a tag row kept disappearing');
+    await sequelize.query(
+      `INSERT INTO tag (owner_id, name, normalized_name)
+       SELECT $1, t.name, t.normalized_name
+         FROM unnest($2::text[], $3::text[]) WITH ORDINALITY AS t(name, normalized_name, ord)
+        ORDER BY t.ord
+       ON CONFLICT (owner_id, normalized_name) DO NOTHING`,
+      {
+        bind: [ownerId, missing.map((t) => t.name), missing.map((t) => t.key)],
+        type: QueryTypes.INSERT,
+      },
+    );
+    const rows = await sequelize.query<{ id: string; normalizedName: string }>(
+      `SELECT id, normalized_name AS "normalizedName" FROM tag
+        WHERE owner_id = $1 AND normalized_name = ANY($2::text[])
+        ORDER BY normalized_name
+        FOR KEY SHARE`,
+      { bind: [ownerId, missing.map((t) => t.key)], type: QueryTypes.SELECT },
+    );
+    for (const row of rows) found.set(row.normalizedName, row.id);
+    missing = missing.filter((t) => !found.has(t.key));
+  }
+  return [...found.values()].sort();
 }

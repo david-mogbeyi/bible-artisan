@@ -11,6 +11,7 @@ import {
   NotFoundError,
   QuestionNotFoundError,
   ReferenceNotFoundError,
+  RevisionConflictError,
   StudyUnchangedError,
 } from '../../../common/errors/domain-errors';
 import type { MutationRequestInfo } from '../../../common/mutation/mutation-request';
@@ -26,7 +27,7 @@ import { ReferenceService } from '../../bible-content/reference/reference.servic
 import { StudyAccessService } from '../study-access.service';
 import { deriveStudyTitle } from '../study-title';
 import { readStudyState } from './study-state';
-import { applyTagSet, planTagSet } from './study-tags';
+import { applyTagChange } from './study-tags';
 
 /** PRD section 13: the thread-visible event every study starts with. */
 const STUDY_CREATED = 'study_created';
@@ -155,7 +156,10 @@ export class StudiesService {
    * 2. Work out what really changes; a field equal to its current value is no change, and an
    *    edit that changes nothing is 422 STUDY_UNCHANGED (rolled back: no receipt, nothing).
    * 3. Write: a new Question node (and the initial branch, for a study without one), the study
-   *    row (one revision bump for the whole edit), the tag set; one event per change.
+   *    row (one revision bump for the whole edit); one event per change.
+   *
+   * Tag deltas apply before step 2's verdict (see `applyTagChange`), and their 20-tag limit is a
+   * 422 TAG_LIMIT_EXCEEDED.
    *
    * The original question is never rewritten; a study without one takes its first main question
    * as the original (the DB trigger refuses any later change). `content_revision` moves only for a
@@ -178,12 +182,7 @@ export class StudiesService {
           rejectOnEmpty: true,
         });
         if (current.revision !== expectedRevision) {
-          // Throws 409 with the current revision (or 404), exactly as a write would.
-          await m.updateWithExpectedRevision(Study, {
-            id: m.studyId,
-            expectedRevision,
-            values: {},
-          });
+          throw new RevisionConflictError(current.revision);
         }
 
         const titleChanged = body.title !== undefined && body.title !== current.title;
@@ -195,7 +194,10 @@ export class StudiesService {
         const mainChanged =
           target !== undefined &&
           ('text' in target || target.nodeId !== current.mainQuestionNodeId);
-        const tagChange = body.tags === undefined ? null : await planTagSet(m, body.tags);
+        // Tags apply first: whether they change anything is only known once the deltas have met
+        // the study's current tags (and a concurrent orphan cleanup). A refusal below rolls the
+        // interim writes back with everything else.
+        const tagChange = body.tags === undefined ? null : await applyTagChange(m, body.tags);
         if (!titleChanged && !descriptionChanged && !pinChanged && !mainChanged && !tagChange) {
           throw new StudyUnchangedError();
         }
@@ -238,7 +240,6 @@ export class StudiesService {
               : {}),
           },
         });
-        const addedTagIds = tagChange ? await applyTagSet(m, tagChange) : [];
 
         const events: AppendEventInput[] = [];
         if (titleChanged) events.push({ eventType: STUDY_EDIT_EVENTS.renamed });
@@ -272,7 +273,10 @@ export class StudiesService {
         if (tagChange) {
           events.push({
             eventType: STUDY_EDIT_EVENTS.tagsChanged,
-            payload: { addedTagIds, removedTagIds: tagChange.removeTagIds },
+            payload: {
+              addedTagIds: tagChange.addedTagIds,
+              removedTagIds: tagChange.removedTagIds,
+            },
           });
         }
         // At least one: an edit without a change was refused above.

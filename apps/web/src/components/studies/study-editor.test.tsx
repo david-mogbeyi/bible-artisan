@@ -1,5 +1,6 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { CONFLICT, RELOADED, TAG_ALREADY_ADDED } from './study-editor';
 import { StudyPage } from './study-page';
@@ -129,7 +130,7 @@ describe('StudyEditor', () => {
         body: {
           expectedRevision: 1,
           title: 'Conscience and the Spirit',
-          tags: ['Grace', 'holy spirit'],
+          tags: { add: ['holy spirit'] },
         },
         key: expect.stringMatching(/^[0-9a-f-]{36}$/),
       },
@@ -235,6 +236,135 @@ describe('StudyEditor', () => {
     expect(retried).toStrictEqual(first);
     expect(changed?.key).not.toBe(first?.key);
     expect((field('Title') as HTMLInputElement).value).toBe('Retry me, edited');
+  });
+
+  it('retries a save whose response was lost after it committed with the identical body and key, even after a refetch moved the revision', async () => {
+    const view = await openStudy();
+    fireEvent.change(field(/New main question/), { target: { value: LATER.text } });
+    patchReplies.push(new TypeError('Failed to fetch'));
+    fireEvent.click(save());
+    await screen.findByRole('button', { name: 'Retry' });
+
+    // The edit did commit. A background refetch brings in revision 2 meanwhile.
+    const committed = { mainQuestion: LATER, revision: 2, contentRevision: 2 };
+    studyReplies.push(jsonResponse(200, { ...STUDY, ...committed }));
+    await act(() => view.queryClient.refetchQueries({ queryKey: studyQueryKey(STUDY_ID) }));
+    expect(
+      await screen.findByRole('button', { name: 'Make the original question main again' }),
+    ).toBeTruthy();
+
+    // The server replays the original 200 for the same key and body.
+    patchReplies.push(jsonResponse(200, edited(committed), { 'Idempotent-Replayed': 'true' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    const [first, retried] = patches();
+    expect(first?.body).toStrictEqual({ expectedRevision: 1, mainQuestion: { text: LATER.text } });
+    expect(retried).toStrictEqual(first);
+    expect((field(/New main question/) as HTMLTextAreaElement).value).toBe('');
+
+    // The form's base is now the replayed state: the next edit is a new request on revision 2.
+    fireEvent.change(field('Title'), { target: { value: 'Next' } });
+    patchReplies.push(jsonResponse(200, edited({ ...committed, title: 'Next', revision: 3 }, '4')));
+    fireEvent.click(save());
+    await waitFor(() => expect(patches()).toHaveLength(3));
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    expect(patches()[2]?.body).toStrictEqual({ expectedRevision: 2, title: 'Next' });
+    expect(patches()[2]?.key).not.toBe(first?.key);
+  });
+
+  it('resends a lost title edit verbatim with Save as well, so a committed rename never answers "no changes"', async () => {
+    const view = await openStudy();
+    fireEvent.change(field('Title'), { target: { value: 'Renamed' } });
+    patchReplies.push(new TypeError('Failed to fetch'));
+    fireEvent.click(save());
+    await screen.findByRole('button', { name: 'Retry' });
+    studyReplies.push(jsonResponse(200, { ...STUDY, title: 'Renamed', revision: 2 }));
+    await act(() => view.queryClient.refetchQueries({ queryKey: studyQueryKey(STUDY_ID) }));
+    await screen.findByRole('heading', { level: 1, name: 'Renamed' });
+
+    patchReplies.push(jsonResponse(200, edited({ title: 'Renamed', revision: 2 })));
+    fireEvent.click(save());
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    expect(screen.queryByText('There are no changes to save.')).toBeNull();
+    const [first, resent] = patches();
+    expect(first?.body).toStrictEqual({ expectedRevision: 1, title: 'Renamed' });
+    expect(resent).toStrictEqual(first);
+  });
+
+  it('keeps what the user typed while a save was in flight, and saves it next on the new revision', async () => {
+    await openStudy();
+    fireEvent.change(field('Title'), { target: { value: 'Sent title' } });
+    fireEvent.change(field(/Description/), { target: { value: 'Sent description' } });
+    let answer: (response: Response) => void = () => undefined;
+    patchReplies.push(new Promise<Response>((resolve) => (answer = resolve)));
+    fireEvent.click(save());
+    await screen.findByText('Saving…');
+
+    fireEvent.change(field('Title'), { target: { value: 'Typed while saving' } });
+    fireEvent.change(field('Add a tag'), { target: { value: 'Later' } });
+    fireEvent.keyDown(field('Add a tag'), { key: 'Enter' });
+    answer(
+      jsonResponse(
+        200,
+        edited({
+          title: 'Sent title',
+          description: 'Sent description',
+          revision: 2,
+          contentRevision: 2,
+        }),
+      ),
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Sent title' });
+    expect((field('Title') as HTMLInputElement).value).toBe('Typed while saving');
+    expect((field(/Description/) as HTMLTextAreaElement).value).toBe('Sent description');
+
+    patchReplies.push(jsonResponse(200, edited({ title: 'Typed while saving', revision: 3 }, '4')));
+    fireEvent.click(save());
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1]?.body).toStrictEqual({
+      expectedRevision: 2,
+      title: 'Typed while saving',
+      tags: { add: ['Later'] },
+    });
+  });
+
+  it("after Reload latest shows the other device's tags merged with pending local adds and removals, and sends only the deltas", async () => {
+    const FAITH = { id: '33333333-2222-4333-8444-555555555555', name: 'Faith' };
+    const B = { id: '44444444-2222-4333-8444-555555555555', name: 'b' };
+    await openStudy({ ...STUDY, tags: [FAITH, GRACE] });
+    fireEvent.change(field('Add a tag'), { target: { value: 'c' } });
+    fireEvent.keyDown(field('Add a tag'), { key: 'Enter' });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove tag Faith' }));
+    patchReplies.push(jsonResponse(409, envelope('REVISION_CONFLICT', { currentRevision: 2 })));
+    fireEvent.click(save());
+    await screen.findByText(CONFLICT);
+
+    // Another device added "b" meanwhile.
+    studyReplies.push(jsonResponse(200, { ...STUDY, tags: [B, FAITH, GRACE], revision: 2 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reload latest' }));
+    expect(await screen.findByText(RELOADED)).toBeTruthy();
+    const shown = () =>
+      screen
+        .getAllByRole('button', { name: /^Remove tag / })
+        .map((button) => button.getAttribute('aria-label'));
+    expect(shown()).toStrictEqual(['Remove tag b', 'Remove tag Grace', 'Remove tag c']);
+
+    patchReplies.push(
+      jsonResponse(
+        200,
+        edited({
+          tags: [B, GRACE, { id: '55555555-2222-4333-8444-555555555555', name: 'c' }],
+          revision: 3,
+        }),
+      ),
+    );
+    fireEvent.click(save());
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    expect(patches().map((p) => p.body)).toStrictEqual([
+      { expectedRevision: 1, tags: { add: ['c'], remove: [FAITH.id] } },
+      { expectedRevision: 2, tags: { add: ['c'], remove: [FAITH.id] } },
+    ]);
+    expect(shown()).toStrictEqual(['Remove tag b', 'Remove tag Grace', 'Remove tag c']);
   });
 
   it('pins at once with aria-pressed, keeping an unsaved title edit', async () => {

@@ -501,11 +501,13 @@ Only step 2 differs:
 
 - `study.revision` covers every editable field. Any successful edit bumps it once, so a concurrent edit to a different field still gets 409. The client reloads and reapplies its draft; field-level merge is BIB-37.
 - The work compares revisions before anything else, so a stale edit is always 409, whatever else the body says.
-- The web form diffs its draft against the study it started from (`base`), never against a copy reloaded after a conflict. So "Reload latest" followed by Save sends only the fields the user changed, and never resends an untouched field's old value.
+- The web form diffs its draft against `base`: the study as last saved (from the 200, including a replayed one) or reloaded, never a copy a background refetch brought in, and sends `base.revision`. "Reload latest" rebases: a field the user did not touch takes the reloaded value, a touched one stays a pending change. So Save sends only the fields the user changed, and never resends an untouched field's old value.
+- Every request is frozen once sent: its exact body (including `expectedRevision`) and its Idempotency-Key. After a failure whose outcome is unknown (network, 5xx), Retry, or Save with an unedited draft, resends it verbatim, so a save that committed but lost its response gets the original 200 replayed. Rebuilding it from a refetched study would carry a new revision, hence a new key, and apply the edit twice (a second Question node) or answer `STUDY_UNCHANGED`. Editing the draft discards the frozen request; the next Save is a new request with a new key from the current `base`.
+- On a 200 a field shows the saved value only if the draft still holds what the save assumed (the value sent, or the base value for an unsent field). Anything typed while the save was in flight stays as a pending change.
 
 **No-op edits.**
 
-- A field equal to its current value is not a change. Tags compare by normalized key.
+- A field equal to its current value is not a change. Tag deltas that are already applied are no change.
 - An edit with no change at all is 422 `STUDY_UNCHANGED` and rolls back (no receipt). The pipeline requires an event, and there is nothing true to record.
 
 **Content revision.**
@@ -525,12 +527,19 @@ Only step 2 differs:
 - `tag (owner_id, name, normalized_name)` is one vocabulary per owner, with `UNIQUE (owner_id, normalized_name)`.
 - `study_tag` has composite FKs `(owner_id, study_id) → study` and `(owner_id, tag_id) → tag`, both cascading, so another owner's tag is unwritable on a study.
 - Normalization (`normalizeTagName` / `tagKey` in contracts):
-  - the display name is NFC, trimmed, with whitespace runs collapsed;
-  - the key is that name lower-cased with `toLowerCase`, not full Unicode case folding;
-  - names are 1–50 characters, with at most 20 per study (the request carries the whole set);
-  - duplicate keys in one request are a 400.
-- An existing tag keeps its first display name. Unused tags stay in the vocabulary; tag management is not in the MVP.
-- New tags are inserted with `INSERT … ON CONFLICT DO NOTHING` and then selected, in key order. Two studies of one owner, which hold different study locks, can add the same new tag at once and converge on one row. A test races them through a gate transaction holding the tag key.
+  - the display name is NFC, trimmed, with whitespace runs collapsed; it otherwise keeps what the user typed;
+  - the key folds further: NFKC; format characters (`\p{Cf}`: zero-width space and joiners, BOM, bidi controls) and the characters `userTextSchema` refuses are removed; `İ` and `ı` become `i` (and `i` + U+0307 becomes `i`); then `toLowerCase().toUpperCase().toLowerCase()`, which approximates full case folding (`ß`/`ẞ` → `ss`, final sigma → `σ`); whitespace collapsed. The dotted/dotless I choice is language-neutral: "İstanbul", "Istanbul" and "istanbul" are one tag in every locale, at the cost of Turkish "ılık" and "ilik" also being one. Changing `tagKey` needs a data migration;
+  - names are 1–50 characters, and a name whose key is empty (only format characters) is refused.
+- **Tags travel as deltas**, `tags: { add?: string[], remove?: string[] }`, not as the whole set. A whole set built from a device's stale copy silently drops whatever another device added meanwhile; deltas compose. Additions are names (the user typed them, and an existing tag of the owner with the same key is reused); removals are tag ids from `StudyResponse.tags`, so a removal names exactly the tag the client saw. Removals apply first, so `remove: [id], add: ["New Casing"]` recases a tag no other study uses.
+  - An add whose key the study already carries, and a remove of an id it does not carry (removed already, another study's, another owner's, absent), is a no-op for that item. Same-key adds or repeated ids in one request are 400 `TAG_DUPLICATE`; an empty delta is 400.
+  - If the whole edit changes nothing it is 422 `STUDY_UNCHANGED`, as before. `study_tags_changed {addedTagIds, removedTagIds}` lists only real changes.
+  - At most 20 tags per study, checked after applying under the study lock: 422 `TAG_LIMIT_EXCEEDED`.
+  - The web form keeps pending adds and removes against the saved tags and shows saved tags minus pending removals plus pending adds, so after Reload latest the other device's tags appear next to the user's own pending changes.
+- **Unused tags are deleted.** When an edit removes a study's last reference to a tag, the tag row goes in the same transaction, so private tag text does not linger and a later add takes the new display casing. An existing tag otherwise keeps its first display name. Tag management is not in the MVP.
+- Concurrency between studies of one owner (different study locks):
+  - New tags are inserted with `INSERT … ON CONFLICT DO NOTHING` in key order, then selected `FOR KEY SHARE`. Two studies adding the same new tag converge on one row (a test races them through a gate transaction holding the tag key).
+  - The orphan cleanup locks the candidate rows `FOR UPDATE` first, then runs `DELETE … WHERE NOT EXISTS (study_tag)` as a new statement. An adder that locked first makes the cleanup wait and then see its pairing; a cleanup that locked first makes the adder's `FOR KEY SHARE` skip the deleted row, and the adder inserts it afresh. A single `DELETE … NOT EXISTS` would not do: after waiting on a lock PostgreSQL deletes the row without re-running the subquery, and the cascade would drop the other study's new pairing. A gate-pattern test races a remover against an adder.
+  - Two studies that each remove a tag the other adds at the same moment can deadlock; PostgreSQL aborts one, which answers the retryable 503 `TRANSIENT_CONFLICT`.
 
 **Pin.** `study.pinned_at`, a study-level pin for the library's pinned group (BIB-21). No per-owner cap: the PRD sets none. Pinned nodes and citations are a different concept and are not in this ticket.
 

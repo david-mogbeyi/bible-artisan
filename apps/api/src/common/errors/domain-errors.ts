@@ -1,10 +1,12 @@
 import {
   type AnchorProblemCode,
+  MAX_STUDY_TAGS,
   QUESTION_NOT_FOUND,
   REFERENCE_NOT_FOUND,
   type ReferenceErrorCode,
   SEARCH_QUERY_IS_REFERENCE,
   STUDY_UNCHANGED,
+  TAG_LIMIT_EXCEEDED,
 } from '@bible-artisan/contracts';
 
 /**
@@ -217,5 +219,18 @@ export class StudyUnchangedError extends Error {
   constructor() {
     super('The study already has these values');
     this.name = 'StudyUnchangedError';
+  }
+}
+
+/**
+ * A study edit whose tag change would leave the study with more than `MAX_STUDY_TAGS` tags
+ * (BIB-20; 422). The limit is checked after the deltas apply, under the study lock, so it holds
+ * whatever another device added meanwhile. Nothing is written.
+ */
+export class TagLimitExceededError extends Error {
+  readonly code = TAG_LIMIT_EXCEEDED;
+  constructor() {
+    super(`A study can have at most ${MAX_STUDY_TAGS} tags`);
+    this.name = 'TagLimitExceededError';
   }
 }

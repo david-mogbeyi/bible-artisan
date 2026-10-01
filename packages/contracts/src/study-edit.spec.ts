@@ -3,6 +3,7 @@ import {
   MAX_STUDY_TAGS,
   normalizeTagName,
   STUDY_EDIT_EMPTY,
+  TAG_CHANGE_EMPTY,
   TAG_DUPLICATE,
   TAG_EMPTY,
   TAG_TOO_LONG,
@@ -22,12 +23,49 @@ const issuesOf = (body: unknown) => {
 };
 
 describe('normalizeTagName / tagKey', () => {
-  it('applies NFC, trims, and collapses whitespace runs; the key is lower-cased', () => {
-    expect(normalizeTagName('  Grace \t alone \n')).toBe('Grace alone');
+  it('applies NFC, trims, and collapses whitespace runs; the key is case-folded', () => {
+    expect(normalizeTagName('  Grace \t alone \n')).toBe('Grace alone');
     // "a" + a combining acute accent composes to one code point.
-    expect(normalizeTagName('Gráce')).toBe('Gráce');
+    expect(normalizeTagName('Gra\u0301ce')).toBe('Gr\u00e1ce');
     expect(tagKey(' GRACE  Alone')).toBe('grace alone');
-    expect(tagKey('Gráce')).toBe(tagKey('GRÁCE'));
+    expect(tagKey('Gra\u0301ce')).toBe(tagKey('GR\u00c1CE'));
+  });
+
+  it('folds sharp s like full case folding: STRASSE, Straße and STRAẞE are one tag', () => {
+    expect(tagKey('Stra\u00dfe')).toBe('strasse');
+    expect(tagKey('STRASSE')).toBe('strasse');
+    expect(tagKey('STRA\u1e9eE')).toBe('strasse');
+    // The display name keeps what the user typed.
+    expect(normalizeTagName('Stra\u00dfe')).toBe('Stra\u00dfe');
+  });
+
+  it('treats dotted and dotless I as plain i in every form', () => {
+    for (const name of [
+      '\u0130stanbul',
+      'I\u0307stanbul',
+      'i\u0307stanbul',
+      'Istanbul',
+      'istanbul',
+    ]) {
+      expect(tagKey(name)).toBe('istanbul');
+    }
+    expect(tagKey('\u0131l\u0131k')).toBe('ilik');
+  });
+
+  it('removes zero-width and other format characters, and folds compatibility forms', () => {
+    for (const name of [
+      'gr\u200bace',
+      '\ufeffgrace',
+      'gra\u200dce\u200c',
+      'grace\u2060',
+      '\uff27\uff52\uff41\uff43\uff45',
+      'gra\u00a0\u200bce',
+    ]) {
+      expect(tagKey(name).replace(' ', '')).toBe('grace');
+    }
+    expect(tagKey('a \u200b b')).toBe('a b');
+    expect(tagKey('\ufb01sh')).toBe('fish');
+    expect(tagKey('\u200b')).toBe('');
   });
 });
 
@@ -40,7 +78,7 @@ describe('updateStudyRequestSchema', () => {
         description: ' Notes ',
         mainQuestion: { text: ' Why? ' },
         pinned: true,
-        tags: ['  grace  alone', 'Faith'],
+        tags: { add: ['  grace  alone', 'Faith'], remove: [nodeId] },
       }),
     ).toStrictEqual({
       expectedRevision: 3,
@@ -48,7 +86,7 @@ describe('updateStudyRequestSchema', () => {
       description: 'Notes',
       mainQuestion: { text: 'Why?' },
       pinned: true,
-      tags: ['grace alone', 'Faith'],
+      tags: { add: ['grace alone', 'Faith'], remove: [nodeId.toLowerCase()] },
     });
     expect(
       updateStudyRequestSchema.parse({ expectedRevision: 1, mainQuestion: { nodeId } }),
@@ -56,10 +94,9 @@ describe('updateStudyRequestSchema', () => {
     expect(
       updateStudyRequestSchema.parse({ expectedRevision: 1, description: null }),
     ).toStrictEqual({ expectedRevision: 1, description: null });
-    expect(updateStudyRequestSchema.parse({ expectedRevision: 1, tags: [] })).toStrictEqual({
-      expectedRevision: 1,
-      tags: [],
-    });
+    expect(
+      updateStudyRequestSchema.parse({ expectedRevision: 1, tags: { remove: [nodeId] } }),
+    ).toStrictEqual({ expectedRevision: 1, tags: { remove: [nodeId.toLowerCase()] } });
   });
 
   it('needs at least one editable field', () => {
@@ -81,22 +118,54 @@ describe('updateStudyRequestSchema', () => {
   });
 
   it('refuses duplicate, empty, long, control-character, and too many tags with fixed copy', () => {
-    expect(issuesOf({ expectedRevision: 1, tags: ['Grace', ' grace '] })).toStrictEqual([
-      { path: ['tags'], message: TAG_DUPLICATE },
+    const add = (names: string[]) => ({ expectedRevision: 1, tags: { add: names } });
+    expect(issuesOf(add(['Grace', ' grace ']))).toStrictEqual([
+      { path: ['tags', 'add'], message: TAG_DUPLICATE },
     ]);
-    expect(issuesOf({ expectedRevision: 1, tags: ['  '] })).toStrictEqual([
-      { path: ['tags', 0], message: TAG_EMPTY },
+    expect(issuesOf(add(['  ']))).toStrictEqual([{ path: ['tags', 'add', 0], message: TAG_EMPTY }]);
+    expect(issuesOf(add(['x'.repeat(51)]))).toStrictEqual([
+      { path: ['tags', 'add', 0], message: TAG_TOO_LONG },
     ]);
-    expect(issuesOf({ expectedRevision: 1, tags: ['x'.repeat(51)] })).toStrictEqual([
-      { path: ['tags', 0], message: TAG_TOO_LONG },
-    ]);
-    expect(issuesOf({ expectedRevision: 1, tags: ['a\u000bb'] })).toStrictEqual([
-      { path: ['tags', 0], message: USER_TEXT_INVALID_CHARACTERS },
+    expect(issuesOf(add(['a\u000bb']))).toStrictEqual([
+      { path: ['tags', 'add', 0], message: USER_TEXT_INVALID_CHARACTERS },
     ]);
     const many = Array.from({ length: MAX_STUDY_TAGS + 1 }, (_, i) => `t${i}`);
-    expect(issuesOf({ expectedRevision: 1, tags: many })).toStrictEqual([
-      { path: ['tags'], message: TOO_MANY_TAGS },
+    expect(issuesOf(add(many))).toStrictEqual([{ path: ['tags', 'add'], message: TOO_MANY_TAGS }]);
+    expect(issuesOf(add(many.slice(1)))).toStrictEqual([]);
+  });
+
+  it('refuses adds that are duplicates only after folding, and a name that is only format characters', () => {
+    const add = (names: string[]) => ({ expectedRevision: 1, tags: { add: names } });
+    for (const pair of [
+      ['STRASSE', 'Stra\u00dfe'],
+      ['\u0130stanbul', 'istanbul'],
+      ['grace', 'gr\u200bace'],
+      ['grace', '\uff47\uff52\uff41\uff43\uff45'],
+    ]) {
+      expect(issuesOf(add(pair))).toStrictEqual([
+        { path: ['tags', 'add'], message: TAG_DUPLICATE },
+      ]);
+    }
+    expect(issuesOf(add(['\u200b\u200d']))).toStrictEqual([
+      { path: ['tags', 'add', 0], message: TAG_EMPTY },
     ]);
-    expect(issuesOf({ expectedRevision: 1, tags: many.slice(1) })).toStrictEqual([]);
+  });
+
+  it('refuses an empty tag change, a repeated or malformed removal id, and unknown members', () => {
+    expect(issuesOf({ expectedRevision: 1, tags: {} })).toStrictEqual([
+      { path: ['tags'], message: TAG_CHANGE_EMPTY },
+    ]);
+    expect(issuesOf({ expectedRevision: 1, tags: { add: [], remove: [] } })).toStrictEqual([
+      { path: ['tags'], message: TAG_CHANGE_EMPTY },
+    ]);
+    expect(
+      issuesOf({ expectedRevision: 1, tags: { remove: [nodeId, nodeId.toLowerCase()] } }),
+    ).toStrictEqual([{ path: ['tags', 'remove'], message: TAG_DUPLICATE }]);
+    expect(issuesOf({ expectedRevision: 1, tags: { remove: ['Grace'] } })).toHaveLength(1);
+    expect(issuesOf({ expectedRevision: 1, tags: ['Grace'] })).toHaveLength(1);
+    expect(issuesOf({ expectedRevision: 1, tags: { set: ['Grace'] } })).toContainEqual({
+      path: ['tags'],
+      message: 'Unrecognized key: "set"',
+    });
   });
 });

@@ -17,6 +17,7 @@ import {
   RevisionMissingError,
   SearchQueryIsReferenceError,
   StudyUnchangedError,
+  TagLimitExceededError,
   UnauthenticatedError,
   ValidationError,
 } from '../errors/domain-errors';
@@ -147,7 +148,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof AnchorInvalidError ||
       exception instanceof SearchQueryIsReferenceError ||
       exception instanceof QuestionNotFoundError ||
-      exception instanceof StudyUnchangedError
+      exception instanceof StudyUnchangedError ||
+      exception instanceof TagLimitExceededError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,

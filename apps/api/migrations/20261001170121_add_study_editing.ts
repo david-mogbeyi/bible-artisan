@@ -16,8 +16,11 @@ import type { MigrationContext } from '../src/database/migrator';
 //
 // `tag` is owner-scoped (one vocabulary per user, PRD section 23 "Tag ... unique
 // owner/normalized_name"). `name` is the display form (NFC, trimmed, whitespace collapsed),
-// `normalized_name` its lower-cased key; both are computed by `normalizeTagName`/`tagKey` in
-// @bible-artisan/contracts. UNIQUE (owner_id, id) is study_tag's composite FK target.
+// `normalized_name` its folded key (NFKC, format characters removed, case-folded, dotted/dotless
+// I as "i"); both are computed by `normalizeTagName`/`tagKey` in @bible-artisan/contracts.
+// UNIQUE (owner_id, id) is study_tag's composite FK target. The API deletes a tag once no study
+// references it, in the transaction that removes its last pairing, so a `tag` row always has at
+// least one `study_tag` (the down guard's "any tag" therefore means "any tagged study").
 //
 // `study_tag` pairs a study with a tag of the SAME owner: both composite FKs carry `owner_id`, so
 // tagging another user's study, or using another user's tag, is unwritable. Both cascade, so a

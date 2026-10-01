@@ -6,6 +6,7 @@ import {
   MAX_STUDY_TAGS,
   STUDY_EDIT_EMPTY,
   type StudyResponse,
+  TAG_CHANGE_EMPTY,
   TAG_DUPLICATE,
   type UpdateStudyResponse,
   USER_TEXT_INVALID_CHARACTERS,
@@ -208,7 +209,7 @@ describe('study editing (BIB-20)', () => {
         title: '  Conscience and the Spirit ',
         description: 'Romans first, then the epistles.',
         pinned: true,
-        tags: ['  Holy  Spirit', 'conscience'],
+        tags: { add: ['  Holy  Spirit', 'conscience'] },
       });
       expect(res.status).toBe(200);
       expect(res.headers['cache-control']).toBe('no-store');
@@ -369,12 +370,13 @@ describe('study editing (BIB-20)', () => {
       const { studyId } = await createStudy(alice, { question: 'Why?' });
       const pinned = await patch(alice, studyId, { expectedRevision: 1, pinned: true });
       expect(pinned.body).toMatchObject({ revision: 2, contentRevision: 1, pinned: true });
-      const tagged = await patch(alice, studyId, { expectedRevision: 2, tags: ['Grace'] });
+      const tagged = await patch(alice, studyId, { expectedRevision: 2, tags: { add: ['Grace'] } });
       expect(tagged.body).toMatchObject({ revision: 3, contentRevision: 1 });
+      const graceId = (tagged.body as UpdateStudyResponse).tags[0]?.id;
       const unpinned = await patch(alice, studyId, {
         expectedRevision: 3,
         pinned: false,
-        tags: [],
+        tags: { remove: [graceId] },
       });
       expect(unpinned.body).toMatchObject({
         revision: 4,
@@ -387,7 +389,6 @@ describe('study editing (BIB-20)', () => {
       const cleared = await patch(alice, studyId, { expectedRevision: 5, description: null });
       expect(cleared.body).toMatchObject({ revision: 6, contentRevision: 3, description: null });
 
-      const graceId = (tagged.body as UpdateStudyResponse).tags[0]?.id;
       expect((await events(studyId)).slice(1)).toStrictEqual([
         { sequence: '2', eventType: 'study_pinned', payload: {} },
         {
@@ -404,8 +405,8 @@ describe('study editing (BIB-20)', () => {
         { sequence: '6', eventType: 'study_description_changed', payload: { cleared: false } },
         { sequence: '7', eventType: 'study_description_changed', payload: { cleared: true } },
       ]);
-      // The removed tag stays in the owner's vocabulary.
-      expect(await Tag.count({ where: { id: graceId } })).toBe(1);
+      // No study uses the removed tag any more, so its private text is gone with it.
+      expect(await Tag.count({ where: { id: graceId } })).toBe(0);
     });
 
     it("reuses the owner's tag by normalized name, keeps its display name, and never shares tags across owners", async () => {
@@ -413,9 +414,18 @@ describe('study editing (BIB-20)', () => {
       const second = await createStudy(alice, { question: 'Two?' });
       const bobs = await createStudy(bob, { question: 'Three?' });
 
-      const a = await patch(alice, first.studyId, { expectedRevision: 1, tags: ['Grace  Alone'] });
-      const b = await patch(alice, second.studyId, { expectedRevision: 1, tags: [' grace alone'] });
-      const c = await patch(bob, bobs.studyId, { expectedRevision: 1, tags: ['Grace Alone'] });
+      const a = await patch(alice, first.studyId, {
+        expectedRevision: 1,
+        tags: { add: ['Grace  Alone'] },
+      });
+      const b = await patch(alice, second.studyId, {
+        expectedRevision: 1,
+        tags: { add: [' grace alone'] },
+      });
+      const c = await patch(bob, bobs.studyId, {
+        expectedRevision: 1,
+        tags: { add: ['Grace Alone'] },
+      });
       const aliceTag = (a.body as UpdateStudyResponse).tags;
       expect(aliceTag).toStrictEqual([{ id: anyId, name: 'Grace Alone' }]);
       expect((b.body as UpdateStudyResponse).tags).toStrictEqual(aliceTag);
@@ -423,12 +433,14 @@ describe('study editing (BIB-20)', () => {
       expect(bobTag).toStrictEqual([{ id: anyId, name: 'Grace Alone' }]);
       expect(bobTag[0]?.id).not.toBe(aliceTag[0]?.id);
 
-      // Re-submitting the same key in another case is no change.
-      const same = await patch(alice, first.studyId, {
-        expectedRevision: 2,
-        tags: ['GRACE ALONE'],
-      });
-      expect([same.status, same.body]).toStrictEqual([422, STUDY_UNCHANGED]);
+      // Adding the same key in another case, or with a zero-width space, is no change.
+      for (const variant of ['GRACE ALONE', 'grace al\u200bone']) {
+        const same = await patch(alice, first.studyId, {
+          expectedRevision: 2,
+          tags: { add: [variant] },
+        });
+        expect([same.status, same.body]).toStrictEqual([422, STUDY_UNCHANGED]);
+      }
     });
 
     it('answers 422 STUDY_UNCHANGED for an edit that changes nothing, writing nothing at all', async () => {
@@ -442,7 +454,7 @@ describe('study editing (BIB-20)', () => {
           expectedRevision: 1,
           title: 'Same?',
           pinned: false,
-          tags: [],
+          tags: { remove: [randomUUID()] },
           mainQuestion: { nodeId: questionNodeId },
         },
         key,
@@ -487,13 +499,21 @@ describe('study editing (BIB-20)', () => {
           { expectedRevision: 1, title: 't'.repeat(201) },
           { title: ['Too big: expected string to have <=200 characters'] },
         ],
-        [{ expectedRevision: 1, tags: ['Grace', 'grace'] }, { tags: [TAG_DUPLICATE] }],
+        [
+          { expectedRevision: 1, tags: { add: ['Strasse', 'STRAẞE'] } },
+          { 'tags.add': [TAG_DUPLICATE] },
+        ],
         [
           {
             expectedRevision: 1,
-            tags: Array.from({ length: MAX_STUDY_TAGS + 1 }, (_, i) => `t${i}`),
+            tags: { add: Array.from({ length: MAX_STUDY_TAGS + 1 }, (_, i) => `t${i}`) },
           },
-          { tags: [`A study can have at most ${MAX_STUDY_TAGS} tags`] },
+          { 'tags.add': [`A study can have at most ${MAX_STUDY_TAGS} tags`] },
+        ],
+        [{ expectedRevision: 1, tags: {} }, { tags: [TAG_CHANGE_EMPTY] }],
+        [
+          { expectedRevision: 1, tags: ['Grace'] },
+          { tags: ['Invalid input: expected object, received array'] },
         ],
       ];
       for (const [body, fieldErrors] of cases) {
@@ -518,7 +538,7 @@ describe('study editing (BIB-20)', () => {
     it('replays the original 200 for the same key and body, and answers 422 for the same key with another body', async () => {
       const { studyId } = await createStudy(alice, { question: 'Replay?' });
       const key = randomUUID();
-      const body = { expectedRevision: 1, title: 'Once', tags: ['Replay'] };
+      const body = { expectedRevision: 1, title: 'Once', tags: { add: ['Replay'] } };
       const first = await patch(alice, studyId, body, key);
       expect(first.status).toBe(200);
       const after = await ownerRows(alice);
@@ -539,7 +559,7 @@ describe('study editing (BIB-20)', () => {
         expectedRevision: 1,
         title: 'Atomic',
         mainQuestion: { text: 'Still atomic?' },
-        tags: ['Atomic'],
+        tags: { add: ['Atomic'] },
       };
       const thread = app.get(ThreadService);
       const original = thread.appendEvent.bind(thread);
@@ -570,7 +590,7 @@ describe('study editing (BIB-20)', () => {
     it('PATCH /v1/studies/:studyId gives another user the same neutral 404 as an absent or malformed id, writing nothing', async () => {
       const { studyId } = await createStudy(alice, { question: 'Private?' });
       const before = await ownerRows(alice);
-      const body = { expectedRevision: 1, title: 'Taken over', tags: ['Leak'] };
+      const body = { expectedRevision: 1, title: 'Taken over', tags: { add: ['Leak'] } };
       const foreign = await request(app.getHttpServer())
         .patch(studyPath(studyId))
         .set('Cookie', bob.cookie)
@@ -585,6 +605,156 @@ describe('study editing (BIB-20)', () => {
     });
   });
 
+  describe('tag deltas', () => {
+    const tagsOf = (res: Response) => (res.body as UpdateStudyResponse).tags;
+    const names = (tags: { name: string }[]) => tags.map((tag) => tag.name);
+
+    it("keeps another device's concurrent addition: device 2 adds b while device 1 adds c, and the set ends as a, b, c", async () => {
+      const { studyId } = await createStudy(alice, { question: 'Two devices?' });
+      const seeded = await patch(alice, studyId, { expectedRevision: 1, tags: { add: ['a'] } });
+      expect(names(tagsOf(seeded))).toStrictEqual(['a']);
+
+      // Both devices loaded revision 2. Device 2 saves first.
+      const device2 = await patch(alice, studyId, { expectedRevision: 2, tags: { add: ['b'] } });
+      expect(names(tagsOf(device2))).toStrictEqual(['a', 'b']);
+      // Device 1's save is stale; it reloads and resends the same delta on the new revision.
+      const stale = await patch(alice, studyId, { expectedRevision: 2, tags: { add: ['c'] } });
+      expect([stale.status, stale.body]).toStrictEqual([409, conflict(3)]);
+      const device1 = await patch(alice, studyId, { expectedRevision: 3, tags: { add: ['c'] } });
+      expect(device1.status).toBe(200);
+      expect(names(tagsOf(device1))).toStrictEqual(['a', 'b', 'c']);
+      expect(names((await read(alice, studyId)).tags)).toStrictEqual(['a', 'b', 'c']);
+      const c = tagsOf(device1).find((tag) => tag.name === 'c');
+      expect((await events(studyId)).at(-1)).toStrictEqual({
+        sequence: '4',
+        eventType: 'study_tags_changed',
+        payload: { addedTagIds: [c?.id], removedTagIds: [] },
+      });
+    });
+
+    it('treats an existing add, an absent or foreign removal as no-ops, recording only the real changes', async () => {
+      const { studyId } = await createStudy(alice, { question: 'No-ops?' });
+      const seeded = await patch(alice, studyId, {
+        expectedRevision: 1,
+        tags: { add: ['Grace', 'Faith'] },
+      });
+      const [faith, grace] = tagsOf(seeded);
+      const bobs = await createStudy(bob, { question: 'Bob?' });
+      const bobTagged = await patch(bob, bobs.studyId, {
+        expectedRevision: 1,
+        tags: { add: ['Grace'] },
+      });
+      const bobGrace = tagsOf(bobTagged)[0]?.id;
+      const other = await createStudy(alice, { question: 'Other?' });
+      const otherTagged = await patch(alice, other.studyId, {
+        expectedRevision: 1,
+        tags: { add: ['Elsewhere'] },
+      });
+      const elsewhere = tagsOf(otherTagged)[0]?.id;
+
+      const before = await ownerRows(alice);
+      const nothing = await patch(alice, studyId, {
+        expectedRevision: 2,
+        tags: { add: ['grace'], remove: [randomUUID(), bobGrace, elsewhere] },
+      });
+      expect([nothing.status, nothing.body]).toStrictEqual([422, STUDY_UNCHANGED]);
+      expect(await ownerRows(alice)).toStrictEqual(before);
+      // Another owner's tag and another study's tag were never touched.
+      expect(names((await read(bob, bobs.studyId)).tags)).toStrictEqual(['Grace']);
+      expect(names((await read(alice, other.studyId)).tags)).toStrictEqual(['Elsewhere']);
+
+      const mixed = await patch(alice, studyId, {
+        expectedRevision: 2,
+        tags: { add: ['FAITH', 'Hope'], remove: [grace?.id, randomUUID()] },
+      });
+      expect(mixed.status).toBe(200);
+      const hope = tagsOf(mixed).find((tag) => tag.name === 'Hope');
+      expect(tagsOf(mixed)).toStrictEqual([faith, { id: anyId, name: 'Hope' }]);
+      expect((await events(studyId)).at(-1)).toStrictEqual({
+        sequence: '3',
+        eventType: 'study_tags_changed',
+        payload: { addedTagIds: [hope?.id], removedTagIds: [grace?.id] },
+      });
+    });
+
+    it('enforces 20 tags per study after applying the delta: 422 TAG_LIMIT_EXCEEDED, nothing written', async () => {
+      const { studyId } = await createStudy(alice, { question: 'Limit?' });
+      const full = Array.from({ length: MAX_STUDY_TAGS }, (_, i) => `limit-${i}`);
+      const filled = await patch(alice, studyId, { expectedRevision: 1, tags: { add: full } });
+      expect(tagsOf(filled)).toHaveLength(MAX_STUDY_TAGS);
+      const before = await ownerRows(alice);
+      const over = await patch(alice, studyId, {
+        expectedRevision: 2,
+        title: 'Also renamed',
+        tags: { add: ['one-more'] },
+      });
+      expect([over.status, over.body]).toStrictEqual([
+        422,
+        envelope({
+          code: 'TAG_LIMIT_EXCEEDED',
+          message: `A study can have at most ${MAX_STUDY_TAGS} tags`,
+        }),
+      ]);
+      expect(await ownerRows(alice)).toStrictEqual(before);
+      // An add of a tag it already carries is no change, so it never counts against the limit.
+      const swap = await patch(alice, studyId, {
+        expectedRevision: 2,
+        tags: {
+          add: ['one-more', 'limit-0'],
+          remove: [tagsOf(filled).find((tag) => tag.name === 'limit-1')?.id],
+        },
+      });
+      expect(swap.status).toBe(200);
+      expect(tagsOf(swap)).toHaveLength(MAX_STUDY_TAGS);
+    });
+
+    it('deletes a removed tag once no study uses it, keeps one another study still uses, and recases on re-add', async () => {
+      const first = await createStudy(alice, { question: 'Orphan one?' });
+      const second = await createStudy(alice, { question: 'Orphan two?' });
+      const third = await createStudy(alice, { question: 'Orphan three?' });
+      const shared = `shared ${randomUUID()}`;
+      const one = await patch(alice, first.studyId, {
+        expectedRevision: 1,
+        tags: { add: [shared, 'grace'] },
+      });
+      for (const { studyId } of [second, third]) {
+        await patch(alice, studyId, { expectedRevision: 1, tags: { add: [shared] } });
+      }
+      const sharedId = tagsOf(one).find((tag) => tag.name === shared)?.id;
+      const graceId = tagsOf(one).find((tag) => tag.name === 'grace')?.id;
+
+      const removed = await patch(alice, first.studyId, {
+        expectedRevision: 2,
+        tags: { remove: [sharedId, graceId] },
+      });
+      expect(tagsOf(removed)).toStrictEqual([]);
+      expect(await Tag.count({ where: { id: sharedId } })).toBe(1);
+      expect(await Tag.count({ where: { id: graceId } })).toBe(0);
+
+      // The old casing is gone, so a later add takes the new display name.
+      const readded = await patch(alice, first.studyId, {
+        expectedRevision: 3,
+        tags: { add: ['Grace'] },
+      });
+      expect(tagsOf(readded)).toStrictEqual([{ id: anyId, name: 'Grace' }]);
+      // Recasing in one edit: remove by id, add the new casing.
+      const recased = await patch(alice, first.studyId, {
+        expectedRevision: 4,
+        tags: { remove: [tagsOf(readded)[0]?.id], add: ['GRACE'] },
+      });
+      expect(tagsOf(recased)).toStrictEqual([{ id: anyId, name: 'GRACE' }]);
+      expect(await Tag.count({ where: { ownerId: alice.user.id, normalizedName: 'grace' } })).toBe(
+        1,
+      );
+      // Recasing a tag another study still uses keeps the shared row: no change at all.
+      const kept = await patch(alice, second.studyId, {
+        expectedRevision: 2,
+        tags: { remove: [sharedId], add: [shared.toUpperCase()] },
+      });
+      expect([kept.status, kept.body]).toStrictEqual([422, STUDY_UNCHANGED]);
+    });
+  });
+
   describe('under real concurrency', () => {
     it('lets exactly one of N concurrent edits with the same expectedRevision win; the rest get 409', async () => {
       const { studyId } = await createStudy(alice, { question: 'Race?' });
@@ -593,7 +763,11 @@ describe('study editing (BIB-20)', () => {
         Array.from(
           { length: RACERS },
           (_, i) => () =>
-            patch(alice, studyId, { expectedRevision: 1, title: `Title ${i}`, tags: [`t${i}`] }),
+            patch(alice, studyId, {
+              expectedRevision: 1,
+              title: `Title ${i}`,
+              tags: { add: [`t${i}`] },
+            }),
         ),
       );
       const statuses = results.map((r) => r.status).sort();
@@ -639,8 +813,8 @@ describe('study editing (BIB-20)', () => {
             transaction,
           }),
         [
-          () => patch(alice, first.studyId, { expectedRevision: 1, tags: [name] }),
-          () => patch(alice, second.studyId, { expectedRevision: 1, tags: [name] }),
+          () => patch(alice, first.studyId, { expectedRevision: 1, tags: { add: [name] } }),
+          () => patch(alice, second.studyId, { expectedRevision: 1, tags: { add: [name] } }),
         ],
       );
       expect(results.map((r) => r.status)).toStrictEqual([200, 200]);
@@ -650,6 +824,36 @@ describe('study editing (BIB-20)', () => {
       expect(
         await Tag.count({ where: { ownerId: alice.user.id, normalizedName: name.toLowerCase() } }),
       ).toBe(1);
+    });
+    it('never loses a concurrent add to another study removing the same tag: the cleanup keeps or the adder recreates it', async () => {
+      const remover = await createStudy(alice, { question: 'Remove it?' });
+      const adder = await createStudy(alice, { question: 'Add it?' });
+      const name = `Contested ${randomUUID()}`;
+      const tagged = await patch(alice, remover.studyId, {
+        expectedRevision: 1,
+        tags: { add: [name] },
+      });
+      const tagId = (tagged.body as UpdateStudyResponse).tags[0]?.id;
+      // The gate holds the tag row: the remover's cleanup and the adder's lock both wait on it.
+      const results = await race(
+        (transaction) =>
+          db.query('SELECT 1 FROM tag WHERE id = $1 FOR UPDATE', { bind: [tagId], transaction }),
+        [
+          () => patch(alice, remover.studyId, { expectedRevision: 2, tags: { remove: [tagId] } }),
+          () => patch(alice, adder.studyId, { expectedRevision: 1, tags: { add: [name] } }),
+        ],
+      );
+      expect(results.map((r) => r.status)).toStrictEqual([200, 200]);
+      expect((results[0]?.body as UpdateStudyResponse).tags).toStrictEqual([]);
+      const added = (results[1]?.body as UpdateStudyResponse).tags;
+      expect(added).toStrictEqual([{ id: anyId, name }]);
+      // Whichever won, the adder's pairing survived and points at the one live row for the key.
+      expect((await read(alice, adder.studyId)).tags).toStrictEqual(added);
+      const rows = await Tag.findAll({
+        where: { ownerId: alice.user.id, normalizedName: name.toLowerCase() },
+      });
+      expect(rows.map((row) => row.id)).toStrictEqual([added[0]?.id]);
+      expect(await StudyTag.count({ where: { studyId: adder.studyId } })).toBe(1);
     });
   });
 

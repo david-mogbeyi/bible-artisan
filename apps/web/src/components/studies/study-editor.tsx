@@ -10,7 +10,9 @@ import {
   normalizeTagName,
   QUESTION_NOT_FOUND,
   type StudyResponse,
+  type StudyTag,
   STUDY_UNCHANGED,
+  TAG_LIMIT_EXCEEDED,
   tagKey,
   type UpdateStudyRequest,
   type UpdateStudyResponse,
@@ -37,6 +39,7 @@ export const TAG_ALREADY_ADDED = 'That tag is already on this study.';
 const TAG_TOO_LONG = `Use at most ${MAX_TAG_LENGTH} characters for a tag.`;
 const TOO_MANY_TAGS = `A study can have at most ${MAX_STUDY_TAGS} tags.`;
 const TAGS_INVALID = 'Check the tags: each must be different, short, and plain text.';
+const TAG_INVISIBLE = 'Use at least one visible character in a tag.';
 
 const SAVE_COPY: ProblemCopy = {
   notFound: "This study isn't available any more.",
@@ -52,37 +55,115 @@ const RELOAD_COPY: ProblemCopy = {
   unavailable: "Couldn't load the latest study. Your edits are still here.",
 };
 
-/** The form's working copy. Only page state holds it: never the URL or browser storage. */
+/**
+ * The form's working copy. Only page state holds it: never the URL or browser storage. Tags are
+ * deltas against the saved tags (as the server takes them), so a save never drops a tag another
+ * device added meanwhile.
+ */
 interface Draft {
   title: string;
   description: string;
-  tags: string[];
   newQuestion: string;
+  /** Tag names to add (normalized), in the order typed. */
+  tagAdds: string[];
+  /** Ids of saved tags to remove. */
+  tagRemoves: string[];
 }
 
 type FieldName = 'title' | 'description' | 'newQuestion' | 'tags';
 type FieldErrors = Partial<Record<FieldName, string>>;
 
-/** What a save sends, without the revision (added at send time from the study as loaded). */
+/** What a save sends, without the revision (added from `base` when the request is built). */
 type Edit = Omit<UpdateStudyRequest, 'expectedRevision'>;
+
+/** The study state a 200 answers with (everything but the event sequence). */
+type SavedState = Omit<UpdateStudyResponse, 'lastEventSequence'>;
 
 const draftOf = (study: StudyResponse): Draft => ({
   title: study.title,
   description: study.description ?? '',
-  tags: study.tags.map((tag) => tag.name),
   newQuestion: '',
+  tagAdds: [],
+  tagRemoves: [],
 });
 
-const sameTags = (a: string[], b: string[]): boolean => {
-  const keys = (names: string[]) => names.map(tagKey).sort().join('\n');
-  return keys(a) === keys(b);
-};
+/** A tag as the form lists it: a saved one (with its id) or a pending addition. */
+interface ShownTag {
+  key: string;
+  name: string;
+  savedId: string | null;
+}
+
+/** Keys of the saved tags the draft keeps (not pending removal). */
+const keptKeys = (saved: StudyTag[], draft: Draft): Set<string> =>
+  new Set(saved.filter((tag) => !draft.tagRemoves.includes(tag.id)).map((tag) => tagKey(tag.name)));
+
+/**
+ * The tags the form shows: the latest saved tags minus pending removals, plus pending additions
+ * not already among them. After Reload latest this merges the other device's tags with the
+ * user's own pending changes.
+ */
+export function shownTags(saved: StudyTag[], draft: Draft): ShownTag[] {
+  const kept = keptKeys(saved, draft);
+  return [
+    ...saved
+      .filter((tag) => !draft.tagRemoves.includes(tag.id))
+      .map((tag) => ({ key: tag.id, name: tag.name, savedId: tag.id })),
+    ...draft.tagAdds
+      .filter((name) => !kept.has(tagKey(name)))
+      .map((name) => ({ key: `new:${tagKey(name)}`, name, savedId: null })),
+  ];
+}
+
+/** Drops pending tag changes the saved tags already reflect (added, or already gone). */
+function pruneTags(draft: Draft, saved: StudyTag[]): Draft {
+  const ids = new Set(saved.map((tag) => tag.id));
+  const tagRemoves = draft.tagRemoves.filter((id) => ids.has(id));
+  const kept = keptKeys(saved, { ...draft, tagRemoves });
+  return {
+    ...draft,
+    tagRemoves,
+    tagAdds: draft.tagAdds.filter((name) => !kept.has(tagKey(name))),
+  };
+}
+
+/**
+ * The draft once the server holds `saved`, after a save of `sent` (or a reload, which sent
+ * nothing) made against `base`. A field shows the saved value when the draft still holds what
+ * that save assumed: the value sent, or for an unsent field the base value (the user never
+ * touched it). A field the user changed meanwhile, e.g. typed while the save was in flight,
+ * keeps the newer draft, which stays a pending change against the new base.
+ */
+export function settleDraft(
+  draft: Draft,
+  base: StudyResponse,
+  saved: SavedState,
+  sent: Edit,
+): Draft {
+  const titleAssumed = sent.title ?? base.title;
+  const descriptionAssumed =
+    sent.description !== undefined ? (sent.description ?? '') : (base.description ?? '');
+  const sentQuestion =
+    sent.mainQuestion && 'text' in sent.mainQuestion ? sent.mainQuestion.text : null;
+  return pruneTags(
+    {
+      ...draft,
+      title: draft.title.trim() === titleAssumed ? saved.title : draft.title,
+      description:
+        draft.description.trim() === descriptionAssumed
+          ? (saved.description ?? '')
+          : draft.description,
+      newQuestion:
+        sentQuestion !== null && draft.newQuestion.trim() === sentQuestion ? '' : draft.newQuestion,
+    },
+    saved.tags,
+  );
+}
 
 /**
  * The fields the user changed: the draft compared with `base`, the study as it was when the draft
- * started (or was last saved), never with a newer copy loaded since. So after a conflict and
- * Reload latest, a field the user did not touch is never sent, and never overwrites the other
- * change with its old value. Null when nothing changed.
+ * started (or was last saved or reloaded), never with a copy a background refetch brought in. Tag
+ * changes are the draft's pending deltas. Null when nothing changed.
  */
 export function draftEdit(base: StudyResponse, draft: Draft): Edit | null {
   const edit: Edit = {};
@@ -90,13 +171,12 @@ export function draftEdit(base: StudyResponse, draft: Draft): Edit | null {
   if (title !== base.title) edit.title = title;
   const description = draft.description.trim() || null;
   if (description !== base.description) edit.description = description;
-  if (
-    !sameTags(
-      draft.tags,
-      base.tags.map((tag) => tag.name),
-    )
-  )
-    edit.tags = draft.tags;
+  if (draft.tagAdds.length > 0 || draft.tagRemoves.length > 0) {
+    edit.tags = {
+      ...(draft.tagAdds.length > 0 ? { add: draft.tagAdds } : {}),
+      ...(draft.tagRemoves.length > 0 ? { remove: draft.tagRemoves } : {}),
+    };
+  }
   const question = draft.newQuestion.trim();
   if (question) edit.mainQuestion = { text: question };
   return Object.keys(edit).length > 0 ? edit : null;
@@ -143,23 +223,30 @@ function serverFieldErrors(body: unknown): FieldErrors | null {
   return Object.keys(errors).length > 0 ? errors : null;
 }
 
-/** A save of the form's draft, or a one-click edit sent as is. */
-type Action = 'draft' | Edit;
-
-/** The last request sent: its key is reused only for a byte-identical body. */
+/**
+ * One request as sent: its exact body (with the `expectedRevision` it was built on) and its
+ * Idempotency-Key. Once sent it is frozen: Retry resends it verbatim, so a save whose response
+ * was lost after it committed gets the original 200 replayed instead of applying twice.
+ */
 interface Attempt {
-  json: string;
+  /** 'draft': built from the form; 'action': a one-click edit (pin, restore the original). */
+  kind: 'draft' | 'action';
+  body: UpdateStudyRequest;
   key: string;
 }
 
 /**
  * Edits a study's title, description, main question, pin and tags (BIB-20, FR-STUDY-003).
  *
- * - Save sends only the fields that differ from the loaded study, with its `revision`.
+ * - Save sends only the fields that differ from `base` (the study as last saved or reloaded),
+ *   with `base.revision`, and the tag changes as add/remove deltas.
  * - Pin and "Make the original question main again" save at once, as their own edits.
  * - "Saved" appears only after the server's 200. A failure never clears the form.
  * - A 409 says the study changed elsewhere and offers Reload latest; nothing is resent on its own.
- * - Retrying the same request reuses its Idempotency-Key; an edited draft gets a new one.
+ * - Every request is frozen once sent. After a failure with an unknown outcome (network, 5xx),
+ *   Retry, or Save with an unedited draft, resends it byte for byte with the same key, whatever a
+ *   background refetch brought in meanwhile. Editing the draft discards it: the next save is a new
+ *   request, with a new key, from the current base.
  * - Buttons stay focusable while a save runs (`aria-disabled`), so focus never jumps.
  */
 export function StudyEditor({
@@ -167,7 +254,7 @@ export function StudyEditor({
   onReload,
 }: {
   study: StudyResponse;
-  /** Refetches the study (after a conflict). */
+  /** Refetches the study into the query cache (after a conflict). */
   onReload: () => Promise<unknown>;
 }) {
   const queryClient = useQueryClient();
@@ -190,14 +277,13 @@ export function StudyEditor({
   const [saved, setSaved] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [alerts, setAlerts] = useState(0);
-  const attempt = useRef<Attempt | null>(null);
-  // What Retry repeats: the draft (as it is now), or a fixed one-click edit (pin, restore).
-  const lastAction = useRef<Action | null>(null);
-  // The current base and draft, for a Retry sent from an earlier render's callback.
-  const latest = useRef({ base, draft });
+  // The request in flight, or the last one whose outcome is unknown. See `Attempt`.
+  const frozen = useRef<Attempt | null>(null);
+  // The current base, for mutation callbacks that settle the draft against it.
+  const latestBase = useRef(base);
   useEffect(() => {
-    latest.current = { base, draft };
-  }, [base, draft]);
+    latestBase.current = base;
+  }, [base]);
   const alertRef = useRef<HTMLDivElement>(null);
   const fieldRefs = {
     title: useRef<HTMLInputElement>(null),
@@ -207,36 +293,27 @@ export function StudyEditor({
   };
 
   const save = useMutation({
-    mutationFn: ({ body, key }: { body: UpdateStudyRequest; key: string }) =>
-      updateStudy(study.id, body, key),
-    onSuccess: (edited: UpdateStudyResponse, { body }) => {
-      attempt.current = null;
+    mutationFn: (attempt: Attempt) => updateStudy(study.id, attempt.body, attempt.key),
+    onSuccess: (edited: UpdateStudyResponse, attempt) => {
+      if (frozen.current === attempt) frozen.current = null;
       const { lastEventSequence: _sequence, ...state } = edited;
+      // A replayed 200 can be older than what a background refetch already showed.
       queryClient.setQueryData<StudyResponse>(studyQueryKey(study.id), (old) =>
-        old ? { ...old, ...state } : old,
+        old && state.revision >= old.revision ? { ...old, ...state } : old,
       );
-      // A field this save sent, or one the user has not touched, shows the saved value; an
-      // unsaved edit elsewhere in the form (e.g. while pinning) is kept as typed.
-      setDraft((current) => ({
-        title: 'title' in body || current.title === base.title ? state.title : current.title,
-        description:
-          'description' in body || current.description === (base.description ?? '')
-            ? (state.description ?? '')
-            : current.description,
-        tags:
-          'tags' in body ||
-          sameTags(
-            current.tags,
-            base.tags.map((tag) => tag.name),
-          )
-            ? state.tags.map((tag) => tag.name)
-            : current.tags,
-        newQuestion: body.mainQuestion && 'text' in body.mainQuestion ? '' : current.newQuestion,
-      }));
-      setBase((old) => ({ ...old, ...state }));
+      const { expectedRevision: _revision, ...sent } = attempt.body;
+      const oldBase = latestBase.current;
+      setDraft((current) => settleDraft(current, oldBase, state, sent));
+      const nextBase = { ...oldBase, ...state };
+      latestBase.current = nextBase;
+      setBase(nextBase);
       setSaved(true);
     },
-    onError: (error) => {
+    onError: (error, attempt) => {
+      const definite =
+        error instanceof ApiError && [400, 404, 409, 422, 428].includes(error.status);
+      // A definite refusal wrote nothing, so there is nothing to replay.
+      if (definite && frozen.current === attempt) frozen.current = null;
       if (error instanceof ApiError && error.status === 409) {
         setConflict(true);
       } else if (
@@ -245,6 +322,13 @@ export function StudyEditor({
         serverFieldErrors(error.body)
       ) {
         showFieldErrors(serverFieldErrors(error.body) ?? {});
+        return;
+      } else if (
+        error instanceof ApiError &&
+        error.status === 422 &&
+        error.code === TAG_LIMIT_EXCEEDED
+      ) {
+        showFieldErrors({ tags: TOO_MANY_TAGS });
         return;
       } else if (
         error instanceof ApiError &&
@@ -285,12 +369,27 @@ export function StudyEditor({
     if (first) fieldRefs[first].current?.focus();
   }
 
-  /** Sends one edit: same body as the last attempt → same key; any other body → a new key. */
-  function send(action: Action) {
-    if (pending) return;
-    lastAction.current = action;
+  /** Sends `attempt` (new or frozen) and keeps it frozen until its outcome is known. */
+  function dispatch(attempt: Attempt) {
     clearMessages();
-    const edit = action === 'draft' ? draftEdit(latest.current.base, latest.current.draft) : action;
+    frozen.current = attempt;
+    save.mutate(attempt);
+  }
+
+  /** The draft discards a frozen form save once the user edits it. */
+  function draftEdited() {
+    setSaved(false);
+    if (frozen.current?.kind === 'draft') frozen.current = null;
+  }
+
+  function saveDraft() {
+    if (pending) return;
+    if (frozen.current?.kind === 'draft') {
+      dispatch(frozen.current);
+      return;
+    }
+    clearMessages();
+    const edit = draftEdit(base, draft);
     if (!edit) {
       setNotice(NOTHING_TO_SAVE);
       setAlerts((n) => n + 1);
@@ -301,16 +400,26 @@ export function StudyEditor({
       showFieldErrors(errors);
       return;
     }
-    const body: UpdateStudyRequest = { expectedRevision: study.revision, ...edit };
-    const json = JSON.stringify(body);
-    const key =
-      attempt.current && attempt.current.json === json ? attempt.current.key : crypto.randomUUID();
-    attempt.current = { json, key };
-    save.mutate({ body, key });
+    dispatch({
+      kind: 'draft',
+      body: { expectedRevision: base.revision, ...edit },
+      key: crypto.randomUUID(),
+    });
+  }
+
+  function saveAction(edit: Edit) {
+    if (pending) return;
+    dispatch({
+      kind: 'action',
+      body: { expectedRevision: base.revision, ...edit },
+      key: crypto.randomUUID(),
+    });
   }
 
   function retry() {
-    if (lastAction.current) send(lastAction.current);
+    if (pending) return;
+    if (frozen.current) dispatch(frozen.current);
+    else saveDraft();
   }
 
   async function reload() {
@@ -318,6 +427,15 @@ export function StudyEditor({
     setReloading(true);
     try {
       await onReload();
+      const fresh = queryClient.getQueryData<StudyResponse>(studyQueryKey(study.id));
+      if (fresh) {
+        // Rebase: untouched fields follow the reloaded study, the user's edits stay pending.
+        const oldBase = latestBase.current;
+        setDraft((current) => settleDraft(current, oldBase, fresh, {}));
+        latestBase.current = fresh;
+        setBase(fresh);
+      }
+      frozen.current = null;
       clearMessages();
       setNotice(RELOADED);
     } catch (error) {
@@ -330,30 +448,54 @@ export function StudyEditor({
     }
   }
 
+  const tags = shownTags(study.tags, draft);
+
   function addTag() {
     const name = normalizeTagName(tagInput);
     setFieldErrors(({ tags: _tags, ...rest }) => rest);
     if (!name) return;
+    const key = tagKey(name);
     let error: string | null = null;
     if (hasForbiddenUserTextCharacter(tagInput)) error = BAD_CHARACTERS;
     else if (name.length > MAX_TAG_LENGTH) error = TAG_TOO_LONG;
-    else if (draft.tags.some((tag) => tagKey(tag) === tagKey(name))) error = TAG_ALREADY_ADDED;
-    else if (draft.tags.length >= MAX_STUDY_TAGS) error = TOO_MANY_TAGS;
+    else if (!key) error = TAG_INVISIBLE;
+    else if (tags.some((tag) => tagKey(tag.name) === key)) error = TAG_ALREADY_ADDED;
     if (error) {
       setFieldErrors((current) => ({ ...current, tags: error }));
       return;
     }
-    setDraft((current) => ({ ...current, tags: [...current.tags, name] }));
+    // Typing a saved tag pending removal, exactly as saved, just keeps it.
+    const removed = study.tags.find(
+      (tag) => draft.tagRemoves.includes(tag.id) && tag.name === name,
+    );
+    if (!removed && tags.length >= MAX_STUDY_TAGS) {
+      setFieldErrors((current) => ({ ...current, tags: TOO_MANY_TAGS }));
+      return;
+    }
+    draftEdited();
+    setDraft((current) =>
+      removed
+        ? { ...current, tagRemoves: current.tagRemoves.filter((id) => id !== removed.id) }
+        : { ...current, tagAdds: [...current.tagAdds, name] },
+    );
     setTagInput('');
   }
 
-  function removeTag(name: string) {
-    setDraft((current) => ({ ...current, tags: current.tags.filter((tag) => tag !== name) }));
+  function removeTag(tag: ShownTag) {
+    draftEdited();
+    setDraft((current) =>
+      tag.savedId === null
+        ? {
+            ...current,
+            tagAdds: current.tagAdds.filter((name) => tagKey(name) !== tagKey(tag.name)),
+          }
+        : { ...current, tagRemoves: [...current.tagRemoves, tag.savedId] },
+    );
     fieldRefs.tags.current?.focus();
   }
 
-  const update = (field: keyof Draft) => (value: string) => {
-    setSaved(false);
+  const update = (field: 'title' | 'description' | 'newQuestion') => (value: string) => {
+    draftEdited();
     setDraft((current) => ({ ...current, [field]: value }));
   };
   const describedBy = (...parts: (string | false)[]) =>
@@ -404,7 +546,7 @@ export function StudyEditor({
           type="button"
           aria-pressed={study.pinned}
           aria-disabled={pending ? true : undefined}
-          onClick={() => send({ pinned: !study.pinned })}
+          onClick={() => saveAction({ pinned: !study.pinned })}
           className={buttonClass}
         >
           Pin study
@@ -418,7 +560,7 @@ export function StudyEditor({
         noValidate
         onSubmit={(event: FormEvent) => {
           event.preventDefault();
-          send('draft');
+          saveDraft();
         }}
         className="flex flex-col gap-5"
       >
@@ -487,7 +629,7 @@ export function StudyEditor({
                 <button
                   type="button"
                   aria-disabled={pending ? true : undefined}
-                  onClick={() => send({ mainQuestion: { nodeId: original.nodeId } })}
+                  onClick={() => saveAction({ mainQuestion: { nodeId: original.nodeId } })}
                   className={buttonClass}
                 >
                   Make the original question main again
@@ -523,17 +665,18 @@ export function StudyEditor({
 
         <fieldset className="flex flex-col gap-2">
           <legend className="font-medium">Tags</legend>
-          {draft.tags.length > 0 ? (
+          {tags.length > 0 ? (
             <ul aria-label="Tags on this study" className="flex flex-wrap gap-2">
-              {draft.tags.map((tag) => (
+              {tags.map((tag) => (
                 <li
-                  key={tagKey(tag)}
+                  key={tag.key}
                   className="flex items-center gap-1 rounded border border-muted px-2 py-1"
                 >
-                  <span className="break-all">{tag}</span>
+                  <span className="break-all">{tag.name}</span>
+                  {tag.savedId === null ? <span className="sr-only">(not saved yet)</span> : null}
                   <button
                     type="button"
-                    aria-label={`Remove tag ${tag}`}
+                    aria-label={`Remove tag ${tag.name}`}
                     onClick={() => removeTag(tag)}
                     className="rounded px-1 text-accent"
                   >
@@ -601,6 +744,8 @@ export function StudyEditor({
             onClick={() => {
               if (pending) return;
               clearMessages();
+              frozen.current = null;
+              latestBase.current = study;
               setBase(study);
               setDraft(draftOf(study));
               setTagInput('');

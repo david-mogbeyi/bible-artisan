@@ -1,14 +1,10 @@
-import type {
-  StudyQuestion,
-  StudyResponse,
-  StudyTag as StudyTagDto,
-} from '@bible-artisan/contracts';
+import type { StudyQuestion, StudyResponse } from '@bible-artisan/contracts';
 import { Op } from 'sequelize';
+import { activeTransaction } from '../../../database/transaction-context';
 import { StudyBranch } from '../../../database/models/study-branch.model';
 import { StudyNode } from '../../../database/models/study-node.model';
-import { StudyTag } from '../../../database/models/study-tag.model';
-import { Study } from '../../../database/models/study.model';
-import { Tag } from '../../../database/models/tag.model';
+import type { Study } from '../../../database/models/study.model';
+import { studyTagRows } from './study-tags';
 
 /** Everything about a study that `GET` and `PATCH /v1/studies/:studyId` both answer with. */
 export type StudyState = Omit<StudyResponse, 'id' | 'startingReference' | 'createdAt'>;
@@ -16,30 +12,37 @@ export type StudyState = Omit<StudyResponse, 'id' | 'startingReference' | 'creat
 /**
  * Reads a study's editable state (BIB-20): its questions, tags and initial branch, each queried
  * by the study's own `study_id` and `owner_id` (the composite FKs guarantee they agree), so it
- * never reaches another user's rows. Inside a mutation the queries join its transaction.
- * Four bounded queries: the two question pointers, at most 20 tags, one branch.
+ * never reaches another user's rows. Three bounded queries: the two question pointers, at most
+ * 20 tags, one branch.
+ *
+ * Outside a transaction (`GET`) they run in parallel on pooled connections. Inside a mutation
+ * they join its transaction, whose one connection pg cannot share between overlapping queries,
+ * so there they run one after another.
  */
 export async function readStudyState(study: Study): Promise<StudyState> {
   const scope = { studyId: study.id, ownerId: study.ownerId };
   const questionIds = [study.mainQuestionNodeId, study.originalQuestionNodeId].filter(
     (id): id is string => id !== null,
   );
-  // Sequential, not Promise.all: inside a mutation every query shares the transaction's one
-  // connection, and pg refuses overlapping queries on a client.
-  const questions =
+  const readQuestions = (): Promise<StudyNode[]> =>
     questionIds.length === 0
-      ? []
-      : await StudyNode.findAll({
+      ? Promise.resolve([])
+      : StudyNode.findAll({
           where: { ...scope, id: { [Op.in]: questionIds }, type: 'question', deletedAt: null },
         });
-  const tags = await studyTags(study.id, study.ownerId);
-  const branch = await StudyBranch.findOne({
-    where: scope,
-    order: [
-      ['createdAt', 'ASC'],
-      ['id', 'ASC'],
-    ],
-  });
+  const readTags = () => studyTagRows(study.id, study.ownerId);
+  const readBranch = () =>
+    StudyBranch.findOne({
+      where: scope,
+      order: [
+        ['createdAt', 'ASC'],
+        ['id', 'ASC'],
+      ],
+    });
+  const [questions, tags, branch] =
+    activeTransaction() === undefined
+      ? await Promise.all([readQuestions(), readTags(), readBranch()])
+      : [await readQuestions(), await readTags(), await readBranch()];
   const question = (id: string | null): StudyQuestion | null => {
     const node = questions.find((q) => q.id === id);
     return node?.title && node.questionStatus
@@ -55,21 +58,7 @@ export async function readStudyState(study: Study): Promise<StudyState> {
     contentRevision: study.contentRevision,
     mainQuestion: question(study.mainQuestionNodeId),
     originalQuestion: question(study.originalQuestionNodeId),
-    tags,
+    tags: tags.map((tag) => ({ id: tag.id, name: tag.name })),
     branchId: branch?.id ?? null,
   };
-}
-
-/** The study's tags, sorted by normalized name (then id, for a total order). */
-async function studyTags(studyId: string, ownerId: string): Promise<StudyTagDto[]> {
-  const pairs = await StudyTag.findAll({ where: { studyId, ownerId }, attributes: ['tagId'] });
-  if (pairs.length === 0) return [];
-  const tags = await Tag.findAll({
-    where: { ownerId, id: { [Op.in]: pairs.map((p) => p.tagId) } },
-    order: [
-      ['normalizedName', 'ASC'],
-      ['id', 'ASC'],
-    ],
-  });
-  return tags.map((tag) => ({ id: tag.id, name: tag.name }));
 }
