@@ -12,6 +12,51 @@ describe('loadEnv', () => {
     expect(env.API_PORT).toBe(4000);
   });
 
+  it('defaults CORS origins to the local web app outside production', () => {
+    const env = loadEnv({ NODE_ENV: 'development', DATABASE_URL: 'postgres://localhost/x' });
+    expect(env.CORS_ALLOWED_ORIGINS).toEqual(['http://localhost:3000']);
+  });
+
+  it.each([
+    '*',
+    'https://*.bible.test',
+    'https://app.bible.test/',
+    'https://app.bible.test/path',
+    'HTTPS://APP.bible.test',
+    'app.bible.test',
+    'ftp://app.bible.test',
+    'http://localhost:3000, https://evil.test/x',
+    ' , ',
+  ])('refuses CORS_ALLOWED_ORIGINS=%j without echoing it', (value) => {
+    let message = '';
+    try {
+      loadEnv({
+        NODE_ENV: 'development',
+        DATABASE_URL: 'postgres://localhost/x',
+        CORS_ALLOWED_ORIGINS: value,
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/^Invalid environment configuration: CORS_ALLOWED_ORIGINS: /);
+    expect(message).not.toContain('bible.test');
+    expect(message).not.toContain('evil.test');
+  });
+
+  it('requires explicit https CORS origins in production', () => {
+    const production = {
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://localhost/x',
+      OTP_PROVIDER: 'stytch',
+      STYTCH_PROJECT_ID: 'p',
+      STYTCH_SECRET: 's',
+    };
+    expect(() => loadEnv(production)).toThrow(/CORS_ALLOWED_ORIGINS: is required in production/);
+    expect(() =>
+      loadEnv({ ...production, CORS_ALLOWED_ORIGINS: 'https://app.example.com,http://x.test' }),
+    ).toThrow(/CORS_ALLOWED_ORIGINS: every origin must use https in production/);
+  });
+
   it('fails fast without DATABASE_URL', () => {
     expect(() => loadEnv({ NODE_ENV: 'development' })).toThrow(/DATABASE_URL/);
   });
@@ -70,8 +115,10 @@ describe('loadEnv: email OTP and session settings', () => {
       STYTCH_API_URL: 'https://api.stytch.com',
       STYTCH_PROJECT_ID: 'project-live-123',
       STYTCH_SECRET: 'secret-live-123',
+      CORS_ALLOWED_ORIGINS: 'https://app.example.com',
     });
     expect(env.OTP_PROVIDER).toBe('stytch');
+    expect(env.CORS_ALLOWED_ORIGINS).toEqual(['https://app.example.com']);
   });
 
   it('allows non-Secure cookies only outside production', () => {

@@ -76,9 +76,24 @@ So a misconfiguration can never look like a wrong code or invite pointless retri
 
 **Sessions are ours, not Stytch's:** a random 32-byte token in the `ba_session` cookie, with only its SHA-256 stored in `auth_session`. A global `SessionGuard` denies by default; public routes opt out with `@Public()`. Controllers take the owner from `@CurrentUserId()`.
 
-**JSON-only mutations:** every POST/PUT/PATCH/DELETE under `/v1` that carries a body or a `Content-Type` must be `application/json`, otherwise 415 (`apps/api/src/common/http/require-json-body.ts`, registered ahead of Nest's body parsers). HTML forms can't send that type, and a JSON request from another origin needs a CORS preflight that the allowlist refuses. Without this, an auto-submitting cross-site form could sign a victim into the attacker's account (login CSRF), because the browser accepts the SameSite=Lax `Set-Cookie` on a top-level navigation. CSRF tokens remain BIB-11's.
+**JSON-only mutations:** every POST/PUT/PATCH/DELETE under `/v1` that carries a body or a `Content-Type` must be `application/json`, otherwise 415 (`apps/api/src/common/http/require-json-body.ts`, registered ahead of Nest's body parsers). HTML forms can't send that type, and a JSON request from another origin needs a CORS preflight that the allowlist refuses. Without this, an auto-submitting cross-site form could sign a victim into the attacker's account (login CSRF), because the browser accepts the SameSite=Lax `Set-Cookie` on a top-level navigation. BIB-11 added an Origin check as the second layer and decided against CSRF tokens (see its addendum below).
 
 **Assumption:** web and API are deployed same-site (for example `app.` and `api.` under one domain), so the API's SameSite=Lax cookie travels with credentialed fetches from the web app. Revisit with the hosting decision.
+
+## Addendum (2026-10-01, BIB-11): owner isolation and CSRF
+
+**Owner isolation is a mechanism, not a habit.** `StudyAccessService` (exported by `StudyModule`) is the one way to load a study or a child of it: `requireOwnedStudy(ownerId, studyId)` and `requireOwnedNode(ownerId, studyId, nodeId)`, each a single query whose WHERE includes `owner_id` (and `study_id` for children), with optional `{ transaction, lock }` for writes. Absent, another user's, soft-deleted, and malformed (non-UUID) IDs all throw the same `NotFoundError`, so status and body carry no existence signal. Path params use `ParseResourceIdPipe` (non-UUID → the same 404), and the service re-checks ID shape so a forgotten pipe still fails closed. Later child tables (notes, events, suggestions, jobs, exports) follow the same rule: filter by the child's own `owner_id` from the session and its `study_id`; the composite FK guarantees they agree, so no join and no owner comparison in application code. Row-level security was not added; composite FKs plus session-scoped queries are the PRD §23 mechanism.
+
+`test/route-inventory.int-spec.ts` lists every mounted route as public (with a reason, must not require a session) or private (must answer 401 without a session and name its cross-user test file). A new route fails CI until it is listed.
+
+**CSRF without tokens.** Two layers, both registered in `configureApp` ahead of body parsing, the session guard, and every handler (public sign-in routes included):
+
+1. `requireTrustedOrigin`: a POST/PUT/PATCH/DELETE whose `Origin` is not exactly one of `CORS_ALLOWED_ORIGINS` (including `null`), or that has no `Origin` but `Sec-Fetch-Site: cross-site`, gets 403 (`FORBIDDEN` envelope). A request with neither header is a non-browser client holding no victim's cookie.
+2. `requireJsonBody` (BIB-10): non-JSON mutations get 415, so any cross-origin mutation needs a CORS preflight that the allowlist refuses.
+
+A synchronizer or double-submit token would add web and API plumbing without closing a further realistic path for this same-site, JSON-only API. Revisit if a non-JSON mutation is ever introduced. Because the allowlist now also gates mutations, `CORS_ALLOWED_ORIGINS` entries must be exact bare http(s) origins (no wildcard, path, or trailing slash). In production the variable is required and every entry must be https.
+
+**Safe URLs.** `httpUrlSchema` in `@bible-artisan/contracts` accepts only http/https URLs without credentials or embedded whitespace/control characters (NFR-SEC-002). Every stored URL (note links in BIB-23, Source URLs) must use it. The Tiptap allowlist schema and link `rel` rendering belong to BIB-23.
 
 ## Notes
 
