@@ -217,7 +217,12 @@ function rangeIn(
  * - no book: a clear reference shape (it had `:`) is `REFERENCE_UNKNOWN_BOOK`, anything else is
  *   `not_reference` so the caller can search for it as keywords;
  * - malformed (a book followed by digits, but not a complete reference): 422, never a guess;
- * - more than one book: candidates, never a silent pick;
+ * - more than one book: the candidates whose numbers exist in that book (each validated as if
+ *   it had been typed with that book's name), never a silent pick. The user typed an ambiguous
+ *   key, so even when only one candidate remains valid it is still offered as `ambiguous` with
+ *   that single candidate, never resolved (`Phil 4:1` offers Philippians only: Philemon has one
+ *   chapter). When none is valid, the first candidate's (canon order) 422 code is returned, so
+ *   the result is deterministic and never points at a range that does not exist;
  * - one book: the validated range, or a specific 422 code.
  */
 export function resolveParsedReference(index: BookIndex, parsed: ParsedReference): Resolution {
@@ -231,16 +236,23 @@ export function resolveParsedReference(index: BookIndex, parsed: ParsedReference
     return invalid(parsed.multiple ? 'REFERENCE_MULTIPLE_PASSAGES' : 'REFERENCE_MALFORMED');
   }
   const [book] = books;
-  if (books.length > 1 || !book) {
-    const tail = formatSpec(parsed.spec);
-    return {
-      outcome: 'ambiguous',
-      candidates: books.map((candidate) => ({
-        bookCode: candidate.code,
-        bookName: candidate.name,
-        input: tail ? `${candidate.name} ${tail}` : candidate.name,
-      })),
-    };
-  }
-  return rangeIn(book, parsed.spec);
+  if (!book) return { outcome: 'not_reference' };
+  if (books.length === 1) return rangeIn(book, parsed.spec);
+
+  const checked = books.map((candidate) => ({
+    candidate,
+    result: rangeIn(candidate, parsed.spec),
+  }));
+  const valid = checked.filter(({ result }) => result.outcome === 'resolved');
+  const [first] = checked;
+  if (valid.length === 0) return first ? first.result : { outcome: 'not_reference' };
+  const tail = formatSpec(parsed.spec);
+  return {
+    outcome: 'ambiguous',
+    candidates: valid.map(({ candidate }) => ({
+      bookCode: candidate.code,
+      bookName: candidate.name,
+      input: tail ? `${candidate.name} ${tail}` : candidate.name,
+    })),
+  };
 }

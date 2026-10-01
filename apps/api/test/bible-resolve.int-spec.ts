@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { Op } from 'sequelize';
@@ -80,11 +80,6 @@ describe('POST /v1/bible/resolve', () => {
 
   beforeAll(async () => {
     app = await createTestApp();
-    // Listen once, on IPv4 loopback. Otherwise supertest listens on an ephemeral port per request
-    // on `::`, which can share a port number with another local process bound only to 127.0.0.1;
-    // supertest then connects to 127.0.0.1 and reaches that process (seen as a 404 or a hang).
-    // This file sends a few hundred requests, so it would hit that often.
-    await app.listen(0, '127.0.0.1');
     const edition = await BibleEdition.findOne({
       where: {
         code: ENGWEBP_RELEASE.code,
@@ -145,21 +140,62 @@ describe('POST /v1/bible/resolve', () => {
   });
 
   it('converges concurrent first resolves of a new range on one row', async () => {
-    const last = await lastVerse('ROM', 11);
-    const input = `Rom 11:${last - 3}-${last}`;
-    // Start from "never resolved" even when an earlier run left this row behind.
-    await ScriptureReference.destroy({
-      where: { editionId, bookCode: 'ROM', startChapter: 11, startVerse: last - 3, endChapter: 11 },
+    // Rows can never be deleted, so pick a Psalms range no earlier run (or test) has resolved:
+    // random chapter, start after verse 1 and end after start (so the label is a plain verse
+    // range), re-drawn until no row exists for it.
+    const book = await BibleBook.findOne({
+      where: { editionId, code: 'PSA' },
+      rejectOnEmpty: true,
     });
-    const before = await referenceCount();
-    const results = await Promise.all(Array.from({ length: 5 }, () => resolve(input)));
+    let range: { startChapter: number; startVerse: number; endVerse: number } | undefined;
+    for (let attempt = 0; attempt < 100 && !range; attempt++) {
+      const chapter = 1 + randomInt(book.chapterCount);
+      const last = await lastVerse('PSA', chapter);
+      if (last < 3) continue;
+      const startVerse = 2 + randomInt(last - 2);
+      const endVerse = startVerse + 1 + randomInt(last - startVerse);
+      const exists = await ScriptureReference.count({
+        where: {
+          editionId,
+          bookCode: 'PSA',
+          startChapter: chapter,
+          startVerse,
+          endChapter: chapter,
+          endVerse,
+        },
+      });
+      if (exists === 0) range = { startChapter: chapter, startVerse, endVerse };
+    }
+    if (!range) throw new Error('no unresolved Psalms range found');
+    const { startChapter, startVerse, endVerse } = range;
+    const where = {
+      editionId,
+      bookCode: 'PSA',
+      startChapter,
+      startVerse,
+      endChapter: startChapter,
+      endVerse,
+    };
+
+    const input = `PSA ${startChapter}:${startVerse}-${endVerse}`;
+    const results = await Promise.all(Array.from({ length: 8 }, () => resolve(input)));
     for (const res of results) expect(res.status).toBe(200);
     const [first] = results;
     for (const res of results) expect(res.body).toStrictEqual(first?.body);
     expect(first?.body).toStrictEqual(
-      resolvedBody('ROM', 11, last - 3, 11, last, `Romans 11:${last - 3}–${last}`),
+      resolvedBody(
+        'PSA',
+        startChapter,
+        startVerse,
+        startChapter,
+        endVerse,
+        `${book.name} ${startChapter}:${startVerse}–${endVerse}`,
+      ),
     );
-    expect(await referenceCount()).toBe(before + 1);
+    const rows = await ScriptureReference.findAll({ where, attributes: ['id'] });
+    expect(rows.map((row) => row.id)).toStrictEqual([
+      (first?.body as { reference: { id: string } }).reference.id,
+    ]);
   });
 
   it('resolves Unicode dashes, no-break spaces and full-width digits like ASCII', async () => {
@@ -216,6 +252,12 @@ describe('POST /v1/bible/resolve', () => {
         'Enter one passage from one book at a time',
       ],
       ['Rom 9:', 'REFERENCE_MALFORMED', 'This is not a complete Bible reference'],
+      // A verse-part suffix after the range dash is not a second (numbered) book.
+      ['Rom 9:1-3a', 'REFERENCE_MALFORMED', 'This is not a complete Bible reference'],
+      // Superscript footnote markers are never folded into the number (not Genesis 1:12 etc.).
+      ['Gen 1:1\u00B2', 'REFERENCE_MALFORMED', 'This is not a complete Bible reference'],
+      ['John 3:1\u2076', 'REFERENCE_MALFORMED', 'This is not a complete Bible reference'],
+      ['Ps 1\u00B2', 'REFERENCE_MALFORMED', 'This is not a complete Bible reference'],
     ];
     const before = await referenceCount();
     for (const [input, code, message] of cases) {
@@ -242,6 +284,16 @@ describe('POST /v1/bible/resolve', () => {
         { bookCode: 'PHP', bookName: 'Philippians', input: 'Philippians 1:1' },
         { bookCode: 'PHM', bookName: 'Philemon', input: 'Philemon 1:1' },
       ],
+    });
+    // Only candidates whose chapter and verse exist are offered; one valid candidate is still
+    // offered as a choice, never silently resolved (Philemon and Jude have one chapter).
+    expect((await resolve('Phil 4:1').expect(200)).body).toStrictEqual({
+      outcome: 'ambiguous',
+      candidates: [{ bookCode: 'PHP', bookName: 'Philippians', input: 'Philippians 4:1' }],
+    });
+    expect((await resolve('Jud 3:1').expect(200)).body).toStrictEqual({
+      outcome: 'ambiguous',
+      candidates: [{ bookCode: 'JDG', bookName: 'Judges', input: 'Judges 3:1' }],
     });
     expect(await referenceCount()).toBe(before);
     // Re-submitting a candidate resolves it.

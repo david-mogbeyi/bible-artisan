@@ -219,6 +219,78 @@ describe('resolveParsedReference against the WEB corpus', () => {
     ]);
   });
 
+  it('offers only the candidates whose chapter and verse exist in that book', () => {
+    // Philemon and Jude have one chapter, so a chapter:verse past chapter 1 does not exist there.
+    // The key is still ambiguous, so the one valid candidate is offered, never silently resolved.
+    expect(resolve('Phil 4:1')).toStrictEqual({
+      outcome: 'ambiguous',
+      candidates: [{ bookCode: 'PHP', bookName: 'Philippians', input: 'Philippians 4:1' }],
+    });
+    expect(resolve('Jud 3:1')).toStrictEqual({
+      outcome: 'ambiguous',
+      candidates: [{ bookCode: 'JDG', bookName: 'Judges', input: 'Judges 3:1' }],
+    });
+    // A bare number is a verse in a single-chapter book: Philippians has no chapter past its
+    // last, but Philemon has that verse.
+    const php = book('PHP').chapterCount;
+    expect(resolve(`Phil ${php + 1}`)).toStrictEqual({
+      outcome: 'ambiguous',
+      candidates: [{ bookCode: 'PHM', bookName: 'Philemon', input: `Philemon ${php + 1}` }],
+    });
+    // Valid in neither book: the first candidate's (canon order) out-of-range code.
+    const beyond = Math.max(book('JDG').chapterCount, lastVerse('JUD', 1)) + 1;
+    expect(resolve(`Jud ${beyond}`)).toStrictEqual({
+      outcome: 'invalid',
+      code: 'REFERENCE_CHAPTER_OUT_OF_RANGE',
+    });
+    expect(resolve(`Jud 1:${lastVerse('JDG', 1) + lastVerse('JUD', 1)}`)).toStrictEqual({
+      outcome: 'invalid',
+      code: 'REFERENCE_VERSE_OUT_OF_RANGE',
+    });
+    // Philippians (first in canon) has both chapters, so its code wins over Philemon's.
+    expect(resolve('Phil 2:1-1:1')).toStrictEqual({
+      outcome: 'invalid',
+      code: 'REFERENCE_RANGE_REVERSED',
+    });
+  });
+
+  it('never folds a superscript, subscript or circled digit into a number', () => {
+    for (const input of ['Gen 1:1\u00B2', 'John 3:1\u2076', 'Ps 1\u00B2', 'Rom 9:\u2460']) {
+      expect(resolve(input)).toStrictEqual({ outcome: 'invalid', code: 'REFERENCE_MALFORMED' });
+    }
+  });
+
+  it('refuses every non-ASCII, non-full-width numeric code point appended to Gen 1:1', () => {
+    const fullWidthDigit = (cp: number): boolean => cp >= 0xff10 && cp <= 0xff19;
+    const numeric = /\p{N}/u;
+    let checked = 0;
+    const resolvedAnyway: string[] = [];
+    for (let cp = 0x80; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      if (fullWidthDigit(cp) || !numeric.test(ch)) continue;
+      checked++;
+      const result = resolve(`Gen 1:1${ch}`);
+      if (result.outcome !== 'invalid' || result.code !== 'REFERENCE_MALFORMED') {
+        resolvedAnyway.push(cp.toString(16));
+      }
+    }
+    expect(checked).toBeGreaterThan(1000);
+    expect(resolvedAnyway).toStrictEqual([]);
+  });
+
+  it('reads a verse-part suffix after a range dash as malformed, not a second book', () => {
+    for (const input of ['Rom 9:1-3a', 'Rom 9:1-1a', 'Rom 9:1-2b', 'Rom 9:1-3c']) {
+      expect(resolve(input)).toStrictEqual({ outcome: 'invalid', code: 'REFERENCE_MALFORMED' });
+    }
+    for (const input of ['Rom 16:27-1 Cor 1:1', 'Rom 16:27-2Cor 1:1', 'Rom 16:27-Gal 1:1']) {
+      expect(resolve(input)).toStrictEqual({
+        outcome: 'invalid',
+        code: 'REFERENCE_MULTIPLE_PASSAGES',
+      });
+    }
+  });
+
   it('resolves a unique name prefix only when a chapter follows', () => {
     expect(resolve('Ps 23')).toMatchObject({ outcome: 'resolved', range: { bookCode: 'PSA' } });
     expect(resolve('Ezek 37:1')).toMatchObject({ outcome: 'resolved', range: { bookCode: 'EZK' } });

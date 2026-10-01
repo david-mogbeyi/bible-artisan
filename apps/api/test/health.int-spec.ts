@@ -245,10 +245,8 @@ describe('GET /v1/health (readiness) and GET /v1/health/live (liveness)', () => 
     beforeAll(async () => {
       // Forwards to the test database and counts every connection the probe opens.
       proxy = await startTcpProxy(hostAndPort(url));
+      // createTestApp listens once, so 25 concurrent supertest requests share one server.
       app = await appWithReadinessDatabase(proxy.urlFor(url));
-      // Listen once, so 25 concurrent supertest requests share the server instead of each
-      // starting it (and adding a listener).
-      await app.listen(0, '127.0.0.1');
     });
 
     afterAll(async () => {

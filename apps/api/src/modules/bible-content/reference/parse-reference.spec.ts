@@ -126,10 +126,32 @@ describe('parseReference', () => {
     ['Rom 9:1,3', true],
     ['Rom 9:1; 10:2', true],
     ['Rom 16:27-1 Cor 1:1', true],
+    ['Rom 16:27-1Cor 1:1', true],
     ['Rom 16:27-Gal 1:1', true],
+    ['Rom 16:27 - 2 Cor 1:1', true],
+    // A verse-part suffix after the range dash is malformed, not a numbered second book.
+    ['Rom 9:1-3a', false],
+    ['Rom 9:1-1a', false],
+    ['Rom 9:1-2b', false],
+    ['Rom 9:1-3c', false],
+    ['Rom 9:1 - 2b', false],
+    ['Rom 9-1a', false],
   ])('treats %j as a malformed reference (multiple passages: %s)', (input, multiple) => {
     const parsed = parseReference(input);
     expect(parsed).toMatchObject({ kind: 'malformed', multiple, key: 'rom' });
+  });
+
+  it.each([
+    ['a superscript footnote marker after a verse', 'Gen 1:1\u00B2', 'gen'],
+    ['a superscript digit inside a verse', 'John 3:1\u2076', 'john'],
+    ['a superscript digit after a chapter', 'Ps 1\u00B2', 'ps'],
+    ['a superscript zero', 'Rom 9:1\u2070', 'rom'],
+    ['a subscript digit', 'Rom 9:1\u2081', 'rom'],
+    ['a circled digit', 'Rom 9:\u2460', 'rom'],
+    ['an Arabic-Indic digit', 'Rom 9:\u0661', 'rom'],
+    ['a superscript digit straight after the book', 'Gen\u00B9', 'gen'],
+  ])('never folds %s into the number: malformed', (_label, input, key) => {
+    expect(parseReference(input)).toMatchObject({ kind: 'malformed', multiple: false, key });
   });
 
   it('records whether a malformed reference contained a colon', () => {
@@ -172,10 +194,16 @@ describe('parseReference', () => {
 });
 
 describe('normalizeReferenceInput', () => {
-  it('applies NFKC, removes zero-width characters, unifies dashes and whitespace, lower-cases', () => {
+  it('folds full-width ASCII, removes zero-width characters, unifies dashes and whitespace, lower-cases', () => {
     expect(
       normalizeReferenceInput('\u200B \uFF32\uFF2F\uFF2D\u00A0\uFF19\uFF1A\uFF11\u2013\uFF15 '),
     ).toBe('rom 9:1-5');
+  });
+
+  it('keeps every other compatibility character as typed (no NFKC)', () => {
+    expect(normalizeReferenceInput('Gen 1:1\u00B2')).toBe('gen 1:1\u00B2');
+    expect(normalizeReferenceInput('\u2161 Kings')).toBe('\u2161 kings');
+    expect(normalizeReferenceInput('1 \u212Aings')).toBe('1 \u212Aings');
   });
 });
 

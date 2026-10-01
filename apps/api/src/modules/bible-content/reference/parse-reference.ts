@@ -51,27 +51,38 @@ const ZERO_WIDTH = /[\u200B-\u200D\uFEFF]/g;
  * full-width hyphen-minus.
  */
 const DASHES = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g;
+/** Full-width ASCII (U+FF01..U+FF5E): digits, letters and punctuation typed with an IME. */
+const FULL_WIDTH_ASCII = /[\uFF01-\uFF5E]/g;
+const FULL_WIDTH_OFFSET = 0xfee0;
+/**
+ * Any numeric code point (Unicode N: Nd, Nl, No) other than ASCII 0-9, checked after full-width
+ * digits have been folded. Superscripts, subscripts, circled and other-script digits are never
+ * folded into a number: `Gen 1:1²` (a footnote marker) must not become Genesis 1:12.
+ */
+const FOREIGN_NUMBER = /(?![0-9])\p{N}/u;
 
 /**
- * NFKC (full-width digits, colon and letters become ASCII; NBSP becomes a space), then remove
- * zero-width characters, unify dashes, collapse every Unicode whitespace run, and lower-case.
+ * An explicit, minimal fold (deliberately not NFKC, which turns `²` into `2`): remove zero-width
+ * characters, map full-width ASCII to ASCII, unify dashes, collapse every Unicode whitespace run
+ * to one space, and lower-case ASCII letters only. Every other non-ASCII character is kept, so
+ * the ASCII-only grammar rejects it.
  */
 export function normalizeReferenceInput(input: string): string {
   return input
-    .normalize('NFKC')
     .replace(ZERO_WIDTH, '')
+    .replace(FULL_WIDTH_ASCII, (ch) => String.fromCharCode(ch.charCodeAt(0) - FULL_WIDTH_OFFSET))
     .replace(DASHES, '-')
     .replace(/\s+/gu, ' ')
     .trim()
-    .toLowerCase();
+    .replace(/[A-Z]/g, (ch) => ch.toLowerCase());
 }
 
 /**
- * The comparison key for any book name, abbreviation or code: NFKC, lower-case, with whitespace
+ * The comparison key for any book name, abbreviation or code: the same fold, with whitespace
  * and periods removed (`1 Samuel` -> `1samuel`, `1Sa` -> `1sa`, `1SA` -> `1sa`).
  */
 export function normalizeBookKey(name: string): string {
-  return name.normalize('NFKC').toLowerCase().replace(/[\s.]/gu, '');
+  return normalizeReferenceInput(name).replace(/[\s.]/gu, '');
 }
 
 // The book token: an optional numeric prefix (digit 1-3, space optional; or Roman I-III, space
@@ -86,8 +97,17 @@ const GRAMMAR = new RegExp(
 );
 /** A book token immediately followed by a digit: the start of a reference shape. */
 const REFERENCE_START = new RegExp(String.raw`^${BOOK}\d`);
-/** A list (`9:1,3`, `9:1; 10:2`) or a second book after a range dash (`16:27-1 Cor 1:1`). */
-const MULTIPLE = /[,;]|\d ?- ?(?:[123] ?)?[a-z]/;
+/**
+ * A book token followed by a digit or a foreign numeric character (`Ps ²`, `Gen 1:1²`): looks like
+ * a reference, but with a number the grammar never reads.
+ */
+const FOREIGN_NUMBER_START = new RegExp(String.raw`^${BOOK}(?:\d|\p{N})`, 'u');
+/**
+ * A list (`9:1,3`, `9:1; 10:2`) or a second book after a range dash (`16:27-1 Cor 1:1`,
+ * `1:1-Gen 1:2`). A book needs at least two letters, so a verse-part suffix after the dash
+ * (`9:1-3a`, `9:1-2b`) is malformed, not a second book.
+ */
+const MULTIPLE = /[,;]|\d ?- ?(?:[123] ?)?[a-z]{2}/;
 
 const ROMAN: Readonly<Record<string, string>> = { i: '1', ii: '2', iii: '3' };
 
@@ -125,6 +145,13 @@ export function parseReference(input: string): ParsedReference {
   if (input.length > MAX_REFERENCE_INPUT_LENGTH) return { kind: 'not_reference' };
   const text = normalizeReferenceInput(input);
   const hasColon = text.includes(':');
+
+  if (FOREIGN_NUMBER.test(text)) {
+    const start = FOREIGN_NUMBER_START.exec(text);
+    return start
+      ? { kind: 'malformed', multiple: false, ...bookToken(start, hasColon) }
+      : { kind: 'not_reference' };
+  }
 
   const match = GRAMMAR.exec(text);
   if (match) {

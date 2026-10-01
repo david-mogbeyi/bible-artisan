@@ -6,7 +6,6 @@ import { DATABASE } from '../../../database/database.module';
 import type { Database } from '../../../database/database';
 import { BibleBook } from '../../../database/models/bible-book.model';
 import { BibleEdition } from '../../../database/models/bible-edition.model';
-import { ScriptureReference } from '../../../database/models/scripture-reference.model';
 import {
   BookIndex,
   type IndexBook,
@@ -58,18 +57,29 @@ export class ReferenceService {
     }
   }
 
-  private async indexFor(editionId: string): Promise<BookIndex> {
+  /**
+   * Single flight: the first caller stores one promise covering the active-edition check and the
+   * corpus load, and every concurrent caller awaits that same promise, so the full-corpus
+   * aggregation runs once. A rejection (unknown or inactive edition, a database blip) is evicted,
+   * so a later call retries.
+   */
+  private indexFor(editionId: string): Promise<BookIndex> {
     const cached = this.indexes.get(editionId);
     if (cached) return cached;
+    const loading = this.loadActiveIndex(editionId);
+    this.indexes.set(editionId, loading);
+    loading.catch(() => {
+      if (this.indexes.get(editionId) === loading) this.indexes.delete(editionId);
+    });
+    return loading;
+  }
+
+  private async loadActiveIndex(editionId: string): Promise<BookIndex> {
     const active = await BibleEdition.count({
       where: { id: editionId, activatedAt: { [Op.ne]: null } },
     });
     if (active === 0) throw new NotFoundError();
-    const loading = this.loadIndex(editionId);
-    this.indexes.set(editionId, loading);
-    // A failed load (e.g. the database blipped) is not cached; the next request retries.
-    loading.catch(() => this.indexes.delete(editionId));
-    return loading;
+    return this.loadIndex(editionId);
   }
 
   private async loadIndex(editionId: string): Promise<BookIndex> {
@@ -108,14 +118,43 @@ export class ReferenceService {
   }
 
   /**
-   * Insert-if-absent, then read back: concurrent resolves of the same range converge on the one
-   * row the unique constraint allows. The composite FKs re-check both endpoints in the database.
+   * Insert-or-select in one statement: the CTE inserts the range if absent and returns the new id;
+   * otherwise the UNION reads the existing row. Under a race, ON CONFLICT waits for the other
+   * transaction, but this statement's snapshot predates that row, so it can return nothing; only
+   * then does a second, fresh-snapshot SELECT read the winner's id. The composite FKs re-check both
+   * endpoints in the database.
    */
   private async persist(editionId: string, range: ReferenceRange): Promise<string> {
-    const where = { editionId, ...range };
-    await ScriptureReference.bulkCreate([where], { ignoreDuplicates: true });
-    const row = await ScriptureReference.findOne({ where, attributes: ['id'] });
-    if (!row) throw new Error('ReferenceService: reference row missing after insert');
-    return row.id;
+    const bind = [
+      editionId,
+      range.bookCode,
+      range.startChapter,
+      range.startVerse,
+      range.endChapter,
+      range.endVerse,
+    ];
+    const match = `edition_id = $1 AND book_code = $2 AND start_chapter = $3 AND start_verse = $4
+       AND end_chapter = $5 AND end_verse = $6`;
+    const [row] = await this.db.query<{ id: string }>(
+      `WITH inserted AS (
+         INSERT INTO scripture_reference
+           (edition_id, book_code, start_chapter, start_verse, end_chapter, end_verse)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT ON CONSTRAINT scripture_reference_range_key DO NOTHING
+         RETURNING id
+       )
+       SELECT id FROM inserted
+       UNION ALL
+       SELECT id FROM scripture_reference WHERE ${match}
+       LIMIT 1`,
+      { bind, type: QueryTypes.SELECT },
+    );
+    if (row) return row.id;
+    const [winner] = await this.db.query<{ id: string }>(
+      `SELECT id FROM scripture_reference WHERE ${match}`,
+      { bind, type: QueryTypes.SELECT },
+    );
+    if (!winner) throw new Error('ReferenceService: reference row missing after insert');
+    return winner.id;
   }
 }

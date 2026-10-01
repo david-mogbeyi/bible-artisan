@@ -229,7 +229,6 @@ describe('revision-safe, event-atomic mutations', () => {
 
   beforeAll(async () => {
     app = await createTestApp(MutationProbeModule);
-    await app.listen(0);
     db = app.get<Database>(DATABASE);
     thread = app.get(ThreadService);
     mutations = app.get(MutationService);

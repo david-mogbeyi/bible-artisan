@@ -654,6 +654,35 @@ describe('Sequelize models against the real schema', () => {
       await created.update({ endVerse: 7 }, { transaction });
     }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(DatabaseError);
-    expect((error as DatabaseError).parent).toMatchObject({ code: '23000' });
+    expect((error as DatabaseError).parent).toMatchObject({
+      code: '23000',
+      message: 'scripture_reference is immutable: UPDATE is not allowed',
+    });
+  });
+
+  it('refuses to delete a ScriptureReference, so its range can never mint a new id', async () => {
+    const error = await inReferenceTransaction(async (editionId, transaction) => {
+      const created = await ScriptureReference.create(
+        { editionId, ...romans(8, 9) },
+        { transaction },
+      );
+      await created.destroy({ transaction });
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DatabaseError);
+    expect((error as DatabaseError).parent).toMatchObject({
+      code: '23000',
+      message: 'scripture_reference is immutable: DELETE is not allowed',
+    });
+  });
+
+  it('refuses to truncate scripture_reference', async () => {
+    const error = await inReferenceTransaction(async (_editionId, transaction) => {
+      await db.query('TRUNCATE scripture_reference', { transaction });
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DatabaseError);
+    expect((error as DatabaseError).parent).toMatchObject({
+      code: '23000',
+      message: 'scripture_reference is immutable: TRUNCATE is not allowed',
+    });
   });
 });

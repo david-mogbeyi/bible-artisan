@@ -1,21 +1,18 @@
 import type { Server } from 'node:http';
 import { Body, Controller, Get, INestApplication, Module, Post } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { errorEnvelopeSchema } from '@bible-artisan/contracts';
 import { ConnectionRefusedError } from 'sequelize';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
 import { Public } from '../src/modules/identity/public.decorator';
-import { configureApp } from '../src/bootstrap';
-import { ENV } from '../src/config/config.module';
-import type { Env } from '../src/config/env';
 import {
   NotFoundError,
   RevisionConflictError,
   RevisionMissingError,
   ValidationError,
 } from '../src/common/errors/domain-errors';
+import { createTestApp } from './app';
 
 /**
  * Test-only controller that throws each mapped domain exception, colocated with the test per the
@@ -66,16 +63,15 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 @Module({ controllers: [TestErrorsController] })
 class TestErrorsModule {}
 
+/** The real AppModule plus the test-only error routes. */
+@Module({ imports: [AppModule, TestErrorsModule] })
+class ErrorProbeAppModule {}
+
 describe('global exception filter → error envelope', () => {
   let app: INestApplication<Server>;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      imports: [AppModule, TestErrorsModule],
-    }).compile();
-    app = moduleRef.createNestApplication<INestApplication<Server>>({ logger: false });
-    configureApp(app, app.get<Env>(ENV));
-    await app.init();
+    app = await createTestApp(ErrorProbeAppModule);
   });
 
   afterAll(async () => {

@@ -253,20 +253,22 @@ The command is a separate step, not a migration: migrations only get `context.qu
 `POST /v1/bible/resolve` (`modules/bible-content/reference/`) turns typed input into one of: a canonical range, book candidates, a 422, or `not_reference`. It never returns verse text.
 
 - **Corpus-driven, never typed.** Book names (`\toc2`), abbreviations (`\toc3`), USFM codes, chapter counts and per-chapter verse counts come from the active edition's rows. They are loaded once per edition and cached in process, which is safe because an activated edition is immutable. The only typed data is `EXPLICIT_BOOK_ALIASES` (`jn`, `mk`, `mt`, `lk`, `songofsongs`). `BookIndex` refuses to build if an alias names a missing book, and tests resolve every alias, name, abbreviation and code against the real corpus.
-- **Matching.** Keys are normalized: NFKC, lower-cased, spaces and periods removed, Roman I–III mapped to digits. The candidates are the exact-key matches, plus books whose name starts with the token when the token has at least 2 letters. Book-only input never matches by prefix alone, so keywords such as "so" are not taken for books.
+- **Matching.** Keys are normalized with the same explicit fold as the input (below), lower-cased, spaces and periods removed, Roman I–III mapped to digits. The candidates are the exact-key matches, plus books whose name starts with the token when the token has at least 2 letters. Book-only input never matches by prefix alone, so keywords such as "so" are not taken for books.
   - One candidate resolves.
   - More than one is `ambiguous`, never a silent pick. `Jud` (Jude's own `\toc3`) is ambiguous with Judges, as are `Ph`/`Phil` and `Jo`.
+  - Only candidates whose chapter and verse exist in that book are offered (the single-chapter rule applies per book). If just one remains valid it is still returned as `ambiguous` with that one candidate, since the user typed an ambiguous key (`Phil 4:1` offers only Philippians). If none is valid, the first candidate's (canon order) 422 code is returned.
   - None is `not_reference`, or `REFERENCE_UNKNOWN_BOOK` when the input contained `:`.
-- **Grammar** (anchored, linear): `B`, `B n`, `B n-n`, `B c:v`, `B c:v-v`, `B c:v-c:v`. Input is NFKC-normalized; zero-width characters are removed; dash variants become `-`; Unicode whitespace is collapsed; input is capped at 200 characters.
+- **Grammar** (anchored, linear): `B`, `B n`, `B n-n`, `B c:v`, `B c:v-v`, `B c:v-c:v`. Input is folded explicitly, not with NFKC: zero-width characters are removed, full-width ASCII (U+FF01–FF5E) maps to ASCII, dash variants become `-`, Unicode whitespace is collapsed, and only ASCII letters are lower-cased; input is capped at 200 characters. Any other numeric code point (superscript, subscript, circled, other-script digits) makes a reference `REFERENCE_MALFORMED`, so a footnote marker is never merged into a number (`Gen 1:1²` is not Genesis 1:12). A unit test sweeps every such code point.
   - In a book whose corpus `chapter_count` is 1, a bare number is a verse (`Jude 3` = Jude 1:3).
   - Book-only input opens chapter 1 (PRD §14).
-  - Input that starts with a book and a digit but is not complete is 422: `REFERENCE_MULTIPLE_PASSAGES` for lists or cross-book ranges, otherwise `REFERENCE_MALFORMED`. It is not treated as keywords.
+  - Input that starts with a book and a digit but is not complete is 422: `REFERENCE_MULTIPLE_PASSAGES` for lists or cross-book ranges (a book after the dash needs two letters, so `9:1-3a` is malformed), otherwise `REFERENCE_MALFORMED`. It is not treated as keywords.
 - **Never repair.** Chapter and verse bounds, start ≤ end, and ≤ 200 verses are each a specific 422 code with a fixed message that echoes nothing. No nearest verse is ever substituted.
 - **`scripture_reference`** is a shared table with no owner. It is edition-bound and stands in for PRD §23's canon/versification pair until other editions exist.
   - Both endpoints are composite FKs to `bible_verse`.
   - A CHECK enforces start ≤ end. UNIQUE on the exact range per edition makes the id stable for every user.
-  - A trigger refuses UPDATE, because later tables point at these ids.
-  - The resolver inserts with `ON CONFLICT DO NOTHING` and reads the row back. The route is authenticated but not owner-scoped, and it takes no `Idempotency-Key` or revision: it is a read plus a naturally idempotent upsert, not a study mutation.
+  - Triggers refuse UPDATE, DELETE and TRUNCATE, because later tables point at these ids and deleting a range would let it be re-minted under a new id.
+  - Its `down` refuses while rows exist unless `ALLOW_CORPUS_DROP=1` is set, the corpus opt-in, so a `down` past the corpus can't drop the ids and then stop at the corpus guard half-reverted.
+  - The resolver inserts or selects in one statement (a CTE with `ON CONFLICT DO NOTHING`), with a second SELECT only when a concurrent insert won the race. Each edition's book index is loaded single-flight and a failed load is evicted. The route is authenticated but not owner-scoped, and it takes no `Idempotency-Key` or revision: it is a read plus a naturally idempotent upsert, not a study mutation.
 
 ## Notes
 
