@@ -646,11 +646,49 @@ There is one event per real change. Intended visibility for BIB-55's column: ren
 - A search refused before sending (too many words, forbidden characters) appears as an alert, with focus back on the field, which points at it (`aria-describedby`).
 - Clear tag filter and Clear filters disappear with the filters, so they move focus to the search field instead of dropping it on the page body.
 - **Freshness.** Creating a study, and every committed edit, invalidates every cached library listing (`invalidateLibrary`: the `['studies', 'library']` prefix). That covers each search, filter and sort of `/studies`, and Home's recent studies, so they refetch when shown. A refused create or edit invalidates nothing. The study's own cache is still updated in place by its editor.
-- The Archived filter UI waits for archiving (BIB-22). The API already accepts `state=archived` and never lists trashed studies.
+- The Archived filter UI waits for archiving (BIB-22). The API already accepts `state=archived` and never lists trashed studies. (BIB-22 added the Show filter and `state=trashed`; see its addendum.)
 
 **Privacy.** No new log lines. `log-redaction.int-spec.ts` sends sentinel titles, tags, searches, tag ids and cursors on 200 and 400.
 
 **Not in BIB-21:** archive/trash and the Archived filter (BIB-22), notes search (BIB-23), Continue Studying and the resume card (BIB-34), list actions from the library, a tags endpoint, and offline caching (BIB-36).
+
+## Addendum (2026-10-01, BIB-22): archive, trash, restore and purge
+
+`POST /v1/studies/:studyId/archive|unarchive|restore` and `DELETE /v1/studies/:studyId` (trash), all through `MutationService.execute` with `{ expectedRevision }` (strict) and an optional Idempotency-Key. Each bumps `study.revision` once, appends one event, and never moves `content_revision`. 200 is `updateStudyResponseSchema`.
+
+**Transitions** (`modules/study/study-lifecycle.ts`, one table, mirrored by the database):
+
+| Route     | From              | To                                            | Dates                                  |
+| --------- | ----------------- | --------------------------------------------- | -------------------------------------- |
+| archive   | active            | archived                                      | `archived_at` = now                    |
+| unarchive | archived          | active                                        | `archived_at` = null                   |
+| trash     | active / archived | trashed                                       | `deleted_at` = now, `archived_at` kept |
+| restore   | trashed           | archived if `archived_at` is set, else active | `deleted_at` = null                    |
+
+- `study_lifecycle_timestamps_check` ties the dates to the state, and the `study_lifecycle_transition` trigger (`BEFORE UPDATE OF lifecycle`, `SET search_path = pg_catalog, pg_temp`, fixed message, SQLSTATE 23000) refuses every other pair, so a trashed study only leaves the trash to the state it came from.
+- Events (ids/enums only): `study_archived`, `study_unarchived` (thread-visible, PRD section 13), `study_trashed`, `study_restored {restoredTo}` (internal). Visibility is recorded in code for BIB-55's column.
+- Lifecycle changes are activity: `last_activity_at` moves through `writeCounters`, the unchanged single writer (BIB-21).
+
+**The guard is in the pipeline, not in routes.** `StudyRevisionService.lock` reads `lifecycle` with the row lock, and `execute` calls `assertLifecycleAllows(lock.lifecycle, spec.lifecycleTransition)` before `work` runs. A spec without `lifecycleTransition` (PATCH and every later study mutation) needs an active study: archived is 422 `STUDY_ARCHIVED`, trashed 422 `STUDY_TRASHED`. A lifecycle route from a state not in its row is 422 `STUDY_TRASHED` when the study is trashed, else 422 `LIFECYCLE_TRANSITION_INVALID`. 422, not 409, because PRD section 24 gives 422 to invalid state transitions and keeps 409 for revisions. The state is checked before the revision, so an archived study answers `STUDY_ARCHIVED` whatever `expectedRevision` says; a refusal rolls back with its receipt.
+
+**30-day window.** `purgeAt = deleted_at + 30 days` (`STUDY_TRASH_RETENTION_DAYS`, contracts). From `purgeAt` the study is absent: `withinRecoveryWindow()` is part of the WHERE of the study lock and `StudyAccessService.requireOwnedStudy`, and the library's `state=trashed` filters `deleted_at > now - 30 days`. So GET, every mutation and restore answer the same 404 as an absent id before the row is physically gone, and the window never depends on when the purge last ran. `GET /studies/:id` and list items carry `purgeAt` (null unless trashed).
+
+**Purge** (`modules/study/trash/StudyTrashPurgeService.purgeExpired`). Batches of 100, one READ COMMITTED transaction each:
+
+1. `SELECT … WHERE lifecycle = 'trashed' AND deleted_at <= cutoff … FOR UPDATE SKIP LOCKED`. No mutation can hold such a row (the lock refuses it), and a restore racing the boundary holds its row and is skipped this run.
+2. Note the studies' tags, then `DELETE FROM study`; BIB-19's cascades remove nodes, events, branches and `study_tag`.
+3. `deleteOrphanedTags` (BIB-20's race-safe cleanup) per owner, so tag text does not outlive the study.
+4. `MutationService.deleteExpiredReceipts(owners)`: those owners' expired receipts. Receipt bodies hold titles, questions and tags; a purged study's last mutation (the trash) is 30+ days old, so every receipt about it is past its 7-day TTL and goes. Unexpired receipts and the general receipt purge stay with BIB-39.
+
+One `trash_purged {studies, durationMs}` line per run; a failed run logs `trash_purge_failed {errorType}` and retries at the next tick. The worker (`worker.ts`) runs it at start and hourly (`scheduleTrashPurge`, one run at a time). It needs no lease: it is idempotent, and `SKIP LOCKED` lets two workers share it. Tests call the service directly, compile `WorkerModule` to prove its wiring, and drive the schedule with fake timers; the worker process itself is not booted in CI.
+
+**Migration** `add_study_lifecycle`: `archived_at`, `deleted_at` (backfilled from `updated_at` for any existing archived/trashed row), the CHECK and the trigger. Its `down` refuses while any study exists unless `ALLOW_STUDY_DATA_DROP=1`, not only while archived or trashed ones exist: each `down` commits on its own, and an unguarded step would commit before BIB-21's guard refused, leaving a half-reverted database (the reversibility suite now expects this step's refusal first).
+
+**Web.** `/studies` has a labelled Show select (Active, Archived, Trash). Each state is its own query key, so switching starts from the first page with a fresh cursor, and previous results are kept as placeholder only within the same state (never archived studies under the Trash heading). Trash is one list (`pinnedFirst=false`) and each card says "Deleted permanently on <date>". Empty states: "No studies yet." (with New study), "No archived studies.", "Trash is empty.", and "No studies match." for a search. The study page shows Archive / Unarchive / Move to trash / Restore per state, the archived and trash banners, and no editor unless the study is active. Move to trash confirms in a `<dialog>` opened with `showModal`, labelled and described, focus on Cancel; Escape or Cancel closes it and returns focus to the trigger. Pending buttons are `aria-disabled` and ignore presses; a committed change updates the study cache from the 200, calls `invalidateLibrary`, is announced in a polite status region, and moves focus to the new state's first action. Errors by code: 409 and the 422 lifecycle codes offer Reload, 404 shows the unavailable page, an unknown outcome offers Retry with the identical body and key. An edit refused with `STUDY_ARCHIVED`/`STUDY_TRASHED` says so in the editor, and Reload shows the study read-only.
+
+**Privacy.** Events, logs and errors carry ids, enums and counts only. `log-redaction.int-spec.ts` covers the four routes on 200, 404 and 422.
+
+**Not in BIB-22:** note trash (BIB-23), node/edge delete and undo (BIB-31), account deletion and export (BIB-47/48), the job runner and the general receipt purge (BIB-39), the event visibility column (BIB-55), lifecycle actions in library rows, and the offline queue (BIB-36).
 
 ## Notes
 

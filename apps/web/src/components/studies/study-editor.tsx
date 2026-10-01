@@ -9,6 +9,8 @@ import {
   MAX_TAG_LENGTH,
   normalizeTagName,
   QUESTION_NOT_FOUND,
+  STUDY_ARCHIVED,
+  STUDY_TRASHED,
   type StudyResponse,
   type StudyTag,
   STUDY_UNCHANGED,
@@ -29,6 +31,10 @@ export const CONFLICT =
 export const RELOADED =
   'Showing the latest saved study. Your edits are still in the form; save again to apply them.';
 export const NOTHING_TO_SAVE = 'There are no changes to save.';
+export const ARCHIVED_ELSEWHERE =
+  'This study was archived somewhere else, so nothing was saved. Reload to see it.';
+export const TRASHED_ELSEWHERE =
+  'This study was moved to the trash somewhere else, so nothing was saved. Reload to see it.';
 export const QUESTION_GONE = "That question isn't part of this study any more. Reload the study.";
 const TITLE_REQUIRED = 'Enter a title.';
 const TITLE_TOO_LONG = `Use at most ${MAX_STUDY_TITLE_LENGTH} characters for the title.`;
@@ -270,7 +276,8 @@ export function StudyEditor({
   const [tagInput, setTagInput] = useState('');
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [notice, setNotice] = useState<string | null>(null);
-  const [conflict, setConflict] = useState(false);
+  // Why the save was refused for a change made elsewhere (a 409, or a 422 lifecycle refusal).
+  const [conflict, setConflict] = useState<string | null>(null);
   const [problem, setProblem] = useState<unknown>(null);
   // Which request the problem came from, so Retry repeats that one.
   const [problemFrom, setProblemFrom] = useState<'save' | 'reload'>('save');
@@ -318,7 +325,14 @@ export function StudyEditor({
       // A definite refusal wrote nothing, so there is nothing to replay.
       if (definite && frozen.current === attempt) frozen.current = null;
       if (error instanceof ApiError && error.status === 409) {
-        setConflict(true);
+        setConflict(CONFLICT);
+      } else if (
+        error instanceof ApiError &&
+        error.status === 422 &&
+        (error.code === STUDY_ARCHIVED || error.code === STUDY_TRASHED)
+      ) {
+        // Archived or trashed on another device (BIB-22): Reload shows it read-only.
+        setConflict(error.code === STUDY_ARCHIVED ? ARCHIVED_ELSEWHERE : TRASHED_ELSEWHERE);
       } else if (
         error instanceof ApiError &&
         error.status === 400 &&
@@ -361,7 +375,7 @@ export function StudyEditor({
   function clearMessages() {
     setFieldErrors({});
     setNotice(null);
-    setConflict(false);
+    setConflict(null);
     setProblem(null);
     setSaved(false);
   }
@@ -519,7 +533,7 @@ export function StudyEditor({
             role="alert"
             className="flex flex-wrap items-center gap-3 rounded border border-accent px-3 py-2"
           >
-            <p>{CONFLICT}</p>
+            <p>{conflict}</p>
             <button
               type="button"
               aria-disabled={pending ? true : undefined}

@@ -10,6 +10,7 @@ import { classifyError } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
 import { StudyEditor } from './study-editor';
+import { StudyLifecycleActions } from './study-lifecycle-actions';
 
 const LOAD_COPY: ProblemCopy = {
   notFound: "This study isn't available.",
@@ -18,9 +19,12 @@ const LOAD_COPY: ProblemCopy = {
 };
 
 /**
- * `/studies/:id` (BIB-19, BIB-20): a minimal page that reads back the study and edits its title,
- * description, main question, pin and tags, so a study can be opened, organized and reloaded. The workspace (graph, thread, reader, summary) arrives with later
- * tickets. A missing or another user's study shows the same neutral unavailable state.
+ * `/studies/:id` (BIB-19, BIB-20, BIB-22): a minimal page that reads back the study and edits its
+ * title, description, main question, pin and tags, so a study can be opened, organized and
+ * reloaded. It archives, unarchives, trashes and restores the study; an archived or trashed study
+ * stays readable but has no editor. The workspace (graph, thread, reader, summary) arrives with
+ * later tickets. A missing or another user's study, or one past its trash window, shows the same
+ * neutral unavailable state.
  */
 export function StudyPage() {
   const params = useParams<{ studyId: string }>();
@@ -81,6 +85,7 @@ function StudyDetails({
   return (
     <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
       <h1 className="font-serif text-4xl break-words">{study.title}</h1>
+      <StudyLifecycleActions study={study} onReload={onReload} />
       {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
       {study.description ? (
         <p className="break-words whitespace-pre-wrap">{study.description}</p>
@@ -125,7 +130,8 @@ function StudyDetails({
           </dd>
         </div>
       </dl>
-      <StudyEditor study={study} onReload={onReload} />
+      {/* Read-only while archived or in the trash: the server refuses edits then anyway. */}
+      {study.lifecycle === 'active' ? <StudyEditor study={study} onReload={onReload} /> : null}
       <p className="text-muted">
         The study is saved. The workspace for its graph, thread and summary arrives in a later
         release.

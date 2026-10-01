@@ -3,6 +3,9 @@ import {
   type CreateStudyResponse,
   createStudyResponseSchema,
   IDEMPOTENCY_KEY_HEADER,
+  type LibraryState,
+  type StudyLifecycleResponse,
+  studyLifecycleResponseSchema,
   type StudyListResponse,
   studyListResponseSchema,
   type StudyResponse,
@@ -61,12 +64,43 @@ export function updateStudy(
   });
 }
 
+/** The lifecycle changes a study's page offers (BIB-22). */
+export type StudyLifecycleChange = 'archive' | 'unarchive' | 'trash' | 'restore';
+
+/**
+ * `POST /v1/studies/:id/archive|unarchive|restore` and `DELETE /v1/studies/:id` (trash), BIB-22.
+ * Like `updateStudy`, a retry must resend the same `expectedRevision` with the same
+ * `idempotencyKey`, so a change that committed but lost its response is replayed, not refused.
+ */
+export function changeStudyLifecycle(
+  studyId: string,
+  change: StudyLifecycleChange,
+  expectedRevision: number,
+  idempotencyKey: string,
+): Promise<StudyLifecycleResponse> {
+  const path = `/studies/${encodeURIComponent(studyId)}`;
+  return apiFetch(change === 'trash' ? path : `${path}/${change}`, studyLifecycleResponseSchema, {
+    method: change === 'trash' ? 'DELETE' : 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+    body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+const purgeDateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' });
+
+/** The day a trashed study is permanently deleted (its `purgeAt`), as the UI shows it. */
+export function formatPurgeDate(purgeAt: string): string {
+  return purgeDateFormat.format(new Date(purgeAt));
+}
+
 export function studyHref(studyId: string): string {
   return `/studies/${encodeURIComponent(studyId)}`;
 }
 
 /** What the library asks for (BIB-21). `q` and the tag id stay in memory: never in the page URL. */
 export interface LibraryRequest {
+  /** Which studies (BIB-22's Show filter). Default `active`. */
+  state?: LibraryState;
   q?: string;
   tagId?: string;
   sort: StudySort;
@@ -84,9 +118,9 @@ export function libraryQueryKey(request: LibraryRequest) {
 }
 
 /**
- * After a study is created or an edit commits (BIB-21): every cached library listing (each
- * search, filter and sort of `/studies`, and Home's recent studies) is stale, since titles, pins,
- * tags and last activity order and fill them. Marks them all stale and refetches the ones on
+ * After a study is created, an edit commits (BIB-21), or its lifecycle changes (BIB-22): every
+ * cached library listing (each state, search, filter and sort of `/studies`, and Home's recent
+ * studies) is stale, since state, titles, pins, tags and last activity order and fill them. Marks them all stale and refetches the ones on
  * screen; the rest refetch when next shown. A single study's own cache is left to its editor.
  */
 export function invalidateLibrary(queryClient: QueryClient): Promise<void> {
@@ -103,6 +137,7 @@ export function listStudies(
   cursor: string | null,
 ): Promise<StudyListResponse> {
   const params = new URLSearchParams({ sort: request.sort });
+  if (request.state !== undefined && request.state !== 'active') params.set('state', request.state);
   if (request.q !== undefined) params.set('q', request.q);
   if (request.tagId !== undefined) params.set('tag', request.tagId);
   if (request.pinnedFirst === false) params.set('pinnedFirst', 'false');

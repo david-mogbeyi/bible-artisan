@@ -2,6 +2,7 @@
 
 import {
   hasForbiddenUserTextCharacter,
+  type LibraryState,
   LIBRARY_QUERY_TOO_MANY_WORDS,
   MAX_LIBRARY_QUERY_LENGTH,
   MAX_LIBRARY_QUERY_TOKENS,
@@ -16,7 +17,13 @@ import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { RequireAuth } from '@/components/require-auth';
 import { classifyError } from '@/lib/api-errors';
-import { type LibraryRequest, libraryQueryKey, listStudies, studyHref } from '@/lib/studies';
+import {
+  formatPurgeDate,
+  type LibraryRequest,
+  libraryQueryKey,
+  listStudies,
+  studyHref,
+} from '@/lib/studies';
 
 const LOAD_COPY: ProblemCopy = {
   notFound: "Couldn't load your studies.",
@@ -35,15 +42,42 @@ const SORT_LABELS: Record<StudySort, string> = {
   title: 'Title',
 };
 
+/** The Show filter (BIB-22): which lifecycle state the library lists. */
+const STATE_LABELS: Record<LibraryState, string> = {
+  active: 'Active',
+  archived: 'Archived',
+  trashed: 'Trash',
+};
+
+/** What an unfiltered empty listing says, per state. */
+const EMPTY_COPY: Record<LibraryState, string> = {
+  active: 'No studies yet.',
+  archived: 'No archived studies.',
+  trashed: 'Trash is empty.',
+};
+
+/** How the status region names a Show change: "Showing archived studies: 3 studies." */
+const SHOWING: Record<LibraryState, string> = {
+  active: 'Showing active studies',
+  archived: 'Showing archived studies',
+  trashed: 'Showing trash',
+};
+
 interface Filters {
+  state: LibraryState;
   q: string | null;
   tag: { id: string; name: string } | null;
   sort: StudySort;
 }
 
 /** What the status region says once a new listing has loaded: "<what changed>: <results>". */
-function resultsSummary(count: number, more: boolean, filtered: boolean): string {
-  if (count === 0) return filtered ? 'no studies match.' : 'no studies yet.';
+function resultsSummary(
+  count: number,
+  more: boolean,
+  filtered: boolean,
+  state: LibraryState,
+): string {
+  if (count === 0) return filtered ? 'no studies match.' : EMPTY_COPY[state].toLowerCase();
   return `${count} ${count === 1 ? 'study' : 'studies'}${more ? ', more available' : ''}.`;
 }
 
@@ -52,7 +86,9 @@ const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', tim
 
 /**
  * `/studies` (BIB-21, FR-STUDY-004): the signed-in user's own studies, pinned first, searchable by
- * title, description and tag, filterable by a tag, sortable, in pages of 50 with Load more.
+ * title, description and tag, filterable by a tag, sortable, in pages of 50 with Load more. Show
+ * (BIB-22, FR-STUDY-005/006) switches between active, archived and trashed studies; Trash lists
+ * one group in sort order with each study's permanent deletion date.
  *
  * Privacy (PRD section 9): the search text and the tag filter live in component state only. They
  * never go into the page URL, browser history or localStorage, and TanStack Query holds them
@@ -66,10 +102,16 @@ function StudyLibrary() {
   const queryClient = useQueryClient();
   const inputId = useId();
   const sortId = useId();
+  const stateId = useId();
   const errorId = useId();
   const [input, setInput] = useState('');
   const [inputError, setInputError] = useState<string | null>(null);
-  const [filters, setFilters] = useState<Filters>({ q: null, tag: null, sort: 'recent' });
+  const [filters, setFilters] = useState<Filters>({
+    state: 'active',
+    q: null,
+    tag: null,
+    sort: 'recent',
+  });
   // The page's one polite status region: results after a search, filter or sort change, and
   // Load more. Search errors go to their own alert region next to the field.
   const [announcement, setAnnouncement] = useState('');
@@ -96,7 +138,10 @@ function StudyLibrary() {
   };
 
   const request: LibraryRequest = {
+    state: filters.state,
     sort: filters.sort,
+    // Trash is one list in sort order: a pin says nothing about what is about to be deleted.
+    ...(filters.state === 'trashed' ? { pinnedFirst: false } : {}),
     ...(filters.q !== null ? { q: filters.q } : {}),
     ...(filters.tag !== null ? { tagId: filters.tag.id } : {}),
   };
@@ -107,8 +152,10 @@ function StudyLibrary() {
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor,
     // Loading never blanks saved content (PRD section 11): the previous results stay until the
-    // new ones arrive.
-    placeholderData: keepPreviousData,
+    // new ones arrive. Not across Show states, though: archived studies must never appear under
+    // the Trash heading (or the reverse) while the other listing loads.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[2].state === filters.state ? keepPreviousData(previous) : undefined,
   });
 
   const filtered = filters.q !== null || filters.tag !== null;
@@ -181,7 +228,9 @@ function StudyLibrary() {
     if (what === null) return;
     if (list.data && !list.isPlaceholderData) {
       pendingResults.current = null;
-      setAnnouncement(`${what}: ${resultsSummary(items.length, list.hasNextPage, filtered)}`);
+      setAnnouncement(
+        `${what}: ${resultsSummary(items.length, list.hasNextPage, filtered, filters.state)}`,
+      );
     } else if (list.isError) {
       pendingResults.current = null;
     }
@@ -192,10 +241,13 @@ function StudyLibrary() {
     list.hasNextPage,
     items.length,
     filtered,
+    filters.state,
     listingChanges,
   ]);
-  const pinned = items.filter((item) => item.pinned);
-  const others = items.filter((item) => !item.pinned);
+  // The API lists Trash without a pinned group (`pinnedFirst=false`), so it shows as one list.
+  const grouped = filters.state !== 'trashed';
+  const pinned = grouped ? items.filter((item) => item.pinned) : [];
+  const others = grouped ? items.filter((item) => !item.pinned) : items;
   const filterByTag = (tag: { id: string; name: string }) => {
     setFilters((current) => ({ ...current, tag }));
     announceResults(`Studies tagged ${tag.name}`);
@@ -243,6 +295,24 @@ function StudyLibrary() {
           ) : null}
         </form>
         <div className="flex flex-wrap items-center gap-3">
+          <label htmlFor={stateId}>Show</label>
+          <select
+            id={stateId}
+            value={filters.state}
+            onChange={(event) => {
+              const state = event.target.value as LibraryState;
+              // A new listing starts at its first page: the cursor belongs to the query key.
+              setFilters((current) => ({ ...current, state }));
+              announceResults(SHOWING[state]);
+            }}
+            className="rounded border border-muted bg-canvas px-2 py-1"
+          >
+            {(Object.keys(STATE_LABELS) as LibraryState[]).map((state) => (
+              <option key={state} value={state}>
+                {STATE_LABELS[state]}
+              </option>
+            ))}
+          </select>
           <label htmlFor={sortId}>Sort by</label>
           <select
             id={sortId}
@@ -323,13 +393,15 @@ function StudyLibrary() {
                   Clear filters
                 </button>
               </div>
-            ) : (
+            ) : filters.state === 'active' ? (
               <div className="flex flex-col items-start gap-2">
-                <p>No studies yet.</p>
+                <p>{EMPTY_COPY.active}</p>
                 <Link href="/studies/new" className="text-accent underline">
                   Start a new study
                 </Link>
               </div>
+            ) : (
+              <p>{EMPTY_COPY[filters.state]}</p>
             )
           ) : null}
           {pinned.length > 0 ? (
@@ -337,7 +409,13 @@ function StudyLibrary() {
           ) : null}
           {others.length > 0 ? (
             <StudyGroup
-              heading={pinned.length > 0 ? 'Other studies' : 'Studies'}
+              heading={
+                filters.state === 'trashed'
+                  ? 'In trash'
+                  : pinned.length > 0
+                    ? 'Other studies'
+                    : 'Studies'
+              }
               items={others}
               onTag={filterByTag}
             />
@@ -406,6 +484,9 @@ function StudyGroup({
               {item.startingReference ? `${item.startingReference.label} · ` : ''}
               Last activity {dateFormat.format(new Date(item.lastActivityAt))}
             </p>
+            {item.purgeAt !== null ? (
+              <p>Deleted permanently on {formatPurgeDate(item.purgeAt)}</p>
+            ) : null}
             {item.tags.length > 0 ? (
               <ul aria-label="Tags" className="flex flex-wrap gap-2">
                 {item.tags.map((tag) => (

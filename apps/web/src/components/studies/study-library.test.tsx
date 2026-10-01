@@ -1,7 +1,8 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EDITION_ID } from '@/test/bible-fixtures';
-import { jsonResponse, renderWithQuery } from '@/test/render';
+import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
+import { formatPurgeDate } from '@/lib/studies';
 import { StudyLibraryPage } from './study-library';
 
 vi.mock('next/navigation', () => ({
@@ -309,5 +310,61 @@ describe('Study library', () => {
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     await screen.findByRole('link', { name: 'Study 5' });
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+  describe('Show (BIB-22)', () => {
+    it('switches to archived studies through a labelled Show control, from the first page, with its own empty state', async () => {
+      await renderLibrary();
+      await screen.findByRole('link', { name: 'Grace alone' });
+      const show = screen.getByLabelText('Show');
+      expect(
+        within(show)
+          .getAllByRole('option')
+          .map((option) => option.textContent),
+      ).toStrictEqual(['Active', 'Archived', 'Trash']);
+
+      replies.push(pageOf([]));
+      fireEvent.change(show, { target: { value: 'archived' } });
+      expect(await screen.findByText('No archived studies.')).toBeTruthy();
+      expect(params(1)).toStrictEqual({ sort: 'recent', state: 'archived' });
+      // Not "No studies yet" (with its New study link) and not "No studies match".
+      expect(screen.queryByText('No studies yet.')).toBeNull();
+      expect(screen.queryByText('No studies match.')).toBeNull();
+      await waitFor(() =>
+        expect(screen.getByRole('status').textContent).toBe(
+          'Showing archived studies: no archived studies.',
+        ),
+      );
+    });
+
+    it('lists Trash as one list in sort order, each card with its permanent deletion date, and says when Trash is empty', async () => {
+      await renderLibrary();
+      await screen.findByRole('link', { name: 'Grace alone' });
+      const purgeAt = '2026-10-31T12:00:00.000Z';
+      const trashed = study(7, {
+        title: 'Old notes',
+        lifecycle: 'trashed',
+        pinned: true,
+        purgeAt,
+      });
+      replies.push(pageOf([trashed]));
+      fireEvent.change(screen.getByLabelText('Show'), { target: { value: 'trashed' } });
+      const group = await screen.findByRole('region', { name: 'In trash' });
+      expect(params(1)).toStrictEqual({ sort: 'recent', state: 'trashed', pinnedFirst: 'false' });
+      expect(screen.queryByRole('region', { name: 'Pinned' })).toBeNull();
+      const card = within(group).getByRole('link', { name: 'Old notes' }).closest('li');
+      expect(textOf(card)).toContain(`Deleted permanently on ${formatPurgeDate(purgeAt)}`);
+      await waitFor(() =>
+        expect(screen.getByRole('status').textContent).toBe('Showing trash: 1 study.'),
+      );
+    });
+
+    it('says when Trash is empty, and shows no studies of another state while Trash loads', async () => {
+      await renderLibrary();
+      await screen.findByRole('link', { name: 'Grace alone' });
+      replies.push(pageOf([]));
+      fireEvent.change(screen.getByLabelText('Show'), { target: { value: 'trashed' } });
+      expect(screen.queryByRole('link', { name: 'Grace alone' })).toBeNull();
+      expect(await screen.findByText('Trash is empty.')).toBeTruthy();
+    });
   });
 });
