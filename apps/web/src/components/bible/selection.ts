@@ -101,6 +101,67 @@ export function phraseFromRange(
   return trimmed.length > 0 ? phrase(passage, trimmed, texts) : null;
 }
 
+/**
+ * One Range from the earliest start to the latest end of `ranges`, or null when there are none.
+ * Firefox splits a pointer selection into several ranges around `user-select: none` nodes (the
+ * verse checkbox and number), in no guaranteed order; the selection the user made spans them all.
+ */
+export function spanOfRanges(ranges: readonly Range[]): Range | null {
+  let first: Range | null = null;
+  let last: Range | null = null;
+  for (const r of ranges) {
+    if (!first || r.compareBoundaryPoints(Range.START_TO_START, first) < 0) first = r;
+    if (!last || r.compareBoundaryPoints(Range.END_TO_END, last) > 0) last = r;
+  }
+  if (!first || !last) return null;
+  const span = first.cloneRange();
+  span.setEnd(last.endContainer, last.endOffset);
+  return span;
+}
+
+/** The ranges of a native selection, as a list (one in most browsers, several in Firefox). */
+export function rangesOf(selection: Selection): Range[] {
+  return Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i));
+}
+
+/** A selection's boundary points: compared by identity and offset, never by text. */
+export type Boundaries = readonly (readonly [Node, number, Node, number])[];
+
+export function boundariesOf(ranges: readonly Range[]): Boundaries {
+  return ranges.map((r) => [r.startContainer, r.startOffset, r.endContainer, r.endOffset] as const);
+}
+
+export function sameBoundaries(a: Boundaries, b: Boundaries): boolean {
+  return (
+    a.length === b.length &&
+    a.every((x, i) => {
+      const y = b[i];
+      return y !== undefined && x[0] === y[0] && x[1] === y[1] && x[2] === y[2] && x[3] === y[3];
+    })
+  );
+}
+
+/** Field-by-field equality of two selections (no serialization). */
+export function sameAnchorSelection(a: AnchorSelection, b: AnchorSelection): boolean {
+  return (
+    a.editionId === b.editionId &&
+    a.bookCode === b.bookCode &&
+    a.kind === b.kind &&
+    a.segments.length === b.segments.length &&
+    a.segments.every((s, i) => {
+      const t = b.segments[i];
+      return (
+        t !== undefined &&
+        s.chapter === t.chapter &&
+        s.verse === t.verse &&
+        s.start === t.start &&
+        s.end === t.end
+      );
+    }) &&
+    a.quote === b.quote
+  );
+}
+
 function trim(segments: Segment[], texts: Map<number, string>): Segment[] {
   const out = segments.map((s) => ({ ...s }));
   const chars = (s: Segment) => Array.from(texts.get(s.verse) ?? '');

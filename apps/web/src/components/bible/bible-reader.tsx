@@ -18,9 +18,19 @@ import {
   PhraseForm,
   type ReaderSelection,
   SelectionBar,
+  selectionAnnouncement,
   selectionPayload,
 } from './reader-selection';
-import { phraseFromRange, VERSE_TEXT_ATTRIBUTE } from './selection';
+import {
+  type Boundaries,
+  boundariesOf,
+  phraseFromRange,
+  rangesOf,
+  sameAnchorSelection,
+  sameBoundaries,
+  spanOfRanges,
+  VERSE_TEXT_ATTRIBUTE,
+} from './selection';
 
 /**
  * A deliberate navigation: once the passage for `referenceId` has loaded, its heading takes
@@ -129,51 +139,71 @@ export function BibleReader({
 
   // Selection (BIB-18) belongs to the passage it was made on: a chapter or translation change
   // clears it (PRD section 14). Derived during render from the key, not reset in an effect.
+  const sectionRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLOListElement>(null);
   const captureButtonRef = useRef<HTMLButtonElement>(null);
   const phraseToggleRef = useRef<HTMLButtonElement>(null);
   const [picked, setPicked] = useState<{ key: string; value: ReaderSelection } | null>(null);
+  // The passage on which Clear was last used, so the live region can say so.
+  const [clearedOn, setClearedOn] = useState<string | null>(null);
   const [phraseFormOpen, setPhraseFormOpen] = useState<string | null>(null);
   const passageKey = shown ? passageKeyOf(shown) : null;
   const selection = picked && picked.key === passageKey ? picked.value : null;
   const payload = shown && selection ? selectionPayload(shown, selection) : null;
-  const choose = (value: ReaderSelection | null) =>
+  const choose = (value: ReaderSelection | null) => {
     setPicked(value && passageKey ? { key: passageKey, value } : null);
+    setClearedOn(null);
+  };
+  /** Drops the browser's text selection, but only one made in this reader. */
+  const clearNativeSelection = () => {
+    const native = document.getSelection();
+    if (native && native.rangeCount > 0 && selectionIsIn(native, sectionRef.current)) {
+      native.removeAllRanges();
+    }
+  };
 
-  // Native text selection inside the verse list becomes a phrase. A collapsed selection, or one
-  // outside the verses, leaves the current selection alone (so clicking Capture keeps it).
+  // A new passage replaces the verse list (it is keyed by passage, so no node is reused), and a
+  // text selection made on the old one is dropped rather than left pointing into the new text.
+  const selectedOn = useRef(passageKey);
+  useEffect(() => {
+    if (selectedOn.current === passageKey) return;
+    selectedOn.current = passageKey;
+    const native = document.getSelection();
+    if (native && native.rangeCount > 0 && selectionIsIn(native, sectionRef.current)) {
+      native.removeAllRanges();
+    }
+  }, [passageKey]);
+
+  // Native text selection inside the verse list becomes a phrase; see `watchNativeSelection`.
+  const lastBoundaries = useRef<Boundaries>([]);
   useEffect(() => {
     if (!shown) return;
     const key = passageKeyOf(shown);
-    const onSelectionChange = () => {
-      const list = listRef.current;
-      const native = document.getSelection();
-      if (!list || !native || native.rangeCount === 0 || native.isCollapsed) return;
-      const range = native.getRangeAt(0);
-      if (!range.intersectsNode(list)) return;
-      const phrase = phraseFromRange(range, list, shown);
-      if (!phrase) return;
-      // Dragging fires this on every move: keep the same state while the mapped phrase is unchanged.
-      const next = JSON.stringify(phrase);
+    return watchNativeSelection(listRef, lastBoundaries, shown, (phrase) => {
+      if (!phrase) {
+        // Text selected in the verses that is no verse text (a heading, a "no text" note): no
+        // phrase and no ticked verses stay armed from before.
+        setPicked(null);
+        return;
+      }
+      setClearedOn(null);
       setPicked((prev) =>
         prev?.key === key &&
         prev.value.kind === 'phrase' &&
-        JSON.stringify(prev.value.selection) === next
+        sameAnchorSelection(prev.value.selection, phrase)
           ? prev
           : { key, value: { kind: 'phrase', selection: phrase } },
       );
-    };
-    document.addEventListener('selectionchange', onSelectionChange);
-    return () => document.removeEventListener('selectionchange', onSelectionChange);
+    });
   }, [shown]);
 
   const capture = useMutation({ mutationFn: captureAnchor });
   // The capture shown is the one for exactly this selection; any other selection starts idle.
-  const payloadKey = payload && payload !== 'not_contiguous' ? JSON.stringify(payload) : null;
+  const ready = payload !== null && payload !== 'not_contiguous' ? payload : null;
   const captureIsCurrent =
-    payloadKey !== null &&
+    ready !== null &&
     capture.variables !== undefined &&
-    JSON.stringify(capture.variables) === payloadKey;
+    sameAnchorSelection(capture.variables, ready);
   const captureState: CaptureState = !captureIsCurrent
     ? { status: 'idle' }
     : capture.isPending
@@ -184,13 +214,15 @@ export function BibleReader({
           ? { status: 'captured', result: capture.data }
           : { status: 'idle' };
   const startCapture = () => {
-    if (payload && payload !== 'not_contiguous') capture.mutate(payload);
+    if (ready) capture.mutate(ready);
   };
 
   const toggleVerse = (verse: number) => {
     const ticked = selection?.kind === 'verses' ? selection.verses : [];
     const next = ticked.includes(verse) ? ticked.filter((v) => v !== verse) : [...ticked, verse];
     choose(next.length > 0 ? { kind: 'verses', verses: next } : null);
+    // Ticking replaces a phrase; its highlight would otherwise still show.
+    clearNativeSelection();
   };
   const tickedVerses = selection?.kind === 'verses' ? selection.verses : [];
   const showPhraseForm = shown !== null && phraseFormOpen === passageKey;
@@ -207,16 +239,25 @@ export function BibleReader({
 
   const target = shown ? targetVerses(shown) : null;
   const loading = referenceId !== null && passage.isFetching && !current;
-  const status = loading
+  // Loading and capture progress are shown as well as announced; the selection is shown in the
+  // Selection region, so its announcement is screen-reader only.
+  const progress = loading
     ? 'Loading the passage…'
     : captureState.status === 'pending'
       ? 'Capturing the selection…'
       : captureState.status === 'captured'
         ? 'Selection captured.'
         : '';
+  const selectionStatus =
+    shown && payload !== null
+      ? selectionAnnouncement(shown, payload)
+      : passageKey !== null && clearedOn === passageKey
+        ? 'Selection cleared.'
+        : '';
+  const status = progress || selectionStatus;
 
   return (
-    <section aria-label="Reader" className="flex flex-col gap-4">
+    <section ref={sectionRef} aria-label="Reader" className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end gap-4">
         <TranslationPicker
           translations={translations}
@@ -247,7 +288,7 @@ export function BibleReader({
       </div>
 
       {/* One live region, mounted from the first render; only its text changes. */}
-      <p role="status" aria-live="polite" className={status ? 'text-muted' : 'sr-only'}>
+      <p role="status" aria-live="polite" className={progress ? 'text-muted' : 'sr-only'}>
         {status}
       </p>
       {passage.isError && referenceId ? (
@@ -302,13 +343,17 @@ export function BibleReader({
               capture={captureState}
               onCapture={startCapture}
               onClear={() => {
+                // Focus stays on Clear (aria-disabled now, still focusable); the live region
+                // says what happened.
                 choose(null);
-                document.getSelection()?.removeAllRanges();
+                setClearedOn(passageKey);
+                clearNativeSelection();
               }}
               captureButtonRef={captureButtonRef}
             />
           </div>
           <Verses
+            key={passageKey}
             passage={shown}
             target={target}
             targetRef={targetRef}
@@ -321,6 +366,76 @@ export function BibleReader({
       ) : null}
     </section>
   );
+}
+
+/** Whether a native selection starts or ends inside `root`, or points at removed nodes. */
+function selectionIsIn(native: Selection, root: Element | null): boolean {
+  const ends = [native.anchorNode, native.focusNode];
+  return ends.some((node) => node && (!node.isConnected || Boolean(root?.contains(node))));
+}
+
+/**
+ * Maps the browser's text selection over the verse list to a phrase, at most once per animation
+ * frame and never while a pointer is held down (a drag maps once, on release). Keyboard selection
+ * (shift+arrow) has no pointer, so its `selectionchange` maps on the next frame. Each mapping
+ * first compares the selection's boundary points with the last ones seen and does nothing when
+ * they are unchanged, so a release or a repeated event costs a few comparisons.
+ *
+ * `onPhrase` gets the phrase, or null for a selection inside the list that holds no verse text.
+ * A collapsed selection, or one outside the list, leaves the reader's selection alone (so
+ * clicking Capture keeps it). Firefox's several ranges are mapped as one span.
+ */
+function watchNativeSelection(
+  listRef: React.RefObject<HTMLOListElement | null>,
+  last: React.RefObject<Boundaries>,
+  passage: BiblePassageResponse,
+  onPhrase: (phrase: AnchorSelection | null) => void,
+): () => void {
+  let frame = 0;
+  let pointerDown = false;
+  const map = () => {
+    frame = 0;
+    const list = listRef.current;
+    const native = document.getSelection();
+    if (!list || !native) return;
+    const ranges = rangesOf(native);
+    const boundaries = boundariesOf(ranges);
+    if (sameBoundaries(boundaries, last.current)) return;
+    last.current = boundaries;
+    const span = spanOfRanges(ranges);
+    if (!span || span.collapsed || !span.intersectsNode(list)) return;
+    onPhrase(phraseFromRange(span, list, passage));
+  };
+  const schedule = () => {
+    if (frame === 0) frame = requestAnimationFrame(map);
+  };
+  const onSelectionChange = () => {
+    if (!pointerDown) schedule();
+  };
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.button === 0) pointerDown = true;
+  };
+  const onPointerUp = () => {
+    pointerDown = false;
+    schedule();
+  };
+  // A key press means no drag is in progress (recovers if a release was never delivered).
+  const onKeyDown = () => {
+    pointerDown = false;
+  };
+  document.addEventListener('selectionchange', onSelectionChange);
+  document.addEventListener('pointerdown', onPointerDown, true);
+  document.addEventListener('pointerup', onPointerUp, true);
+  document.addEventListener('pointercancel', onPointerUp, true);
+  document.addEventListener('keydown', onKeyDown, true);
+  return () => {
+    if (frame !== 0) cancelAnimationFrame(frame);
+    document.removeEventListener('selectionchange', onSelectionChange);
+    document.removeEventListener('pointerdown', onPointerDown, true);
+    document.removeEventListener('pointerup', onPointerUp, true);
+    document.removeEventListener('pointercancel', onPointerUp, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+  };
 }
 
 /** Identifies the passage a selection was made on: edition, book and chapter. */

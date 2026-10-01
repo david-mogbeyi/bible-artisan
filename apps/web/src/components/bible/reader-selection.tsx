@@ -43,6 +43,34 @@ function selectionLabel(passage: BiblePassageResponse, payload: AnchorSelection)
   return `${passage.book.name} ${passage.chapter}:${verses}`;
 }
 
+/** The Selection region's one-line summary. */
+export function selectionSummary(
+  passage: BiblePassageResponse,
+  payload: AnchorSelection | 'not_contiguous' | null,
+): string {
+  if (payload === null) return 'Nothing selected.';
+  if (payload === 'not_contiguous') return 'Verses selected';
+  return payload.kind === 'verses'
+    ? `${payload.segments.length === 1 ? 'Verse' : 'Verses'} selected: ${selectionLabel(passage, payload)}`
+    : `Phrase selected in ${selectionLabel(passage, payload)}`;
+}
+
+const NOT_CONTIGUOUS = 'Choose verses that are next to each other.';
+
+/**
+ * What the reader's live region says about the selection: the summary, with the gap message when
+ * the ticked verses are not next to each other. Nothing while nothing is selected (the reader
+ * says "Selection cleared." itself after Clear). References only, never the quote.
+ */
+export function selectionAnnouncement(
+  passage: BiblePassageResponse,
+  payload: AnchorSelection | 'not_contiguous' | null,
+): string {
+  if (payload === null) return '';
+  if (payload === 'not_contiguous') return `Verses selected. ${NOT_CONTIGUOUS}`;
+  return `${selectionSummary(passage, payload)}.`;
+}
+
 const CAPTURE_COPY = {
   notFound: 'This translation is no longer available.',
   refused: "This selection doesn't match the text of this translation. Select it again.",
@@ -79,22 +107,19 @@ export function SelectionBar({
   captureButtonRef: RefObject<HTMLButtonElement | null>;
 }) {
   const ready = payload !== null && payload !== 'not_contiguous';
-  const summary =
-    payload === null
-      ? 'Nothing selected.'
-      : payload === 'not_contiguous'
-        ? 'Verses selected'
-        : payload.kind === 'verses'
-          ? `${payload.segments.length === 1 ? 'Verse' : 'Verses'} selected: ${selectionLabel(passage, payload)}`
-          : `Phrase selected in ${selectionLabel(passage, payload)}`;
   const quote = ready && payload.quote !== '' ? `“${payload.quote}”` : '';
+  // aria-disabled, not `disabled`: a focused button that becomes natively disabled drops focus to
+  // <body> (Capture while pending, Clear once it has cleared). These stay focusable and inert.
+  const captureOff = !ready || capture.status === 'pending';
+  const clearOff = payload === null;
 
   return (
     <section
       aria-label="Selection"
       className="flex flex-col gap-2 rounded border border-muted px-3 py-2"
     >
-      <p className="truncate font-semibold">{summary}</p>
+      {/* Announced through the reader's live region (`selectionAnnouncement`), not here. */}
+      <p className="truncate font-semibold">{selectionSummary(passage, payload)}</p>
       {/* A no-break space keeps the row's height when there is no quote. */}
       <p className="truncate font-serif" aria-hidden={quote === '' ? true : undefined}>
         {quote || '\u00a0'}
@@ -103,22 +128,26 @@ export function SelectionBar({
         <button
           type="button"
           ref={captureButtonRef}
-          disabled={!ready || capture.status === 'pending'}
-          onClick={onCapture}
-          className="rounded border border-accent px-3 py-1 text-accent disabled:opacity-60"
+          aria-disabled={captureOff ? true : undefined}
+          onClick={() => {
+            if (!captureOff) onCapture();
+          }}
+          className="rounded border border-accent px-3 py-1 text-accent aria-disabled:opacity-60"
         >
           Capture
         </button>
         <button
           type="button"
-          disabled={payload === null}
-          onClick={onClear}
-          className="rounded border border-muted px-3 py-1 disabled:opacity-60"
+          aria-disabled={clearOff ? true : undefined}
+          onClick={() => {
+            if (!clearOff) onClear();
+          }}
+          className="rounded border border-muted px-3 py-1 aria-disabled:opacity-60"
         >
           Clear selection
         </button>
       </div>
-      {payload === 'not_contiguous' ? <p>Choose verses that are next to each other.</p> : null}
+      {payload === 'not_contiguous' ? <p>{NOT_CONTIGUOUS}</p> : null}
       {capture.status === 'captured' && capture.result ? (
         <>
           <p>Captured. This selection points to exactly this text in {passage.edition.name}:</p>

@@ -27,7 +27,10 @@ const PASSAGE: BiblePassageResponse = chapter({
     { verse: 1, text: 'one two three' },
     { verse: 2, text: 'four five' },
     { verse: 3, text: 'six seven' },
+    { verse: 4, text: 'eight nine' },
+    { verse: 5, text: 'ten eleven' },
   ],
+  superscriptions: [{ beforeVerse: 1, text: 'Placeholder heading.' }],
   reference: {
     id: PASSAGE_ID,
     editionId: TRANSLATION.id,
@@ -35,7 +38,7 @@ const PASSAGE: BiblePassageResponse = chapter({
     startChapter: 3,
     startVerse: 1,
     endChapter: 3,
-    endVerse: 3,
+    endVerse: 5,
     label: 'Psalms 3',
   },
 });
@@ -57,7 +60,7 @@ const anchorOf = (selection: AnchorSelection): ScriptureAnchor => ({
   segments: selection.segments.map((s) => ({ ...s, textSha256: SHA })),
 });
 
-let captureReply: (body: AnchorSelection) => Response;
+let captureReply: (body: AnchorSelection) => Response | Promise<Response>;
 let captured: AnchorSelection[];
 
 beforeEach(() => {
@@ -119,20 +122,55 @@ function expectQuote(figure: HTMLElement, quote: string, caption: string | null)
   expect(figcaption ? textOf(figcaption) : null).toBe(caption);
 }
 
+/** Lets the reader's once-per-frame selection mapping run. */
+const nextFrame = () =>
+  act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+/** A browser text selection (as after a drag or shift+arrows), then the frame it is mapped in. */
+async function selectText(start: [Node, number], end: [Node, number]) {
+  const selection = document.getSelection();
+  if (!selection) throw new Error('no selection API');
+  act(() => {
+    selection.setBaseAndExtent(start[0], start[1], end[0], end[1]);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await nextFrame();
+}
+
+const verseText = (n: number): Text => {
+  const node = screen.getByRole('list').querySelector(`[data-verse-text="${n}"]`)?.firstChild;
+  if (!(node instanceof Text)) throw new Error('no verse text');
+  return node;
+};
+
 const checkbox = (verse: number) =>
   screen.getByRole<HTMLInputElement>('checkbox', { name: `Select verse ${verse}` });
 const captureButton = () =>
   within(selectionRegion()).getByRole<HTMLButtonElement>('button', { name: 'Capture' });
+const clearButton = () =>
+  within(selectionRegion()).getByRole<HTMLButtonElement>('button', { name: 'Clear selection' });
+/** Inert but focusable: never native `disabled`, which would drop focus to <body>. */
+const isOff = (button: HTMLButtonElement) => {
+  expect(button.disabled).toBe(false);
+  return button.getAttribute('aria-disabled') === 'true';
+};
 
 /** The Selection region stays mounted (no layout shift) and says nothing is selected. */
 function expectNothingSelected() {
   const region = selectionRegion();
   expect(textOf(region.querySelector('p'))).toBe('Nothing selected.');
-  expect(captureButton().disabled).toBe(true);
+  expect(isOff(captureButton())).toBe(true);
+  expect(isOff(clearButton())).toBe(true);
+  for (const verse of [1, 2, 3, 4, 5]) expect(checkbox(verse).checked).toBe(false);
 }
 
 const selectionRegion = () => screen.getByRole('region', { name: 'Selection' });
-const status = () => screen.getAllByRole('status')[0];
+/** The reader's single live region. */
+const status = () => {
+  const regions = screen.getAllByRole('status');
+  expect(regions).toHaveLength(1);
+  return regions[0] as HTMLElement;
+};
 
 describe('verse selection with checkboxes', () => {
   it('ticks contiguous verses and captures them as a whole-verse anchor', async () => {
@@ -172,9 +210,24 @@ describe('verse selection with checkboxes', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 1' }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 3' }));
     expect(textOf(selectionRegion())).toContain('Choose verses that are next to each other.');
-    expect(captureButton().disabled).toBe(true);
+    expect(isOff(captureButton())).toBe(true);
+    fireEvent.click(captureButton());
+    expect(captured).toStrictEqual([]);
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 2' }));
-    expect(captureButton().disabled).toBe(false);
+    expect(isOff(captureButton())).toBe(false);
+  });
+
+  it('announces the selection and the gap message through the one live region', async () => {
+    await renderReader();
+    expect(textOf(status())).toBe('');
+    fireEvent.click(checkbox(2));
+    expect(textOf(status())).toBe('Verse selected: Psalms 3:2.');
+    fireEvent.click(checkbox(5));
+    expect(textOf(status())).toBe('Verses selected. Choose verses that are next to each other.');
+    // The Selection region shows it, so the live region stays visually hidden.
+    expect(status().className).toBe('sr-only');
+    fireEvent.click(checkbox(5));
+    expect(textOf(status())).toBe('Verse selected: Psalms 3:2.');
   });
 
   it('clears the selection with Clear and when the chapter changes', async () => {
@@ -187,7 +240,61 @@ describe('verse selection with checkboxes', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 1' }));
     rerender(PSALM_4_ID);
     await screen.findByRole('heading', { name: 'Psalms 4' });
+    expect(textOf(selectionRegion().querySelector('p'))).toBe('Nothing selected.');
+  });
+});
+
+describe('Capture and Clear keep keyboard focus', () => {
+  it('keeps focus on Clear after a keyboard Clear, and says the selection was cleared', async () => {
+    await renderReader();
+    fireEvent.click(checkbox(1));
+    const clear = clearButton();
+    clear.focus();
+    // Enter or Space on a focused button is a click.
+    fireEvent.click(clear);
     expectNothingSelected();
+    expect(document.activeElement).toBe(clear);
+    expect(textOf(status())).toBe('Selection cleared.');
+    // Inert while there is nothing to clear.
+    fireEvent.click(clear);
+    expect(document.activeElement).toBe(clear);
+    expect(textOf(status())).toBe('Selection cleared.');
+  });
+
+  it('keeps focus on Capture while pending, after success, and after a failure', async () => {
+    let reply: (response: Response) => void = () => undefined;
+    captureReply = () => new Promise<Response>((resolve) => (reply = resolve));
+    await renderReader();
+    fireEvent.click(checkbox(1));
+    const capture = captureButton();
+    capture.focus();
+    fireEvent.click(capture);
+    await waitFor(() => expect(textOf(status())).toBe('Capturing the selection…'));
+    expect(isOff(capture)).toBe(true);
+    expect(document.activeElement).toBe(capture);
+    fireEvent.click(capture); // inert while pending: no second request
+    expect(captured).toHaveLength(1);
+
+    const body = captured[0] as AnchorSelection;
+    act(() => reply(jsonResponse(200, { anchor: anchorOf(body), reference: reference(1) })));
+    await waitFor(() => expect(textOf(status())).toBe('Selection captured.'));
+    expect(isOff(capture)).toBe(false);
+    expect(document.activeElement).toBe(capture);
+
+    // A new selection, and a failed capture of it.
+    captureReply = () =>
+      jsonResponse(503, {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'x',
+        retryable: true,
+        correlationId: 'c',
+      });
+    fireEvent.click(checkbox(2));
+    capture.focus();
+    fireEvent.click(capture);
+    await within(selectionRegion()).findByRole('alert');
+    expect(document.activeElement).toBe(capture);
+    expect(isOff(capture)).toBe(false);
   });
 });
 
@@ -259,30 +366,80 @@ describe('the keyboard phrase form', () => {
 describe('native text selection', () => {
   it('turns a text selection in the verses into a phrase, and ignores one elsewhere', async () => {
     await renderReader();
-    const verseText = (n: number) => {
-      const node = screen.getByRole('list').querySelector(`[data-verse-text="${n}"]`)?.firstChild;
-      if (!node) throw new Error('no verse text');
-      return node;
-    };
-    const selection = document.getSelection();
-    if (!selection) throw new Error('no selection API');
-
-    act(() => {
-      // Backward: from verse 2 back into verse 1.
-      selection.setBaseAndExtent(verseText(2), 4, verseText(1), 8);
-      document.dispatchEvent(new Event('selectionchange'));
-    });
+    // Backward: from verse 2 back into verse 1.
+    await selectText([verseText(2), 4], [verseText(1), 8]);
     expect(textOf(selectionRegion())).toContain('Phrase selected in Psalms 3:1–2');
     expect(textOf(selectionRegion())).toContain('“three four”');
+    expect(textOf(status())).toBe('Phrase selected in Psalms 3:1–2.');
 
     // A selection outside the verses (the heading) leaves the phrase alone.
+    const heading = screen.getByRole('heading', { name: 'Psalms 3' });
+    await selectText([heading, 0], [heading, 1]);
+    expect(textOf(selectionRegion())).toContain('“three four”');
+    document.getSelection()?.removeAllRanges();
+  });
+
+  it('clears the phrase or ticked verses when text in the verses selects no verse text', async () => {
+    await renderReader();
+    // The superscription's own text node (after its screen-reader "Heading:" prefix).
+    const superscription = screen.getByText('Placeholder heading.').lastChild as Node;
+    await selectText([verseText(1), 0], [verseText(1), 3]);
+    expect(textOf(selectionRegion())).toContain('“one”');
+    await selectText([superscription, 0], [superscription, 5]);
+    expectNothingSelected();
+    expect(textOf(status())).toBe('');
+
+    fireEvent.click(checkbox(1));
+    fireEvent.click(checkbox(2));
+    await selectText([superscription, 1], [superscription, 6]);
+    expectNothingSelected();
+    expect(textOf(status())).toBe('');
+    document.getSelection()?.removeAllRanges();
+  });
+
+  it('maps all of a multi-range selection (Firefox splits it around checkboxes and numbers)', async () => {
+    await renderReader();
+    const part = (verse: number, start: number, end: number) => {
+      const r = document.createRange();
+      r.setStart(verseText(verse), start);
+      r.setEnd(verseText(verse), end);
+      return r;
+    };
+    // jsdom's Selection holds one range, so stand in for Firefox's, out of order on purpose.
+    const ranges = [part(2, 0, 9), part(3, 0, 3), part(1, 4, 13)];
+    const firefox = {
+      rangeCount: ranges.length,
+      getRangeAt: (i: number) => ranges[i],
+      isCollapsed: false,
+      anchorNode: ranges[2]?.startContainer,
+      focusNode: ranges[1]?.endContainer,
+      removeAllRanges: vi.fn(),
+    } as unknown as Selection;
+    vi.spyOn(document, 'getSelection').mockReturnValue(firefox);
     act(() => {
-      const heading = screen.getByRole('heading', { name: 'Psalms 3' });
-      selection.selectAllChildren(heading);
       document.dispatchEvent(new Event('selectionchange'));
     });
-    expect(textOf(selectionRegion())).toContain('“three four”');
-    selection.removeAllRanges();
+    await nextFrame();
+    expect(textOf(selectionRegion())).toContain('Phrase selected in Psalms 3:1–3');
+    expect(textOf(selectionRegion())).toContain('“two three four five six”');
+  });
+
+  it('drops a text selection when the chapter changes, so it never maps into the new one', async () => {
+    const { rerender } = await renderReader();
+    const old = verseText(1);
+    await selectText([old, 0], [old, 3]);
+    expect(textOf(selectionRegion())).toContain('“one”');
+
+    rerender(PSALM_4_ID);
+    await screen.findByRole('heading', { name: 'Psalms 4' });
+    // The verse list is keyed by passage: no node is reused for the new text.
+    expect(old.isConnected).toBe(false);
+    expect(document.getSelection()?.rangeCount).toBe(0);
+    act(() => {
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    await nextFrame();
+    expect(textOf(selectionRegion().querySelector('p'))).toBe('Nothing selected.');
   });
 });
 
@@ -321,35 +478,5 @@ describe('AnchorQuote', () => {
     );
     expectQuote(screen.getByRole('figure'), '“two”', 'Psalms 3:1 (World English Bible)');
     expect(screen.queryByRole('button')).toBeNull();
-  });
-
-  it('says an unresolved anchor is unresolved in words, keeps the original quote, and offers Reselect', () => {
-    const onReselect = vi.fn();
-    const { container } = renderWithQuery(
-      <AnchorQuote
-        anchor={anchor}
-        label="Psalms 3:1"
-        editionName="World English Bible"
-        unresolved
-        onReselect={onReselect}
-      />,
-    );
-    expect(textOf(container.querySelector('p'))).toBe(
-      'Unresolved selection. It no longer matches the text of World English Bible, so it is not shown on the passage. Original quote:',
-    );
-    expectQuote(screen.getByRole('figure'), '“two”', 'Psalms 3:1 (World English Bible)');
-    fireEvent.click(screen.getByRole('button', { name: 'Reselect' }));
-    expect(onReselect).toHaveBeenCalledTimes(1);
-  });
-
-  it('names no edition or reference it no longer has', () => {
-    const { container } = renderWithQuery(
-      <AnchorQuote anchor={anchor} label={null} editionName={null} unresolved />,
-    );
-    expect(textOf(container.querySelector('p'))).toBe(
-      'Unresolved selection. It no longer matches the text of its original translation, so it is not shown on the passage. Original quote:',
-    );
-    expectQuote(screen.getByRole('figure'), '“two”', null);
-    expect(screen.queryByRole('button', { name: 'Reselect' })).toBeNull();
   });
 });

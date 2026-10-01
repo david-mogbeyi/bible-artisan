@@ -5,9 +5,13 @@ import { chapter, OTHER_TRANSLATION, TRANSLATION } from '@/test/bible-fixtures';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { BibleReader } from './bible-reader';
 import {
+  boundariesOf,
   codePointOffset,
   phraseFromRange,
   phraseFromWords,
+  sameAnchorSelection,
+  sameBoundaries,
+  spanOfRanges,
   versesSelection,
   wordsOf,
 } from './selection';
@@ -215,6 +219,58 @@ describe('phraseFromRange over the reader markup', () => {
       phrase([seg(4, 5, 9)], 'five'),
     );
     selection.removeAllRanges();
+  });
+});
+
+describe('several ranges (Firefox splits a selection around user-select: none nodes)', () => {
+  it('maps from the earliest start to the latest end, in any order', async () => {
+    const list = await renderPassage();
+    const t1 = textNode(list, 1);
+    const t2 = textNode(list, 2);
+    const t4 = textNode(list, 4);
+    // Three pieces that skip verse 2's and verse 4's checkbox and number (and verse 3's note).
+    const a = range([t1, 4], [t1, t1.length]);
+    const b = range([t2, 0], [t2, t2.length]);
+    const c = range([t4, 0], [t4, 4]);
+    const expected = phrase(
+      [seg(1, 4, 13), seg(2, 0, 16), seg(3, 0, 0), seg(4, 0, 4)],
+      `${V1.slice(4)} ${V2} four`,
+    );
+    for (const order of [
+      [a, b, c],
+      [c, a, b],
+      [b, c, a],
+    ]) {
+      const span = spanOfRanges(order);
+      if (!span) throw new Error('no span');
+      expect(phraseFromRange(span, list, PASSAGE)).toStrictEqual(expected);
+    }
+    // The pieces themselves are untouched.
+    expect([a.startOffset, c.endOffset]).toStrictEqual([4, 4]);
+    expect(spanOfRanges([])).toBeNull();
+    expect(phraseFromRange(spanOfRanges([c]) as Range, list, PASSAGE)).toStrictEqual(
+      phrase([seg(4, 0, 4)], 'four'),
+    );
+  });
+
+  it('compares boundary points by node identity and offset', async () => {
+    const list = await renderPassage();
+    const t1 = textNode(list, 1);
+    const one = boundariesOf([range([t1, 0], [t1, 3])]);
+    expect(sameBoundaries(one, boundariesOf([range([t1, 0], [t1, 3])]))).toBe(true);
+    expect(sameBoundaries(one, boundariesOf([range([t1, 0], [t1, 4])]))).toBe(false);
+    expect(sameBoundaries(one, boundariesOf([]))).toBe(false);
+  });
+});
+
+describe('sameAnchorSelection', () => {
+  it('compares every field without serializing', () => {
+    const a = phrase([seg(1, 0, 3)], 'one') as Parameters<typeof sameAnchorSelection>[0];
+    expect(sameAnchorSelection(a, { ...a, segments: [seg(1, 0, 3)] })).toBe(true);
+    expect(sameAnchorSelection(a, { ...a, segments: [seg(1, 0, 4)] })).toBe(false);
+    expect(sameAnchorSelection(a, { ...a, kind: 'verses' })).toBe(false);
+    expect(sameAnchorSelection(a, { ...a, quote: 'one!' })).toBe(false);
+    expect(sameAnchorSelection(a, { ...a, segments: [seg(1, 0, 3), seg(2, 0, 1)] })).toBe(false);
   });
 });
 

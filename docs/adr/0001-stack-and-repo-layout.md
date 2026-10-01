@@ -407,16 +407,22 @@ The command is a separate step, not a migration: migrations only get `context.qu
 - **Capture** answers 422 with the code, or 404 for an unknown or inactive edition. **Resolve** always answers 200: `resolved` with the anchor unchanged, or `unresolved` with the first failing `reason`, the anchor exactly as sent (so the original quote survives), and the verses' reference when they still exist (for Reselect), else null. One primary-key range scan reads the anchor's verses.
 - **Limits.** At most 200 segments (the reference cap), so a longer anchor is a 400, not a separate 422. Offsets are capped at 2,000; the longest verse is 491 code points. The quote is capped at 40,000 characters; the longest run of 200 consecutive verses in the corpus is 35,606 characters (36,196 UTF-8 bytes), measured with a window query over `bible_verse`. Every real anchor therefore fits the API's 100 kB JSON limit, and anything larger is 413.
 - **Browser mapping** (`apps/web/src/components/bible/selection.ts`). Each verse's text is rendered alone in a `data-verse-text` element. Checkboxes, verse numbers, superscriptions and the "no text" note are outside it and `select-none`.
+  - Firefox splits a selection into several ranges around `user-select: none` nodes; the reader maps one span from the earliest start to the latest end (`spanOfRanges`, compared with `compareBoundaryPoints`).
   - A DOM `Range` is measured per intersecting verse element, from its start to the boundary point, with `Range.toString()`, so nested marks do not matter.
   - The UTF-16 length is converted to code points. An offset inside a surrogate pair rounds outward.
   - Spaces and U+00A0 at either end are trimmed by moving offsets.
   - An element whose text is not exactly the stored verse makes the mapping return null, never a guess.
+  - Mapping runs at most once per animation frame, never during a pointer drag (once on release), and only when the selection's boundary points changed. Keyboard selection (shift+arrows) has no pointer and maps on the next frame.
+  - A text selection inside the verse list that holds no verse text (a superscription, a "no text" note) clears the reader's selection. A collapsed selection, or one outside the list, leaves it alone.
 - **Keyboard equivalent (WCAG 2.1.1).** A "Select verse N" checkbox per verse (PRD section 14's checkbox affordance), and a "Select a phrase" form with From verse / First word / To verse / Last word selects.
   - Words are U+0020-separated runs, listed verbatim.
   - Focus moves into the form when it opens, to Capture after Select, and back to the toggle on Cancel or Escape.
   - The keyboard path selects whole words; partial words are pointer-only.
-- **Selection state** is component state keyed to edition + book + chapter, so a chapter or translation change clears it (PRD section 14). It is never in the URL or browser storage. The Selection region shows what is selected, Capture and Clear, and the captured anchor as returned by the server. Status is announced through the reader's persistent live region.
+- **Selection state** is component state keyed to edition + book + chapter, so a chapter or translation change clears it (PRD section 14). The verse list is keyed by passage too (no DOM node is reused for new text), and a native text selection in the reader is dropped when the passage changes. It is never in the URL or browser storage. The Selection region shows what is selected, Capture and Clear, and the captured anchor as returned by the server.
+  - Capture and Clear use `aria-disabled` with guarded handlers, never native `disabled`, so focus stays on them while a capture is pending and after Clear.
+  - The selection summary, the "not next to each other" message, "Selection cleared.", and capture progress are announced through the reader's one persistent live region (references only, never the quote).
 - **Privacy.** Quotes, offsets and references travel only in POST bodies. `log-redaction.int-spec.ts` covers both routes on 200, 422 and unresolved.
+- **Client scope.** The web app calls only capture. `POST /bible/anchors/resolve` ships here as API (with its tests); the client call and the unresolved quote UI (original quote, said in words, with Reselect) ship with BIB-24, which stores anchors.
 - **Not in BIB-18:** saving highlights or notes (BIB-24), Scripture nodes from a selection (BIB-25/26), selection activity events (BIB-55), rendering saved highlights in the reader, and phone tabs (BIB-38).
 
 ## Notes

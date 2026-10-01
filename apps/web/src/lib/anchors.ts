@@ -2,9 +2,6 @@ import {
   type AnchorSelection,
   type CaptureAnchorResponse,
   captureAnchorResponseSchema,
-  type ResolveAnchorResponse,
-  resolveAnchorResponseSchema,
-  type ScriptureAnchor,
 } from '@bible-artisan/contracts';
 import { apiFetch } from './api-client';
 
@@ -18,13 +15,5 @@ export function captureAnchor(selection: AnchorSelection): Promise<CaptureAnchor
   return apiFetch('/bible/anchors', captureAnchorResponseSchema, {
     method: 'POST',
     body: JSON.stringify(selection),
-  });
-}
-
-/** Re-checks a stored anchor: resolved, or unresolved with a reason (never repaired). */
-export function resolveAnchor(anchor: ScriptureAnchor): Promise<ResolveAnchorResponse> {
-  return apiFetch('/bible/anchors/resolve', resolveAnchorResponseSchema, {
-    method: 'POST',
-    body: JSON.stringify({ anchor }),
   });
 }
