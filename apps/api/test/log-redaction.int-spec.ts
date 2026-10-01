@@ -11,6 +11,7 @@ import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
 import { BibleBook } from '../src/database/models/bible-book.model';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
+import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { Study } from '../src/database/models/study.model';
@@ -567,6 +568,67 @@ describe('content-redacted operational logs', () => {
         }),
       },
     );
+  });
+
+  it('logs Bible anchors without the quote, reference, offsets or checksums', async () => {
+    const edition = await BibleEdition.findOne({ where: { code: 'engwebp' }, rejectOnEmpty: true });
+    const verse = await BibleVerse.findOne({
+      where: { editionId: edition.id, bookCode: 'ROM', chapter: 9, verse: 1 },
+      rejectOnEmpty: true,
+    });
+    const quote = track(Array.from(verse.text).slice(0, 30).join(''));
+    track(verse.textSha256);
+    const captureRoute = { method: 'POST', route: '/v1/bible/anchors' };
+    const resolveRoute = { method: 'POST', route: '/v1/bible/anchors/resolve' };
+    const selection = {
+      editionId: edition.id,
+      bookCode: 'ROM',
+      kind: 'phrase',
+      segments: [{ chapter: 9, verse: 1, start: 0, end: 30 }],
+      quote,
+    };
+
+    const captured = await withPrivateChannels(http().post('/v1/bible/anchors'), cookie).send(
+      selection,
+    );
+    const { anchor, reference } = captured.body as {
+      anchor: Record<string, unknown>;
+      reference: { id: string; label: string };
+    };
+    track(reference.id);
+    track(reference.label);
+    await expectLogged(captured, { ...captureRoute, status: 200 });
+
+    const mismatch = await withPrivateChannels(http().post('/v1/bible/anchors'), cookie).send({
+      ...selection,
+      quote: secret('anchor-quote'),
+    });
+    await expectLogged(
+      mismatch,
+      { ...captureRoute, status: 422 },
+      {
+        errorType: 'AnchorInvalidError',
+        body: envelope({
+          code: 'ANCHOR_QUOTE_MISMATCH',
+          message: 'The selected text does not match this translation',
+        }),
+      },
+    );
+
+    const resolved = await withPrivateChannels(
+      http().post('/v1/bible/anchors/resolve'),
+      cookie,
+    ).send({ anchor });
+    expect((resolved.body as { outcome: string }).outcome).toBe('resolved');
+    await expectLogged(resolved, { ...resolveRoute, status: 200 });
+
+    // An unresolved anchor comes back as sent (its quote is the client's own), but is never logged.
+    const unresolved = await withPrivateChannels(
+      http().post('/v1/bible/anchors/resolve'),
+      cookie,
+    ).send({ anchor: { ...anchor, quote: track(`changed-quote-${randomUUID()}`) } });
+    expect((unresolved.body as { reason: string }).reason).toBe('ANCHOR_QUOTE_MISMATCH');
+    await expectLogged(unresolved, { ...resolveRoute, status: 200 });
   });
 
   it('logs a cross-site mutation refused before routing (403)', async () => {

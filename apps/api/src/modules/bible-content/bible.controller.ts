@@ -1,16 +1,21 @@
 import { Body, Controller, Get, Header, HttpCode, Post, Query } from '@nestjs/common';
 import {
+  anchorSelectionSchema,
   biblePassageQuerySchema,
   type BiblePassageResponse,
   bibleReferenceRequestSchema,
   type BibleReferenceResponse,
   type BibleTranslationsResponse,
+  type CaptureAnchorResponse,
+  resolveAnchorRequestSchema,
+  type ResolveAnchorResponse,
   resolveReferenceRequestSchema,
   type ResolveReferenceResponse,
   searchBibleQuerySchema,
   type SearchBibleResponse,
 } from '@bible-artisan/contracts';
 import { parseBody } from '../../common/validation/parse-body';
+import { AnchorService } from './anchor/anchor.service';
 import { PassageService } from './passage/passage.service';
 import { ReferenceService } from './reference/reference.service';
 import { SearchService } from './search/search.service';
@@ -25,6 +30,7 @@ export class BibleController {
     private readonly references: ReferenceService,
     private readonly searchService: SearchService,
     private readonly passages: PassageService,
+    private readonly anchors: AnchorService,
   ) {}
 
   /** Active editions with attribution and books, for the reader's selectors (BIB-17). */
@@ -67,6 +73,26 @@ export class BibleController {
     return {
       reference: await this.references.chapterReference(editionId, bookCode, chapter, verse),
     };
+  }
+
+  /**
+   * Build a durable anchor from a reader selection (BIB-18, FR-BIBLE-006): checked against the
+   * stored text, never adjusted (422 `ANCHOR_*`). The selection and quote travel only in the body,
+   * which is never logged. Read + idempotent shared reference upsert, so 200.
+   */
+  @Post('anchors')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async captureAnchor(@Body() body: unknown): Promise<CaptureAnchorResponse> {
+    return this.anchors.capture(parseBody(anchorSelectionSchema, body));
+  }
+
+  /** Re-check a stored anchor (BIB-18): resolved, or unresolved with a reason; never repaired. */
+  @Post('anchors/resolve')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async resolveAnchor(@Body() body: unknown): Promise<ResolveAnchorResponse> {
+    return this.anchors.resolve(parseBody(resolveAnchorRequestSchema, body).anchor);
   }
 
   /**
