@@ -6,6 +6,7 @@ import { ConnectionRefusedError } from 'sequelize';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AppModule } from '../src/app.module';
+import { Public } from '../src/modules/identity/public.decorator';
 import { configureApp } from '../src/bootstrap';
 import { ENV } from '../src/config/config.module';
 import type { Env } from '../src/config/env';
@@ -21,6 +22,7 @@ import {
  * ticket's Testing requirements (no real mutation route exists yet to exercise this through).
  * Exercises the real global filter registered by `configureApp`, not a hand-called function.
  */
+@Public()
 @Controller('__test-errors')
 class TestErrorsController {
   @Get('not-found')

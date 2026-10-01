@@ -6,7 +6,14 @@ import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
 import { createMigrator, MIGRATIONS_DIR } from '../src/database/migrator';
 
-const DOMAIN_TABLES = ['study', 'study_event', 'study_node', 'user'];
+const DOMAIN_TABLES = [
+  'auth_challenge',
+  'auth_session',
+  'study',
+  'study_event',
+  'study_node',
+  'user',
+];
 
 async function publicTables(db: Database, names: string[]): Promise<string[]> {
   const rows = await db.query<{ tablename: string }>(

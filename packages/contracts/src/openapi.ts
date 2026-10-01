@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import {
+  meResponseSchema,
+  otpStartRequestSchema,
+  otpStartResponseSchema,
+  otpVerifyRequestSchema,
+} from './auth';
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema } from './health';
 
@@ -10,7 +16,10 @@ export interface OpenApiDocument {
   info: { title: string; version: string };
   servers: { url: string }[];
   paths: Record<string, Record<string, unknown>>;
-  components: { schemas: Record<string, SchemaObject> };
+  components: {
+    securitySchemes: Record<string, SchemaObject>;
+    schemas: Record<string, SchemaObject>;
+  };
 }
 
 /**
@@ -33,6 +42,19 @@ const errorResponse = {
   description: 'Error (shared error envelope, PRD section 24)',
   content: { 'application/json': { schema: ref('ErrorEnvelope') } },
 };
+
+const jsonBody = (name: string): Record<string, unknown> => ({
+  required: true,
+  content: { 'application/json': { schema: ref(name) } },
+});
+
+const jsonResponse = (description: string, name: string): Record<string, unknown> => ({
+  description,
+  content: { 'application/json': { schema: ref(name) } },
+});
+
+/** Routes that require the session cookie declare it; every other route is public. */
+const sessionCookie = [{ sessionCookie: [] }];
 
 function buildDocument(): OpenApiDocument {
   return {
@@ -64,11 +86,59 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/auth/otp/start': {
+        post: {
+          description:
+            'Sends a 10-minute email sign-in code. Resend for the same email is allowed after 60 s (429 with Retry-After before that).',
+          requestBody: jsonBody('OtpStartRequest'),
+          responses: {
+            202: jsonResponse('Code sent', 'OtpStartResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/auth/otp/verify': {
+        post: {
+          description:
+            'Verifies a sign-in code (max 5 attempts, single use), creates or resumes the account, and sets the session cookie.',
+          requestBody: jsonBody('OtpVerifyRequest'),
+          responses: {
+            200: jsonResponse('Signed in; Set-Cookie carries the session', 'MeResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/auth/logout': {
+        post: {
+          description: 'Revokes the presented session, if any, and clears the session cookie.',
+          responses: {
+            204: { description: 'Signed out' },
+            default: errorResponse,
+          },
+        },
+      },
+      '/me': {
+        get: {
+          description: 'Returns the signed-in user.',
+          security: sessionCookie,
+          responses: {
+            200: jsonResponse('Current user', 'MeResponse'),
+            default: errorResponse,
+          },
+        },
+      },
     },
     components: {
+      securitySchemes: {
+        sessionCookie: { type: 'apiKey', in: 'cookie', name: 'ba_session' },
+      },
       schemas: {
         HealthResponse: toSchema(healthResponseSchema),
         ErrorEnvelope: toSchema(errorEnvelopeSchema),
+        OtpStartRequest: toSchema(otpStartRequestSchema),
+        OtpStartResponse: toSchema(otpStartResponseSchema),
+        OtpVerifyRequest: toSchema(otpVerifyRequestSchema),
+        MeResponse: toSchema(meResponseSchema),
       },
     },
   };

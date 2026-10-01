@@ -15,9 +15,13 @@ import {
 } from 'sequelize';
 import { AllExceptionsFilter, resolveCorrelationId } from './all-exceptions.filter';
 import {
+  DependencyUnavailableError,
   NotFoundError,
+  OtpError,
+  RateLimitedError,
   RevisionConflictError,
   RevisionMissingError,
+  UnauthenticatedError,
   ValidationError,
 } from '../errors/domain-errors';
 
@@ -27,11 +31,19 @@ function run(
   exception: unknown,
   headers: Record<string, string | string[]> = {},
 ): { status: number; body: ErrorEnvelope } {
+  return runWithHeaders(exception, headers).result;
+}
+
+function runWithHeaders(
+  exception: unknown,
+  headers: Record<string, string | string[]> = {},
+): { result: { status: number; body: ErrorEnvelope }; setHeaders: [string, string][] } {
   const json = vi.fn<(body: ErrorEnvelope) => void>();
   const status = vi.fn<(code: number) => { json: typeof json }>().mockReturnValue({ json });
+  const setHeader = vi.fn<(name: string, value: string) => void>();
   const host = {
     switchToHttp: () => ({
-      getResponse: () => ({ headersSent: false, status, destroy: vi.fn() }),
+      getResponse: () => ({ headersSent: false, status, setHeader, destroy: vi.fn() }),
       getRequest: () => ({ headers }),
     }),
   } as unknown as ArgumentsHost;
@@ -39,7 +51,7 @@ function run(
   const code = status.mock.calls[0]?.[0];
   const body = json.mock.calls[0]?.[0];
   if (code === undefined || body === undefined) throw new Error('filter did not respond');
-  return { status: code, body };
+  return { result: { status: code, body }, setHeaders: setHeader.mock.calls };
 }
 
 /** A driver error as node-postgres raises it (SQLSTATE or socket code on `code`). */
@@ -121,6 +133,48 @@ describe('AllExceptionsFilter', () => {
         currentRevision: 3,
       },
     });
+  });
+
+  it('maps UnauthenticatedError to 401, not retryable', () => {
+    expect(run(new UnauthenticatedError())).toStrictEqual({
+      status: 401,
+      body: {
+        code: 'UNAUTHENTICATED',
+        message: 'Sign in to continue',
+        retryable: false,
+        correlationId: expect.stringMatching(UUID),
+      },
+    });
+  });
+
+  it.each([
+    ['OTP_INVALID', 'The code is not correct'],
+    ['OTP_EXPIRED', 'The code has expired or was already used'],
+    ['OTP_ATTEMPTS_EXHAUSTED', 'Too many attempts for this code'],
+  ] as const)('maps OtpError %s to 422 with a fixed message', (code, message) => {
+    expect(run(new OtpError(code))).toStrictEqual({
+      status: 422,
+      body: { code, message, retryable: false, correlationId: expect.stringMatching(UUID) },
+    });
+  });
+
+  it('maps RateLimitedError to 429, retryable, with a Retry-After header', () => {
+    expect(runWithHeaders(new RateLimitedError(42))).toStrictEqual({
+      result: {
+        status: 429,
+        body: {
+          code: 'RATE_LIMITED',
+          message: 'Too many requests. Try again later',
+          retryable: true,
+          correlationId: expect.stringMatching(UUID),
+        },
+      },
+      setHeaders: [['Retry-After', '42']],
+    });
+  });
+
+  it('maps DependencyUnavailableError (e.g. the OTP provider) to 503, retryable', () => {
+    expect(run(new DependencyUnavailableError())).toStrictEqual(DEPENDENCY_UNAVAILABLE);
   });
 
   it.each([

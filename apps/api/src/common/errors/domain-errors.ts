@@ -47,3 +47,55 @@ export class RevisionConflictError extends Error {
     this.name = 'RevisionConflictError';
   }
 }
+
+/** No valid session on a route that requires one (PRD §24: 401). */
+export class UnauthenticatedError extends Error {
+  readonly code = 'UNAUTHENTICATED';
+  constructor(message = 'Sign in to continue') {
+    super(message);
+    this.name = 'UnauthenticatedError';
+  }
+}
+
+export type OtpErrorCode = 'OTP_INVALID' | 'OTP_EXPIRED' | 'OTP_ATTEMPTS_EXHAUSTED';
+
+const OTP_MESSAGES: Record<OtpErrorCode, string> = {
+  OTP_INVALID: 'The code is not correct',
+  OTP_EXPIRED: 'The code has expired or was already used',
+  OTP_ATTEMPTS_EXHAUSTED: 'Too many attempts for this code',
+};
+
+/**
+ * A sign-in code was refused (FR-AUTH-002). Fixed messages only: never the code or the email
+ * (NFR-PRIV-001). Mapped to 422: the challenge is in a state that cannot authenticate.
+ */
+export class OtpError extends Error {
+  constructor(readonly code: OtpErrorCode) {
+    super(OTP_MESSAGES[code]);
+    this.name = 'OtpError';
+  }
+}
+
+/** A rate limit was hit (PRD §24: 429 with Retry-After). */
+export class RateLimitedError extends Error {
+  readonly code = 'RATE_LIMITED';
+  constructor(
+    readonly retryAfterSeconds: number,
+    message = 'Too many requests. Try again later',
+  ) {
+    super(message);
+    this.name = 'RateLimitedError';
+  }
+}
+
+/**
+ * An external dependency (e.g. the email OTP provider) failed or was unreachable (PRD §24: 503).
+ * The message is fixed; provider response bodies are never attached.
+ */
+export class DependencyUnavailableError extends Error {
+  readonly code = 'DEPENDENCY_UNAVAILABLE';
+  constructor(message = 'A required service is temporarily unavailable') {
+    super(message);
+    this.name = 'DependencyUnavailableError';
+  }
+}

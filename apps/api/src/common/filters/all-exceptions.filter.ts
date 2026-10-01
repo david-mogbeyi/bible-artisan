@@ -5,9 +5,13 @@ import { randomUUID } from 'node:crypto';
 import { STATUS_CODES } from 'node:http';
 import { ConnectionError, TimeoutError } from 'sequelize';
 import {
+  DependencyUnavailableError,
   NotFoundError,
+  OtpError,
+  RateLimitedError,
   RevisionConflictError,
   RevisionMissingError,
+  UnauthenticatedError,
   ValidationError,
 } from '../errors/domain-errors';
 
@@ -21,6 +25,7 @@ interface ExpressLikeRequest {
 }
 interface ExpressLikeResponse {
   headersSent: boolean;
+  setHeader(name: string, value: string): void;
   status(code: number): { json(body: unknown): void };
   destroy(): void;
 }
@@ -75,7 +80,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const request = ctx.getRequest<ExpressLikeRequest>();
 
     const correlationId = resolveCorrelationId(request.headers['x-correlation-id']);
-    const { status, envelope } = this.toEnvelope(exception, correlationId);
+    const { status, envelope, retryAfterSeconds } = this.toEnvelope(exception, correlationId);
 
     if (response.headersSent) {
       // Part of a response already went out, so no envelope can follow it. Destroy the response
@@ -91,13 +96,53 @@ export class AllExceptionsFilter implements ExceptionFilter {
       `${envelope.code} status=${status} correlationId=${correlationId} errorType=${errorTypeOf(exception)}`,
     );
 
+    if (retryAfterSeconds !== undefined) {
+      response.setHeader('Retry-After', String(retryAfterSeconds));
+    }
     response.status(status).json(envelope);
   }
 
   private toEnvelope(
     exception: unknown,
     correlationId: string,
-  ): { status: number; envelope: ErrorEnvelope } {
+  ): { status: number; envelope: ErrorEnvelope; retryAfterSeconds?: number } {
+    if (exception instanceof UnauthenticatedError) {
+      return {
+        status: HttpStatus.UNAUTHORIZED,
+        envelope: {
+          code: exception.code,
+          message: exception.message,
+          retryable: false,
+          correlationId,
+        },
+      };
+    }
+
+    if (exception instanceof OtpError) {
+      return {
+        status: HttpStatus.UNPROCESSABLE_ENTITY,
+        envelope: {
+          code: exception.code,
+          message: exception.message,
+          retryable: false,
+          correlationId,
+        },
+      };
+    }
+
+    if (exception instanceof RateLimitedError) {
+      return {
+        status: HttpStatus.TOO_MANY_REQUESTS,
+        envelope: {
+          code: exception.code,
+          message: exception.message,
+          retryable: true,
+          correlationId,
+        },
+        retryAfterSeconds: exception.retryAfterSeconds,
+      };
+    }
+
     if (exception instanceof RevisionMissingError) {
       return {
         status: HttpStatus.PRECONDITION_REQUIRED,
@@ -214,6 +259,7 @@ function exposedHttpStatusOf(exception: unknown): number | undefined {
  * or a driver error whose code says the connection was lost or the server is shutting down.
  */
 function isDependencyUnavailable(exception: unknown): boolean {
+  if (exception instanceof DependencyUnavailableError) return true;
   if (exception instanceof ConnectionError || exception instanceof TimeoutError) return true;
   if (!(exception instanceof Error)) return false;
   const withCodes = exception as Error & {

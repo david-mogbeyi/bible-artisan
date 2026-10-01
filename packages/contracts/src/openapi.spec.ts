@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildOpenApiDocument } from './openapi';
 
+const ref = (name: string): { $ref: string } => ({ $ref: `#/components/schemas/${name}` });
+
 describe('buildOpenApiDocument', () => {
   it('documents every path with its success response and the ErrorEnvelope as default', () => {
     const errorResponse = {
@@ -38,7 +40,63 @@ describe('buildOpenApiDocument', () => {
             },
           },
         },
+        '/auth/otp/start': {
+          post: {
+            description:
+              'Sends a 10-minute email sign-in code. Resend for the same email is allowed after 60 s (429 with Retry-After before that).',
+            requestBody: {
+              required: true,
+              content: { 'application/json': { schema: ref('OtpStartRequest') } },
+            },
+            responses: {
+              202: {
+                description: 'Code sent',
+                content: { 'application/json': { schema: ref('OtpStartResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
+        '/auth/otp/verify': {
+          post: {
+            description:
+              'Verifies a sign-in code (max 5 attempts, single use), creates or resumes the account, and sets the session cookie.',
+            requestBody: {
+              required: true,
+              content: { 'application/json': { schema: ref('OtpVerifyRequest') } },
+            },
+            responses: {
+              200: {
+                description: 'Signed in; Set-Cookie carries the session',
+                content: { 'application/json': { schema: ref('MeResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
+        '/auth/logout': {
+          post: {
+            description: 'Revokes the presented session, if any, and clears the session cookie.',
+            responses: { 204: { description: 'Signed out' }, default: errorResponse },
+          },
+        },
+        '/me': {
+          get: {
+            description: 'Returns the signed-in user.',
+            security: [{ sessionCookie: [] }],
+            responses: {
+              200: {
+                description: 'Current user',
+                content: { 'application/json': { schema: ref('MeResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
       },
+    });
+    expect(doc.components.securitySchemes).toStrictEqual({
+      sessionCookie: { type: 'apiKey', in: 'cookie', name: 'ba_session' },
     });
   });
 
@@ -49,8 +107,8 @@ describe('buildOpenApiDocument', () => {
   });
 
   it('generates the error envelope and health schemas', () => {
-    const doc = buildOpenApiDocument();
-    expect(doc.components.schemas).toStrictEqual({
+    const { HealthResponse, ErrorEnvelope } = buildOpenApiDocument().components.schemas;
+    expect({ HealthResponse, ErrorEnvelope }).toStrictEqual({
       HealthResponse: {
         type: 'object',
         properties: {
@@ -95,6 +153,10 @@ describe('buildOpenApiDocument', () => {
     expect(Object.keys(openapi.buildOpenApiDocument().components.schemas)).toStrictEqual([
       'HealthResponse',
       'ErrorEnvelope',
+      'OtpStartRequest',
+      'OtpStartResponse',
+      'OtpVerifyRequest',
+      'MeResponse',
     ]);
   });
 });

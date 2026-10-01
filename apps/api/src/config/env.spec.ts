@@ -15,3 +15,63 @@ describe('loadEnv', () => {
     expect(() => loadEnv({})).toThrow(/DATABASE_URL/);
   });
 });
+
+describe('loadEnv: email OTP and session settings', () => {
+  const base = { DATABASE_URL: 'postgres://localhost/x' };
+
+  it('defaults to the dev OTP provider and Secure cookies', () => {
+    const env = loadEnv(base);
+    expect(env.OTP_PROVIDER).toBe('dev');
+    expect(env.SESSION_COOKIE_SECURE).toBe(true);
+    expect(env.STYTCH_API_URL).toBe('https://test.stytch.com');
+  });
+
+  it('refuses the dev OTP provider in production', () => {
+    expect(() => loadEnv({ ...base, NODE_ENV: 'production', OTP_PROVIDER: 'dev' })).toThrow(
+      /OTP_PROVIDER: the dev OTP provider cannot run in production/,
+    );
+  });
+
+  it('requires Stytch credentials when OTP_PROVIDER=stytch, without echoing values', () => {
+    let message = '';
+    try {
+      loadEnv({ ...base, OTP_PROVIDER: 'stytch', STYTCH_PROJECT_ID: 'project-live-123' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/STYTCH_PROJECT_ID and STYTCH_SECRET are required/);
+    expect(message).not.toContain('project-live-123');
+  });
+
+  it('accepts a complete Stytch production configuration', () => {
+    const env = loadEnv({
+      ...base,
+      NODE_ENV: 'production',
+      OTP_PROVIDER: 'stytch',
+      STYTCH_API_URL: 'https://api.stytch.com',
+      STYTCH_PROJECT_ID: 'project-live-123',
+      STYTCH_SECRET: 'secret-live-123',
+    });
+    expect(env.OTP_PROVIDER).toBe('stytch');
+  });
+
+  it('allows non-Secure cookies only outside production', () => {
+    expect(loadEnv({ ...base, SESSION_COOKIE_SECURE: 'false' }).SESSION_COOKIE_SECURE).toBe(false);
+    expect(() =>
+      loadEnv({
+        ...base,
+        NODE_ENV: 'production',
+        OTP_PROVIDER: 'stytch',
+        STYTCH_PROJECT_ID: 'p',
+        STYTCH_SECRET: 's',
+        SESSION_COOKIE_SECURE: 'false',
+      }),
+    ).toThrow(/session cookies must be Secure in production/);
+  });
+
+  it('rejects a non-boolean SESSION_COOKIE_SECURE', () => {
+    expect(() => loadEnv({ ...base, SESSION_COOKIE_SECURE: 'yes' })).toThrow(
+      /SESSION_COOKIE_SECURE/,
+    );
+  });
+});

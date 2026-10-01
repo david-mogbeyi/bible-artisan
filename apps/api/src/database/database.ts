@@ -1,4 +1,6 @@
 import { Sequelize } from 'sequelize-typescript';
+import { AuthChallenge } from './models/auth-challenge.model';
+import { AuthSession } from './models/auth-session.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
 import { Study } from './models/study.model';
@@ -13,7 +15,7 @@ export type Database = Sequelize;
  */
 export function createDatabase(connectionString: string): Database {
   return new Sequelize(connectionString, {
-    models: [User, Study, StudyNode, StudyEvent],
+    models: [User, Study, StudyNode, StudyEvent, AuthChallenge, AuthSession],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous
     // pg Pool setting. A request that can't get a connection within 10 s fails fast with
