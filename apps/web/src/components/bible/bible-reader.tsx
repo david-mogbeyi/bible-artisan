@@ -1,16 +1,26 @@
 'use client';
 
 import type {
+  AnchorSelection,
   BibleChapterLink,
   BibleEditionAttribution,
   BiblePassageResponse,
   BibleTranslation,
 } from '@bible-artisan/contracts';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/lib/api-client';
+import { captureAnchor } from '@/lib/anchors';
 import { type ChapterTarget, fetchPassage, passageQueryKey } from '@/lib/bible';
 import { ProblemAlert } from './problem-alert';
+import {
+  type CaptureState,
+  PhraseForm,
+  type ReaderSelection,
+  SelectionBar,
+  selectionPayload,
+} from './reader-selection';
+import { phraseFromRange, VERSE_TEXT_ATTRIBUTE } from './selection';
 
 /**
  * A deliberate navigation: once the passage for `referenceId` has loaded, its heading takes
@@ -117,8 +127,93 @@ export function BibleReader({
     if (!active || active === document.body || !active.isConnected) headingRef.current?.focus();
   }, [shownId, focusRequest]);
 
+  // Selection (BIB-18) belongs to the passage it was made on: a chapter or translation change
+  // clears it (PRD section 14). Derived during render from the key, not reset in an effect.
+  const listRef = useRef<HTMLOListElement>(null);
+  const captureButtonRef = useRef<HTMLButtonElement>(null);
+  const phraseToggleRef = useRef<HTMLButtonElement>(null);
+  const [picked, setPicked] = useState<{ key: string; value: ReaderSelection } | null>(null);
+  const [phraseFormOpen, setPhraseFormOpen] = useState<string | null>(null);
+  const passageKey = shown ? passageKeyOf(shown) : null;
+  const selection = picked && picked.key === passageKey ? picked.value : null;
+  const payload = shown && selection ? selectionPayload(shown, selection) : null;
+  const choose = (value: ReaderSelection | null) =>
+    setPicked(value && passageKey ? { key: passageKey, value } : null);
+
+  // Native text selection inside the verse list becomes a phrase. A collapsed selection, or one
+  // outside the verses, leaves the current selection alone (so clicking Capture keeps it).
+  useEffect(() => {
+    if (!shown) return;
+    const key = passageKeyOf(shown);
+    const onSelectionChange = () => {
+      const list = listRef.current;
+      const native = document.getSelection();
+      if (!list || !native || native.rangeCount === 0 || native.isCollapsed) return;
+      const range = native.getRangeAt(0);
+      if (!range.intersectsNode(list)) return;
+      const phrase = phraseFromRange(range, list, shown);
+      if (!phrase) return;
+      // Dragging fires this on every move: keep the same state while the mapped phrase is unchanged.
+      const next = JSON.stringify(phrase);
+      setPicked((prev) =>
+        prev?.key === key &&
+        prev.value.kind === 'phrase' &&
+        JSON.stringify(prev.value.selection) === next
+          ? prev
+          : { key, value: { kind: 'phrase', selection: phrase } },
+      );
+    };
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => document.removeEventListener('selectionchange', onSelectionChange);
+  }, [shown]);
+
+  const capture = useMutation({ mutationFn: captureAnchor });
+  // The capture shown is the one for exactly this selection; any other selection starts idle.
+  const payloadKey = payload && payload !== 'not_contiguous' ? JSON.stringify(payload) : null;
+  const captureIsCurrent =
+    payloadKey !== null &&
+    capture.variables !== undefined &&
+    JSON.stringify(capture.variables) === payloadKey;
+  const captureState: CaptureState = !captureIsCurrent
+    ? { status: 'idle' }
+    : capture.isPending
+      ? { status: 'pending' }
+      : capture.isError
+        ? { status: 'error', error: capture.error }
+        : capture.data
+          ? { status: 'captured', result: capture.data }
+          : { status: 'idle' };
+  const startCapture = () => {
+    if (payload && payload !== 'not_contiguous') capture.mutate(payload);
+  };
+
+  const toggleVerse = (verse: number) => {
+    const ticked = selection?.kind === 'verses' ? selection.verses : [];
+    const next = ticked.includes(verse) ? ticked.filter((v) => v !== verse) : [...ticked, verse];
+    choose(next.length > 0 ? { kind: 'verses', verses: next } : null);
+  };
+  const tickedVerses = selection?.kind === 'verses' ? selection.verses : [];
+  const showPhraseForm = shown !== null && phraseFormOpen === passageKey;
+  const closePhraseForm = () => {
+    setPhraseFormOpen(null);
+    phraseToggleRef.current?.focus();
+  };
+  const selectPhrase = (phrase: AnchorSelection) => {
+    choose({ kind: 'phrase', selection: phrase });
+    setPhraseFormOpen(null);
+    // The Selection bar renders with this state; move to its first action once it exists.
+    requestAnimationFrame(() => captureButtonRef.current?.focus());
+  };
+
   const target = shown ? targetVerses(shown) : null;
   const loading = referenceId !== null && passage.isFetching && !current;
+  const status = loading
+    ? 'Loading the passage…'
+    : captureState.status === 'pending'
+      ? 'Capturing the selection…'
+      : captureState.status === 'captured'
+        ? 'Selection captured.'
+        : '';
 
   return (
     <section aria-label="Reader" className="flex flex-col gap-4">
@@ -152,8 +247,8 @@ export function BibleReader({
       </div>
 
       {/* One live region, mounted from the first render; only its text changes. */}
-      <p role="status" aria-live="polite" className={loading ? 'text-muted' : 'sr-only'}>
-        {loading ? 'Loading the passage…' : ''}
+      <p role="status" aria-live="polite" className={status ? 'text-muted' : 'sr-only'}>
+        {status}
       </p>
       {passage.isError && referenceId ? (
         <ProblemAlert
@@ -183,12 +278,54 @@ export function BibleReader({
               </p>
             ) : null}
           </header>
-          <Verses passage={shown} target={target} targetRef={targetRef} />
+          <div className="flex flex-col gap-2">
+            <p className="text-sm text-muted">
+              Select text, tick verses, or choose a phrase word by word.
+            </p>
+            <div>
+              <button
+                type="button"
+                ref={phraseToggleRef}
+                aria-expanded={showPhraseForm}
+                onClick={() => (showPhraseForm ? closePhraseForm() : setPhraseFormOpen(passageKey))}
+                className="rounded border border-accent px-3 py-1 text-accent"
+              >
+                Select a phrase
+              </button>
+            </div>
+            {showPhraseForm ? (
+              <PhraseForm passage={shown} onSelect={selectPhrase} onCancel={closePhraseForm} />
+            ) : null}
+            <SelectionBar
+              passage={shown}
+              payload={payload}
+              capture={captureState}
+              onCapture={startCapture}
+              onClear={() => {
+                choose(null);
+                document.getSelection()?.removeAllRanges();
+              }}
+              captureButtonRef={captureButtonRef}
+            />
+          </div>
+          <Verses
+            passage={shown}
+            target={target}
+            targetRef={targetRef}
+            listRef={listRef}
+            ticked={tickedVerses}
+            onToggle={toggleVerse}
+          />
           <ChapterLinks passage={shown} onGo={(link) => onOpenReference(link.referenceId)} />
         </article>
       ) : null}
     </section>
   );
+}
+
+/** Identifies the passage a selection was made on: edition, book and chapter. */
+function passageKeyOf(passage: BiblePassageResponse): string {
+  return `${passage.edition.id} ${passage.book.code} ${passage.chapter}`;
 }
 
 function chapterTitle(passage: BiblePassageResponse): string {
@@ -217,19 +354,35 @@ function targetVerses(passage: BiblePassageResponse): Target | null {
   return { first, last, label: r.label };
 }
 
+/**
+ * The chapter's verses. Each verse's stored text sits alone in a `data-verse-text` element, the
+ * only thing a text selection is measured against; the checkbox, verse number, headings and the
+ * "no text" note are outside it and cannot be selected into an anchor.
+ */
 function Verses({
   passage,
   target,
   targetRef,
+  listRef,
+  ticked,
+  onToggle,
 }: {
   passage: BiblePassageResponse;
   target: Target | null;
   targetRef: React.RefObject<HTMLLIElement | null>;
+  listRef: React.RefObject<HTMLOListElement | null>;
+  ticked: readonly number[];
+  onToggle: (verse: number) => void;
 }) {
   const headings = new Map(passage.superscriptions.map((s) => [s.beforeVerse, s.text]));
+  const textAttribute = (verse: number) => ({ [VERSE_TEXT_ATTRIBUTE]: verse });
   return (
     // role="list" keeps list semantics in Safari, which drops them for unstyled lists.
-    <ol role="list" className="flex list-none flex-col gap-2 font-serif text-lg leading-relaxed">
+    <ol
+      ref={listRef}
+      role="list"
+      className="flex list-none flex-col gap-2 font-serif text-lg leading-relaxed"
+    >
       {passage.verses.map(({ verse, text }) => {
         const marked = target !== null && verse >= target.first && verse <= target.last;
         const heading = headings.get(verse);
@@ -246,21 +399,29 @@ function Verses({
               </p>
             ) : null}
             <p>
+              <input
+                type="checkbox"
+                aria-label={`Select verse ${verse}`}
+                checked={ticked.includes(verse)}
+                onChange={() => onToggle(verse)}
+                className="mr-2 size-5 select-none align-middle accent-accent"
+              />
               <span
                 className={
-                  marked ? 'mr-2 font-sans text-sm font-bold' : 'mr-2 font-sans text-sm text-muted'
+                  marked
+                    ? 'mr-2 select-none font-sans text-sm font-bold'
+                    : 'mr-2 select-none font-sans text-sm text-muted'
                 }
               >
                 <span className="sr-only">{marked ? 'Marked verse ' : 'Verse '}</span>
                 {verse}
               </span>
+              <span {...textAttribute(verse)}>{text}</span>
               {text === '' ? (
-                <span className="font-sans text-base italic text-muted">
+                <span className="select-none font-sans text-base italic text-muted">
                   No text for this verse in this edition.
                 </span>
-              ) : (
-                text
-              )}
+              ) : null}
             </p>
           </li>
         );
