@@ -36,13 +36,16 @@ interface DueStudy {
  * 1. Lock up to `PURGE_BATCH_SIZE` due studies (`FOR UPDATE SKIP LOCKED`, so two workers never
  *    wait on each other). No mutation can hold one of them: the study lock refuses a study past
  *    its window, so nothing can restore it in between.
- * 2. Take their owners' tag-vocabulary locks (`lockTagVocabularies`, sorted), as every tag
+ * 2. Delete those owners' expired mutation receipts, whose stored responses can still hold the
+ *    study's title, questions and tags (`MutationService.deleteExpiredReceipts`). This comes
+ *    before the vocabulary locks: a request taking over an expired receipt holds that row and
+ *    then wants the vocabulary lock, so waiting on it while holding the vocabulary lock could
+ *    deadlock.
+ * 3. Take their owners' tag-vocabulary locks (`lockTagVocabularies`, sorted), as every tag
  *    writer does, note their tags, then `DELETE FROM study`: BIB-19's cascades remove every
  *    node, event, branch and study_tag row with it.
- * 3. Delete the tags no study uses any more (BIB-20's race-safe orphan cleanup, under those
+ * 4. Delete the tags no study uses any more (BIB-20's race-safe orphan cleanup, under those
  *    locks), so private tag text does not outlive the study.
- * 4. Delete those owners' expired mutation receipts, whose stored responses can still hold the
- *    study's title, questions and tags (`MutationService.deleteExpiredReceipts`).
  *
  * Idempotent and safe to run anywhere at any time; it needs no job lease (BIB-39 owns the job
  * runner). The worker runs it on start and hourly.
@@ -85,6 +88,7 @@ export class StudyTrashPurgeService {
         if (due.length === 0) return 0;
         const ids = due.map((study) => study.id);
         const owners = [...new Set(due.map((study) => study.ownerId))].sort();
+        await this.mutations.deleteExpiredReceipts(owners);
         // Before any of these owners' tag rows is touched (BIB-20's lock order: study rows, then
         // the owner's vocabulary lock, then tag rows), so a concurrent tag change on another of
         // their studies cannot deadlock with the orphan cleanup below.
@@ -104,7 +108,6 @@ export class StudyTrashPurgeService {
           const tagIds = tags.filter((tag) => tag.ownerId === ownerId).map((tag) => tag.tagId);
           if (tagIds.length > 0) await deleteOrphanedTags(ownerId, tagIds);
         }
-        await this.mutations.deleteExpiredReceipts(owners);
         return due.length;
       },
     );
