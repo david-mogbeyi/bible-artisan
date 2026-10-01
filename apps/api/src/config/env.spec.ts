@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadEnv } from './env';
+import { httpAllowedOrigins, loadEnv } from './env';
 
 describe('loadEnv', () => {
   it('splits CORS origins and applies defaults', () => {
@@ -12,9 +12,10 @@ describe('loadEnv', () => {
     expect(env.API_PORT).toBe(4000);
   });
 
-  it('defaults CORS origins to the local web app outside production', () => {
+  it('defaults the HTTP allowlist to the local web app outside production', () => {
     const env = loadEnv({ NODE_ENV: 'development', DATABASE_URL: 'postgres://localhost/x' });
-    expect(env.CORS_ALLOWED_ORIGINS).toEqual(['http://localhost:3000']);
+    expect(env.CORS_ALLOWED_ORIGINS).toBeUndefined();
+    expect(httpAllowedOrigins(env)).toStrictEqual(['http://localhost:3000']);
   });
 
   it.each([
@@ -51,10 +52,31 @@ describe('loadEnv', () => {
       STYTCH_PROJECT_ID: 'p',
       STYTCH_SECRET: 's',
     };
-    expect(() => loadEnv(production)).toThrow(/CORS_ALLOWED_ORIGINS: is required in production/);
+    // The HTTP API refuses to configure itself without an explicit allowlist (fail closed)...
+    expect(() => httpAllowedOrigins(loadEnv(production))).toThrow(
+      /CORS_ALLOWED_ORIGINS: is required in production for the HTTP API/,
+    );
+    expect(
+      httpAllowedOrigins(loadEnv({ ...production, CORS_ALLOWED_ORIGINS: 'https://a.test' })),
+    ).toStrictEqual(['https://a.test']);
+    // ...and an http origin is refused for any process that sets one.
     expect(() =>
       loadEnv({ ...production, CORS_ALLOWED_ORIGINS: 'https://app.example.com,http://x.test' }),
     ).toThrow(/CORS_ALLOWED_ORIGINS: every origin must use https in production/);
+  });
+
+  it('loads the worker config in production without CORS_ALLOWED_ORIGINS (no HTTP surface)', () => {
+    // WorkerModule loads exactly this config (ConfigModule -> loadEnv) and never calls
+    // httpAllowedOrigins, so a production worker must start without the HTTP-only variable.
+    const env = loadEnv({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://localhost/x',
+      OTP_PROVIDER: 'stytch',
+      STYTCH_PROJECT_ID: 'p',
+      STYTCH_SECRET: 's',
+    });
+    expect(env.NODE_ENV).toBe('production');
+    expect(env.CORS_ALLOWED_ORIGINS).toBeUndefined();
   });
 
   it('fails fast without DATABASE_URL', () => {

@@ -5,7 +5,7 @@ import { z } from 'zod';
 /** 'true'/'false' env strings to booleans; anything else is a config error. */
 const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'true');
 
-/** The local web app; the CORS/CSRF allowlist when CORS_ALLOWED_ORIGINS is unset (not in prod). */
+/** The local web app; the HTTP API's CORS/CSRF allowlist when CORS_ALLOWED_ORIGINS is unset outside production. */
 const DEV_WEB_ORIGIN = 'http://localhost:3000';
 
 const envSchema = z
@@ -24,8 +24,9 @@ const envSchema = z
     API_PORT: z.coerce.number().int().positive().default(4000),
     /**
      * Browser origins allowed to call the API with credentials. They also gate every mutation
-     * (CSRF, `requireTrustedOrigin`), so each entry must be an exact bare origin. Unset falls back
-     * to the local web app outside production only (see superRefine).
+     * (CSRF, `requireTrustedOrigin`), so each entry must be an exact bare origin. Only the HTTP
+     * API reads it, through `httpAllowedOrigins` (required there in production, local web app
+     * fallback elsewhere); the worker has no HTTP surface and may leave it unset.
      */
     CORS_ALLOWED_ORIGINS: z
       .string()
@@ -65,26 +66,33 @@ const envSchema = z
         message: 'session cookies must be Secure in production',
       });
     }
-    if (env.NODE_ENV === 'production') {
-      if (env.CORS_ALLOWED_ORIGINS === undefined) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['CORS_ALLOWED_ORIGINS'],
-          message: 'is required in production',
-        });
-      } else if (env.CORS_ALLOWED_ORIGINS.some((origin) => !origin.startsWith('https://'))) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['CORS_ALLOWED_ORIGINS'],
-          message: 'every origin must use https in production',
-        });
-      }
+    if (
+      env.NODE_ENV === 'production' &&
+      env.CORS_ALLOWED_ORIGINS?.some((origin) => !origin.startsWith('https://'))
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CORS_ALLOWED_ORIGINS'],
+        message: 'every origin must use https in production',
+      });
     }
-  })
-  .transform((env) => ({
-    ...env,
-    CORS_ALLOWED_ORIGINS: env.CORS_ALLOWED_ORIGINS ?? [DEV_WEB_ORIGIN],
-  }));
+  });
+
+/**
+ * The HTTP API's CORS + CSRF allowlist. Called by `configureApp` before the server listens, so an
+ * API process in production without CORS_ALLOWED_ORIGINS refuses to start (fail closed) instead of
+ * trusting the local dev origin. Kept out of `loadEnv` because the worker loads the same config
+ * and has no HTTP surface. The error never echoes configured values.
+ */
+export function httpAllowedOrigins(env: Env): string[] {
+  if (env.CORS_ALLOWED_ORIGINS !== undefined) return env.CORS_ALLOWED_ORIGINS;
+  if (env.NODE_ENV === 'production') {
+    throw new Error(
+      'Invalid environment configuration: CORS_ALLOWED_ORIGINS: is required in production for the HTTP API',
+    );
+  }
+  return [DEV_WEB_ORIGIN];
+}
 
 /**
  * Splits a comma-separated origin list. Each entry must be a bare http(s) origin exactly as a

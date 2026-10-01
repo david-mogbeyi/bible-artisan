@@ -1,15 +1,5 @@
 import { ForbiddenException } from '@nestjs/common';
-
-interface RequestLike {
-  method: string;
-  headers: Record<string, string | string[] | undefined>;
-}
-
-/**
- * Methods that must never change state. Everything else (POST, PUT, PATCH, DELETE, and any other
- * method) is checked, so a method nobody thought of fails closed rather than open.
- */
-const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS']);
+import { isStateChangingMethod, type RequestLike } from './http-request';
 
 /**
  * True when a state-changing request comes from a browser context outside the allowlist and must
@@ -28,7 +18,7 @@ export function isUntrustedMutation(
   req: RequestLike,
   allowedOrigins: ReadonlySet<string>,
 ): boolean {
-  if (SAFE_METHODS.has(req.method.toUpperCase())) return false;
+  if (!isStateChangingMethod(req.method)) return false;
   const origin = req.headers.origin;
   if (origin !== undefined) {
     return typeof origin !== 'string' || !allowedOrigins.has(origin);

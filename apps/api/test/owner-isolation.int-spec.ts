@@ -13,22 +13,8 @@ import { User } from '../src/database/models/user.model';
 import { SessionService } from '../src/modules/identity/session.service';
 import { StudyAccessService } from '../src/modules/study/study-access.service';
 import { createTestApp } from './app';
+import { NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
 import { OwnerIsolationProbeModule } from './support/owner-isolation-probe';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-const NOT_FOUND = {
-  code: 'NOT_FOUND',
-  message: 'Resource not found',
-  retryable: false,
-  correlationId: expect.stringMatching(UUID),
-};
-const UNAUTHENTICATED = {
-  code: 'UNAUTHENTICATED',
-  message: 'Sign in to continue',
-  retryable: false,
-  correlationId: expect.stringMatching(UUID),
-};
 
 interface Owner {
   user: User;

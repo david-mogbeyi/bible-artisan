@@ -4,12 +4,13 @@ import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ENV } from '../src/config/config.module';
-import type { Env } from '../src/config/env';
+import { httpAllowedOrigins, type Env } from '../src/config/env';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
 import { User } from '../src/database/models/user.model';
+import { OTP_RESEND_INTERVAL_MS } from '../src/modules/identity/auth.service';
 import { SessionService } from '../src/modules/identity/session.service';
 import { createTestApp } from './app';
 
@@ -46,13 +47,28 @@ describe('cross-site mutation protection', () => {
     return AuthChallenge.count({ where: { normalizedEmail: email } });
   }
 
+  /** The exact 202 body `POST /v1/auth/otp/start` must have returned for `email`'s one challenge. */
+  async function startedBody(email: string): Promise<Record<string, string>> {
+    const [challenge, ...others] = await AuthChallenge.findAll({
+      where: { normalizedEmail: email },
+    });
+    if (!challenge || others.length > 0) throw new Error('expected exactly one challenge');
+    return {
+      challengeId: challenge.id,
+      expiresAt: challenge.expiresAt.toISOString(),
+      resendAvailableAt: new Date(
+        challenge.createdAt.getTime() + OTP_RESEND_INTERVAL_MS,
+      ).toISOString(),
+    };
+  }
+
   async function liveSessionCount(): Promise<number> {
     return AuthSession.count({ where: { userId: user.id, revokedAt: null } });
   }
 
   beforeAll(async () => {
     app = await createTestApp();
-    const [first] = app.get<Env>(ENV).CORS_ALLOWED_ORIGINS;
+    const [first] = httpAllowedOrigins(app.get<Env>(ENV));
     if (!first) throw new Error('test env has no CORS origin');
     allowedOrigin = first;
     user = await User.create({ normalizedEmail: `${randomUUID()}@example.test` });
@@ -109,12 +125,12 @@ describe('cross-site mutation protection', () => {
 
     it('lets the allowed Origin through to normal handling', async () => {
       const email = newEmail();
-      await http()
+      const res = await http()
         .post('/v1/auth/otp/start')
         .set('Origin', allowedOrigin)
         .send({ email })
         .expect(202);
-      expect(await challengeCount(email)).toBe(1);
+      expect(res.body).toStrictEqual(await startedBody(email));
     });
 
     it.each([
@@ -122,8 +138,8 @@ describe('cross-site mutation protection', () => {
       ['Sec-Fetch-Site: same-origin', { 'Sec-Fetch-Site': 'same-origin' }],
     ])('lets %s through', async (_, headers) => {
       const email = newEmail();
-      await http().post('/v1/auth/otp/start').set(headers).send({ email }).expect(202);
-      expect(await challengeCount(email)).toBe(1);
+      const res = await http().post('/v1/auth/otp/start').set(headers).send({ email }).expect(202);
+      expect(res.body).toStrictEqual(await startedBody(email));
     });
   });
 
@@ -142,12 +158,18 @@ describe('cross-site mutation protection', () => {
 
   describe('reads', () => {
     it('does not apply to GET, even from a foreign origin', async () => {
-      await http()
+      const res = await http()
         .get('/v1/me')
         .set('Cookie', cookie)
         .set('Origin', 'https://evil.test')
         .set('Sec-Fetch-Site', 'cross-site')
         .expect(200);
+      expect(res.body).toStrictEqual({
+        id: user.id,
+        email: user.normalizedEmail,
+        displayName: null,
+        timezone: 'UTC',
+      });
     });
   });
 });

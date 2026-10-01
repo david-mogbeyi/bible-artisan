@@ -1,11 +1,10 @@
 import { Injectable, type PipeTransform } from '@nestjs/common';
 import { NotFoundError } from '../errors/domain-errors';
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { isUuid } from './uuid';
 
 /** True when `value` has the shape of a private resource ID (a UUID). */
 export function isResourceId(value: unknown): value is string {
-  return typeof value === 'string' && UUID_PATTERN.test(value);
+  return isUuid(value);
 }
 
 /**

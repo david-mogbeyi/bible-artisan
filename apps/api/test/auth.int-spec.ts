@@ -384,6 +384,18 @@ describe('email OTP sign-in and sessions', () => {
         .set('content-type', 'application/json')
         .expect(204);
     });
+
+    it('refuses a non-JSON body on a non-standard state-changing method with 415', async () => {
+      const token = await signIn(newEmail());
+      const res = await http()
+        .propfind('/v1/auth/logout')
+        .set('Cookie', cookie(token))
+        .set('content-type', 'text/plain')
+        .send('email=victim@example.test')
+        .expect(415);
+      expect(res.body).toStrictEqual(UNSUPPORTED);
+      await http().get('/v1/me').set('Cookie', cookie(token)).expect(200);
+    });
   });
 
   describe('session validity on /v1/me', () => {
