@@ -13,7 +13,8 @@ import {
   DatabaseError,
   TimeoutError,
 } from 'sequelize';
-import { AllExceptionsFilter, resolveCorrelationId } from './all-exceptions.filter';
+import { AllExceptionsFilter } from './all-exceptions.filter';
+import { correlationIdOf, resolveCorrelationId } from '../../modules/observability/correlation';
 import {
   DependencyUnavailableError,
   IdempotencyKeyReusedError,
@@ -76,9 +77,11 @@ const DEPENDENCY_UNAVAILABLE = {
 };
 
 let logSpy: MockInstance<Logger['error']>;
+let warnSpy: MockInstance<Logger['warn']>;
 
 beforeEach(() => {
   logSpy = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
 });
 
 afterEach(() => {
@@ -274,7 +277,14 @@ describe('AllExceptionsFilter', () => {
     expect(destroy).toHaveBeenCalledTimes(1);
     expect(logSpy.mock.calls).toStrictEqual([
       [
-        `INTERNAL_ERROR status=500 correlationId=${correlationId} errorType=TypeError headersSent=true`,
+        'http_error',
+        {
+          code: 'INTERNAL_ERROR',
+          status: 500,
+          correlationId,
+          errorType: 'TypeError',
+          headersSent: true,
+        },
       ],
     ]);
   });
@@ -311,8 +321,45 @@ describe('AllExceptionsFilter', () => {
     const correlationId = '0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60';
     run(new TypeError('Romans 14:23 private note text'), { 'x-correlation-id': correlationId });
     expect(logSpy.mock.calls).toStrictEqual([
-      [`INTERNAL_ERROR status=500 correlationId=${correlationId} errorType=TypeError`],
+      [
+        'http_error',
+        { code: 'INTERNAL_ERROR', status: 500, correlationId, errorType: 'TypeError' },
+      ],
     ]);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('logs a 4xx at warn level with the same allowlisted fields', () => {
+    const correlationId = '0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60';
+    run(new ValidationError('Romans 8:28 is not a valid title', { title: ['Romans 8:28'] }), {
+      'x-correlation-id': correlationId,
+    });
+    expect(warnSpy.mock.calls).toStrictEqual([
+      [
+        'http_error',
+        { code: 'VALIDATION', status: 400, correlationId, errorType: 'ValidationError' },
+      ],
+    ]);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it('reuses the correlation ID already assigned to the request', () => {
+    const request = { headers: { 'x-correlation-id': 'not a uuid' } };
+    const assigned = correlationIdOf(request);
+    const json = vi.fn<(body: ErrorEnvelope) => void>();
+    const host = {
+      switchToHttp: () => ({
+        getResponse: () => ({
+          headersSent: false,
+          status: () => ({ json }),
+          setHeader: vi.fn(),
+          destroy: vi.fn(),
+        }),
+        getRequest: () => request,
+      }),
+    } as unknown as ArgumentsHost;
+    new AllExceptionsFilter().catch(new NotFoundError(), host);
+    expect(json.mock.calls[0]?.[0]?.correlationId).toBe(assigned);
   });
 });
 

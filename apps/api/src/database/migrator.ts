@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { QueryTypes } from 'sequelize';
@@ -5,6 +6,21 @@ import { Umzug, type UmzugStorage } from 'umzug';
 import type { Database } from './database';
 
 export const MIGRATIONS_DIR = path.resolve(__dirname, '../../migrations');
+
+/** Matches the migrator's default glob (`*.{ts,js}`) for a plain directory listing. */
+const MIGRATION_FILE = /\.(ts|js)$/;
+
+/**
+ * The migration names this build ships (file names, as Umzug records them in SequelizeMeta), in
+ * order. The readiness probe compares them with SequelizeMeta without going through Umzug, whose
+ * storage creates the table if it is missing. Throws if the directory is unreadable, so an API
+ * deployed without its migrations fails at startup instead of reporting itself ready.
+ */
+export function shippedMigrationNames(dir: string = MIGRATIONS_DIR): string[] {
+  return readdirSync(dir)
+    .filter((file) => MIGRATION_FILE.test(file))
+    .sort();
+}
 
 /** Same table name/shape umzug's SequelizeStorage uses, so existing databases stay compatible. */
 const META_TABLE = '"SequelizeMeta"';

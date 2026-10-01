@@ -43,7 +43,8 @@ const OWNER_ISOLATION = 'owner-isolation.int-spec.ts';
  *   `toStrictEqual` assertion, in a spec that references this route's path.
  */
 const ROUTES: Record<string, Access> = {
-  'GET /v1/health': { access: 'public', why: 'liveness/diagnostics' },
+  'GET /v1/health': { access: 'public', why: 'readiness probe, check states only' },
+  'GET /v1/health/live': { access: 'public', why: 'liveness probe, no data' },
   'GET /v1/openapi.json': { access: 'public', why: 'API description, no user data' },
   'POST /v1/auth/otp/start': { access: 'public', why: 'starts sign-in' },
   'POST /v1/auth/otp/verify': { access: 'public', why: 'completes sign-in' },

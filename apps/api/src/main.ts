@@ -2,15 +2,17 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { configureApp } from './bootstrap';
-import { ENV } from './config/config.module';
-import type { Env } from './config/env';
+import { loadEnv } from './config/env';
+import { createAppLogger } from './modules/observability/logger';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
-  const env = app.get<Env>(ENV);
+  // Loaded before the app so startup logs already use the content-redacted logger (JSON in
+  // production). Invalid config throws here and the process exits: no probe ever answers.
+  const env = loadEnv();
+  const app = await NestFactory.create(AppModule, { logger: createAppLogger(env) });
   configureApp(app, env);
   await app.listen(env.API_PORT);
-  Logger.log(`API listening on http://localhost:${env.API_PORT}/v1`, 'Bootstrap');
+  Logger.log(`API listening on port ${env.API_PORT}`, 'Bootstrap');
 }
 
 void bootstrap();

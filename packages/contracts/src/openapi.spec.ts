@@ -16,12 +16,35 @@ describe('buildOpenApiDocument', () => {
       paths: {
         '/health': {
           get: {
-            description: 'Reports API and database liveness.',
+            description:
+              'Readiness: the database answers and every shipped migration is applied. Public.',
             responses: {
               200: {
-                description: 'OK',
+                description: 'Ready',
                 content: {
                   'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } },
+                },
+              },
+              503: {
+                description: 'Not ready (database down or migrations pending)',
+                content: {
+                  'application/json': { schema: { $ref: '#/components/schemas/HealthResponse' } },
+                },
+              },
+              default: errorResponse,
+            },
+          },
+        },
+        '/health/live': {
+          get: {
+            description: 'Liveness: the process serves HTTP. Never touches the database. Public.',
+            responses: {
+              200: {
+                description: 'Alive',
+                content: {
+                  'application/json': {
+                    schema: { $ref: '#/components/schemas/LivenessResponse' },
+                  },
                 },
               },
               default: errorResponse,
@@ -107,16 +130,23 @@ describe('buildOpenApiDocument', () => {
   });
 
   it('generates the error envelope and health schemas', () => {
-    const { HealthResponse, ErrorEnvelope } = buildOpenApiDocument().components.schemas;
-    expect({ HealthResponse, ErrorEnvelope }).toStrictEqual({
+    const { HealthResponse, LivenessResponse, ErrorEnvelope } =
+      buildOpenApiDocument().components.schemas;
+    expect({ HealthResponse, LivenessResponse, ErrorEnvelope }).toStrictEqual({
       HealthResponse: {
         type: 'object',
         properties: {
-          status: { type: 'string', enum: ['ok', 'degraded'] },
+          status: { type: 'string', enum: ['ok', 'unavailable'] },
           database: { type: 'string', enum: ['up', 'down'] },
-          version: { type: 'string' },
+          migrations: { type: 'string', enum: ['current', 'pending', 'unknown'] },
         },
-        required: ['status', 'database', 'version'],
+        required: ['status', 'database', 'migrations'],
+        additionalProperties: false,
+      },
+      LivenessResponse: {
+        type: 'object',
+        properties: { status: { type: 'string', enum: ['ok'] } },
+        required: ['status'],
         additionalProperties: false,
       },
       ErrorEnvelope: {
@@ -152,6 +182,7 @@ describe('buildOpenApiDocument', () => {
     const openapi = await import('./openapi.js');
     expect(Object.keys(openapi.buildOpenApiDocument().components.schemas)).toStrictEqual([
       'HealthResponse',
+      'LivenessResponse',
       'ErrorEnvelope',
       'OtpStartRequest',
       'OtpStartResponse',
