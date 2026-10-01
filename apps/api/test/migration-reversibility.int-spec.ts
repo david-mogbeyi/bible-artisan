@@ -4,7 +4,7 @@ import { QueryTypes } from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
-import { createMigrator, MIGRATIONS_DIR } from '../src/database/migrator';
+import { createMigrator, MIGRATIONS_DIR, shippedMigrationNames } from '../src/database/migrator';
 import {
   importCorpus,
   readCorpusArtifact,
@@ -22,6 +22,7 @@ const DOMAIN_TABLES = [
   'bible_superscription',
   'bible_verse',
   'mutation_receipt',
+  'scripture_reference',
   'study',
   'study_event',
   'study_node',
@@ -68,8 +69,61 @@ describe('migration reversibility', () => {
   });
 
   it('refuses to drop an active Bible corpus without the explicit opt-in, changing nothing', async () => {
+    // A shared reference id exists (rows are never deleted, so a real database keeps them).
+    await db.query(
+      `INSERT INTO scripture_reference
+         (edition_id, book_code, start_chapter, start_verse, end_chapter, end_verse)
+       SELECT v.edition_id, v.book_code, v.chapter, v.verse, v.chapter, v.verse
+         FROM bible_verse v
+         JOIN bible_edition e ON e.id = v.edition_id AND e.activated_at IS NOT NULL
+        ORDER BY v.book_code, v.chapter, v.verse
+        LIMIT 1
+       ON CONFLICT DO NOTHING`,
+    );
+    const references = async (): Promise<string[]> =>
+      (
+        await db.query<{ id: string }>(`SELECT id FROM scripture_reference ORDER BY id`, {
+          type: QueryTypes.SELECT,
+        })
+      ).map((row) => row.id);
+    const referencesBefore = await references();
+    expect(referencesBefore.length).toBeGreaterThan(0);
     const before = await recordedMigrations(db);
     const migrator = createMigrator(db);
+
+    // Every migration's `down` commits on its own, so the first one past the corpus (the shared
+    // reference ids) must refuse too, or this would leave a half-reverted database.
+    const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as { cause?: unknown }).cause).toMatchObject({
+      message:
+        'scripture_reference drop refused: shared reference ids exist (set ALLOW_CORPUS_DROP=1)',
+      parent: expect.objectContaining({ code: '23000' }),
+    });
+    expect(await recordedMigrations(db)).toStrictEqual(before);
+    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
+    expect(await references()).toStrictEqual(referencesBefore);
+    const [active] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM bible_edition WHERE activated_at IS NOT NULL`,
+      { type: QueryTypes.SELECT },
+    );
+    expect(active).toStrictEqual({ n: 1 });
+  });
+
+  it("refuses the corpus migration's own down while an edition is active, changing nothing", async () => {
+    const migrator = createMigrator(db);
+    // Revert only the migrations after the corpus (with the opt-in, since reference ids exist),
+    // so the next `down` reaches the corpus guard itself; `afterAll` and the next test restore latest.
+    const later = shippedMigrationNames().filter((name) => name > CORPUS_MIGRATION);
+    if (later[0]) {
+      const first = later[0];
+      await withCorpusDropAllowed(() => migrator.down({ to: first }));
+    }
+    const before = await recordedMigrations(db);
+    expect(before.at(-1)).toBe(CORPUS_MIGRATION);
+    const tablesBefore = await publicTables(db, DOMAIN_TABLES);
+    expect(tablesBefore).toEqual(expect.arrayContaining(['bible_edition', 'bible_verse']));
+
     const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
     expect((error as { cause?: unknown }).cause).toMatchObject({
@@ -77,12 +131,8 @@ describe('migration reversibility', () => {
       parent: expect.objectContaining({ code: '23000' }),
     });
     expect(await recordedMigrations(db)).toStrictEqual(before);
-    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
-    const [active] = await db.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM bible_edition WHERE activated_at IS NOT NULL`,
-      { type: QueryTypes.SELECT },
-    );
-    expect(active).toStrictEqual({ n: 1 });
+    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(tablesBefore);
+    await migrator.up();
   });
 
   it('reverts every migration to zero, then reapplies them all to latest', async () => {

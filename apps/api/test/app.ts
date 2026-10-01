@@ -15,7 +15,13 @@ export interface TestAppOptions {
 
 /**
  * Boots the real AppModule (or a test module that imports it) against the test database, with
- * the same HTTP setup as the running server.
+ * the same HTTP setup as the running server, and starts it listening once on IPv4 loopback.
+ *
+ * Listening here (rather than letting supertest start the server on an ephemeral port for every
+ * request) matters: supertest's own listen binds `::`, which can share a port number with another
+ * local process bound only to 127.0.0.1; supertest then connects to 127.0.0.1 and reaches that
+ * process instead (seen as a stray 404 or a hang). One loopback listener per app removes that
+ * race for every suite, and lets concurrent requests share one server. `app.close()` stops it.
  */
 export async function createTestApp(
   rootModule: Type<unknown> = AppModule,
@@ -27,5 +33,6 @@ export async function createTestApp(
   });
   configureApp(app, app.get<Env>(ENV));
   await app.init();
+  await app.listen(0, '127.0.0.1');
   return app;
 }

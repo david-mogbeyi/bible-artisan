@@ -9,6 +9,7 @@ import {
   NotFoundError,
   OtpError,
   RateLimitedError,
+  ReferenceInvalidError,
   RevisionConflictError,
   RevisionMissingError,
   UnauthenticatedError,
@@ -133,7 +134,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
       };
     }
 
-    if (exception instanceof OtpError || exception instanceof IdempotencyKeyReusedError) {
+    if (
+      exception instanceof OtpError ||
+      exception instanceof IdempotencyKeyReusedError ||
+      exception instanceof ReferenceInvalidError
+    ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,
         envelope: {

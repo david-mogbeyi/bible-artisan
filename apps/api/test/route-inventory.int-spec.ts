@@ -53,6 +53,15 @@ const ROUTES: Record<string, Access> = {
     access: 'private',
     crossUserTest: { file: OWNER_ISOLATION, test: 'GET /v1/me returns only the signed-in user' },
   },
+  // Shared corpus data, not owner-scoped: the cross-user test proves another user gets the same
+  // shared reference and nothing user-specific.
+  'POST /v1/bible/resolve': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-resolve.int-spec.ts',
+      test: 'gives another user the same shared reference for the same input',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

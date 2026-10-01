@@ -35,6 +35,8 @@ describe('GET /v1/openapi.json when the contracts barrel was loaded before AppMo
       'OtpStartResponse',
       'OtpVerifyRequest',
       'MeResponse',
+      'ResolveReferenceRequest',
+      'ResolveReferenceResponse',
     ]);
   });
 });

@@ -1,9 +1,16 @@
 import { Module } from '@nestjs/common';
+import { BibleController } from './bible.controller';
+import { ReferenceService } from './reference/reference.service';
 
 /**
- * Bible content bounded context (PRD §26). Owns `bible_edition`, `bible_book`, `bible_verse`: the
- * immutable WEB corpus, imported by `pnpm corpus:import` (`corpus/`, BIB-14). No routes yet:
- * reference resolution (BIB-15), search (BIB-16), and the reader (BIB-17) add them.
+ * Bible content bounded context (PRD §26). Owns `bible_edition`, `bible_book`, `bible_verse`,
+ * `bible_superscription` (the immutable WEB corpus, imported by `pnpm corpus:import`, BIB-14) and
+ * `scripture_reference` (canonical ranges, BIB-15). Search (BIB-16) and the reader (BIB-17) add
+ * their routes here.
  */
-@Module({})
+@Module({
+  controllers: [BibleController],
+  providers: [ReferenceService],
+  exports: [ReferenceService],
+})
 export class BibleContentModule {}

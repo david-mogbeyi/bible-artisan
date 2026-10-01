@@ -5,6 +5,7 @@ import {
   otpStartResponseSchema,
   otpVerifyRequestSchema,
 } from './auth';
+import { resolveReferenceRequestSchema, resolveReferenceResponseSchema } from './bible';
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema, livenessResponseSchema } from './health';
 
@@ -138,6 +139,18 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/bible/resolve': {
+        post: {
+          description:
+            'Resolves a typed Bible reference against an active edition: a canonical range validated against the imported corpus, book candidates for an ambiguous name, or not_reference. Never returns verse text; an invalid reference is 422, never a nearby verse.',
+          security: sessionCookie,
+          requestBody: jsonBody('ResolveReferenceRequest'),
+          responses: {
+            200: jsonResponse('Resolution outcome', 'ResolveReferenceResponse'),
+            default: errorResponse,
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {
@@ -151,6 +164,8 @@ function buildDocument(): OpenApiDocument {
         OtpStartResponse: toSchema(otpStartResponseSchema),
         OtpVerifyRequest: toSchema(otpVerifyRequestSchema),
         MeResponse: toSchema(meResponseSchema),
+        ResolveReferenceRequest: toSchema(resolveReferenceRequestSchema),
+        ResolveReferenceResponse: toSchema(resolveReferenceResponseSchema),
       },
     },
   };

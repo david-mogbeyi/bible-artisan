@@ -2,14 +2,9 @@ import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import { Logger } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import { Op } from 'sequelize';
 import request, { type Response } from 'supertest';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { AppModule } from '../src/app.module';
-import { configureApp } from '../src/bootstrap';
-import { ENV } from '../src/config/config.module';
-import type { Env } from '../src/config/env';
 import { DependencyUnavailableError } from '../src/common/errors/domain-errors';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
@@ -559,13 +554,9 @@ describe('email OTP provider outages', () => {
   );
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-      .overrideProvider(OTP_PROVIDER)
-      .useValue(provider)
-      .compile();
-    app = moduleRef.createNestApplication<INestApplication<Server>>({ logger: false });
-    configureApp(app, app.get<Env>(ENV));
-    await app.init();
+    app = await createTestApp(undefined, {
+      override: (builder) => builder.overrideProvider(OTP_PROVIDER).useValue(provider),
+    });
   });
 
   afterAll(async () => {

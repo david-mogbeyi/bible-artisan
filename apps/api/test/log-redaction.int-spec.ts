@@ -9,6 +9,7 @@ import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
+import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { Study } from '../src/database/models/study.model';
@@ -326,6 +327,50 @@ describe('content-redacted operational logs', () => {
         }),
       },
     );
+  });
+
+  it('logs Bible reference resolution without the input or the resolved reference', async () => {
+    const edition = await BibleEdition.findOne({ where: { code: 'engwebp' }, rejectOnEmpty: true });
+    // A letters-only private word: an unknown book name, so a `:` makes it a clear reference.
+    const word = (label: string): string => {
+      const value = `${label}${randomUUID()
+        .replace(/-/g, '')
+        .replace(/\d/g, (d) => 'ghijklmnop'[Number(d)] ?? 'q')}`;
+      inputs.push(track(value));
+      return value;
+    };
+
+    const keywords = await withPrivateChannels(http().post('/v1/bible/resolve'), cookie).send({
+      input: `${secret('keywords')} faith`,
+      editionId: edition.id,
+    });
+    expect(keywords.body).toStrictEqual({ outcome: 'not_reference' });
+    await expectLogged(keywords, { method: 'POST', route: '/v1/bible/resolve', status: 200 });
+
+    const unknown = await withPrivateChannels(http().post('/v1/bible/resolve'), cookie).send({
+      input: `${word('zq')} 3:16`,
+      editionId: edition.id,
+    });
+    await expectLogged(
+      unknown,
+      { method: 'POST', route: '/v1/bible/resolve', status: 422 },
+      {
+        errorType: 'ReferenceInvalidError',
+        body: envelope({
+          code: 'REFERENCE_UNKNOWN_BOOK',
+          message: 'No book in this translation matches that name',
+        }),
+      },
+    );
+
+    const resolved = await withPrivateChannels(http().post('/v1/bible/resolve'), cookie).send({
+      input: 'Romans 8:28',
+      editionId: edition.id,
+    });
+    const { reference } = resolved.body as { reference: { id: string; label: string } };
+    track(reference.id);
+    track(reference.label);
+    await expectLogged(resolved, { method: 'POST', route: '/v1/bible/resolve', status: 200 });
   });
 
   it('logs a cross-site mutation refused before routing (403)', async () => {
