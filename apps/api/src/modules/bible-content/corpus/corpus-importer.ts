@@ -4,13 +4,13 @@ import { QueryTypes } from 'sequelize';
 import type { Database } from '../../../database/database';
 import { BibleBook } from '../../../database/models/bible-book.model';
 import { BibleEdition } from '../../../database/models/bible-edition.model';
+import { BibleSuperscription } from '../../../database/models/bible-superscription.model';
 import { BibleVerse } from '../../../database/models/bible-verse.model';
 import {
   CorpusValidationError,
   type CorpusRelease,
   type ParsedCorpus,
   parseArtifact,
-  sha256Hex,
   validateCorpus,
 } from './corpus';
 
@@ -27,6 +27,7 @@ export interface CorpusImportResult {
   books: number;
   chapters: number;
   verses: number;
+  superscriptions: number;
   artifactSha256: string;
   contentSha256: string;
 }
@@ -36,20 +37,15 @@ export function readCorpusArtifact(release: CorpusRelease, dir: string = CORPUS_
 }
 
 /**
- * Imports a release from its artifact bytes: verifies the artifact's SHA-256 against the pinned
- * release before reading anything else, then parses, validates, and writes it.
+ * Imports a release from its artifact bytes, the only exported import path: `parseArtifact`
+ * verifies the artifact's SHA-256 against the pinned release before reading anything else, then
+ * the corpus is validated and written.
  */
 export async function importCorpus(
   db: Database,
   archive: Buffer,
   release: CorpusRelease,
 ): Promise<CorpusImportResult> {
-  if (sha256Hex(archive) !== release.artifactSha256) {
-    throw new CorpusValidationError(
-      'CORPUS_ARTIFACT_CHECKSUM',
-      'artifact SHA-256 differs from the pinned release',
-    );
-  }
   return importParsedCorpus(db, parseArtifact(archive, release), release);
 }
 
@@ -57,14 +53,14 @@ export async function importCorpus(
  * Validates a parsed corpus against the release, then writes and activates it in ONE transaction,
  * so a failure at any point leaves the database exactly as it was (PRD §20: a bad import never
  * replaces the active release). Idempotent per (code, source_release):
- * - absent: insert edition (not yet active), books, verses; activate. The activation trigger
+ * - absent: insert edition (not yet active), books, verses, superscriptions; activate. The activation trigger
  *   re-verifies counts and checksums in SQL before COMMIT.
  * - present with the same artifact checksum: recompute the stored content checksum in SQL and
  *   return `already_current` without writing.
  * - present with a different artifact checksum, or not active: refuse.
  * Concurrent runs queue on a table lock, so the second one sees the first one's committed edition.
  */
-export async function importParsedCorpus(
+async function importParsedCorpus(
   db: Database,
   corpus: ParsedCorpus,
   release: CorpusRelease,
@@ -74,6 +70,7 @@ export async function importParsedCorpus(
     books: corpus.books.length,
     chapters: corpus.books.reduce((n, b) => n + b.chapterCount, 0),
     verses: corpus.verses.length,
+    superscriptions: corpus.superscriptions.length,
     artifactSha256: release.artifactSha256,
     contentSha256: release.contentSha256,
   };
@@ -123,6 +120,7 @@ export async function importParsedCorpus(
         artifactSha256: release.artifactSha256,
         contentSha256: release.contentSha256,
         verseCount: corpus.verses.length,
+        superscriptionCount: corpus.superscriptions.length,
         licenseStatus: release.licenseStatus,
         attribution: release.attribution,
         rightsRecord: release.rightsRecord,
@@ -142,6 +140,10 @@ export async function importParsedCorpus(
         { transaction },
       );
     }
+    await BibleSuperscription.bulkCreate(
+      corpus.superscriptions.map((line) => ({ ...line, editionId: edition.id })),
+      { transaction },
+    );
     await edition.update({ activatedAt: new Date() }, { transaction });
     return { result: 'imported', editionId: edition.id, ...counts };
   });

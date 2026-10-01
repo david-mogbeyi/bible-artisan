@@ -5,9 +5,14 @@
  *
  * Rules (ADR 0001, BIB-14 addendum):
  * - Notes are dropped with their content: footnotes `\f … \f*`, cross references `\x … \x*`.
- * - Heading lines are dropped whole: book identification and titles, section headings, Psalm
- *   superscriptions and Psalm 119 stanza letters (`\d`), speaker labels (`\sp`), chapter labels.
- *   They are not part of any verse; a heading line that also opens a chapter or verse is refused.
+ * - Heading lines are dropped whole: book identification and titles, section headings, speaker
+ *   labels (`\sp`), chapter labels. They are not part of any verse; a heading line that also opens
+ *   a chapter or verse is refused.
+ * - Superscriptions (`\d`: Psalm titles and Psalm 119 stanza headings) are published text but not
+ *   verse text: each is kept, under the same rules as verse text, as a separate superscription of
+ *   the verse that immediately follows it in the same chapter. A `\d` must be a whole line of its
+ *   own inside a chapter and must be followed by a verse before the next `\d`, `\c`, or the end of
+ *   the book; anything else is refused.
  * - Character markers are dropped, their content kept: `\w` (Strong's attributes removed),
  *   `\wj` (words of Jesus), `\qs` (Selah), `\bk` (book title), and their nested `\+` forms. An
  *   opening marker consumes the one whitespace character after it, which USFM defines as the
@@ -29,6 +34,13 @@ export interface UsfmVerse {
   text: string;
 }
 
+/** A `\d` line, attached to the verse it immediately precedes. */
+export interface UsfmSuperscription {
+  chapter: number;
+  beforeVerse: number;
+  text: string;
+}
+
 export interface UsfmBook {
   /** USFM book code from `\id` (e.g. `GEN`). */
   code: string;
@@ -38,6 +50,8 @@ export interface UsfmBook {
   abbreviation: string;
   /** Verses in source order. */
   verses: UsfmVerse[];
+  /** Superscriptions in source order. */
+  superscriptions: UsfmSuperscription[];
 }
 
 const HEADING_MARKERS = new Set([
@@ -52,7 +66,6 @@ const HEADING_MARKERS = new Set([
   'mt3',
   'ms1',
   's',
-  'd',
   'sp',
   'cl',
 ]);
@@ -66,6 +79,8 @@ const ASCII_WHITESPACE_CHAR = /^[ \t\r\n]/;
 const MARKER = /(\\\+?[a-z]+[0-9]*\*?)/;
 const NUMBER_DELIMITED = /^[ \t\r\n]+([0-9]+)(?:[ \t\r\n]|$)/;
 const BOOK_CODE = /^[1-4A-Z][A-Z0-9]{2}$/;
+const SUPERSCRIPTION_MARKER = /\\\+?d(?![a-z0-9])/g;
+const SUPERSCRIPTION_LINE = /^\\d[ \t]/;
 
 /** Collapses ASCII whitespace runs to one space and trims ASCII spaces only. */
 export function collapseAsciiWhitespace(text: string): string {
@@ -89,6 +104,14 @@ export function parseUsfmBook(source: string): UsfmBook {
   const body: string[] = [];
 
   for (const line of source.replace(/^\uFEFF/, '').split('\n')) {
+    // A `\d` is only ever a whole line: exactly one marker, at the start.
+    const superscriptionMarkers = line.match(SUPERSCRIPTION_MARKER)?.length ?? 0;
+    if (superscriptionMarkers > (SUPERSCRIPTION_LINE.test(line) ? 1 : 0)) {
+      throw new UsfmFormatError('a superscription marker that is not a line of its own');
+    }
+    if (SUPERSCRIPTION_LINE.test(line) && CHAPTER_OR_VERSE.test(line)) {
+      throw new UsfmFormatError('a superscription line opens a chapter or verse');
+    }
     const heading = HEADING_LINE.exec(line.replace(/\r$/, ''));
     if (!heading || !HEADING_MARKERS.has(heading[1] ?? '')) {
       body.push(line);
@@ -115,9 +138,13 @@ export function parseUsfmBook(source: string): UsfmBook {
     .replace(/\|[^\\]*(?=\\\+?w\*)/g, '');
 
   const verses: UsfmVerse[] = [];
+  const superscriptions: UsfmSuperscription[] = [];
   const seen = new Set<string>();
   let chapter = 0;
-  let current: UsfmVerse | undefined;
+  /** Where text goes: the open verse or superscription. */
+  let current: { text: string } | undefined;
+  /** A superscription waiting for the verse it precedes. */
+  let pending: UsfmSuperscription | undefined;
   let consumeDelimiter = false;
 
   const parts = text.split(MARKER);
@@ -129,7 +156,7 @@ export function parseUsfmBook(source: string): UsfmBook {
       consumeDelimiter = false;
       if (current) current.text += part;
       else if (collapseAsciiWhitespace(part) !== '') {
-        throw new UsfmFormatError('text outside any verse');
+        throw new UsfmFormatError('text outside any verse or superscription');
       }
       continue;
     }
@@ -150,6 +177,7 @@ export function parseUsfmBook(source: string): UsfmBook {
       const number = Number(match[1]);
       parts[i + 1] = next.slice(match[0].length);
       if (markerName === 'c') {
+        if (pending) throw new UsfmFormatError('a superscription is not followed by a verse');
         chapter = number;
         current = undefined;
       } else {
@@ -157,9 +185,22 @@ export function parseUsfmBook(source: string): UsfmBook {
         const key = `${chapter}:${number}`;
         if (seen.has(key)) throw new UsfmFormatError('duplicate verse');
         seen.add(key);
-        current = { chapter, verse: number, text: '' };
-        verses.push(current);
+        if (pending) {
+          pending.beforeVerse = number;
+          superscriptions.push(pending);
+          pending = undefined;
+        }
+        const verse: UsfmVerse = { chapter, verse: number, text: '' };
+        verses.push(verse);
+        current = verse;
       }
+      continue;
+    }
+    if (markerName === 'd') {
+      if (chapter === 0) throw new UsfmFormatError('superscription before any chapter');
+      if (pending) throw new UsfmFormatError('a superscription is not followed by a verse');
+      pending = { chapter, beforeVerse: 0, text: '' };
+      current = pending;
       continue;
     }
     if (CHARACTER_MARKERS.has(markerName)) {
@@ -167,12 +208,16 @@ export function parseUsfmBook(source: string): UsfmBook {
       continue;
     }
     if (PARAGRAPH_MARKERS.has(markerName)) {
-      if (current) current.text += ' ';
+      // A superscription is one line: the next paragraph marker closes it.
+      if (current && current === pending) current = undefined;
+      else if (current) current.text += ' ';
       continue;
     }
     throw new UsfmFormatError('unsupported marker');
   }
 
+  if (pending) throw new UsfmFormatError('a superscription is not followed by a verse');
   for (const verse of verses) verse.text = collapseAsciiWhitespace(verse.text);
-  return { code, name, abbreviation, verses };
+  for (const line of superscriptions) line.text = collapseAsciiWhitespace(line.text);
+  return { code, name, abbreviation, verses, superscriptions };
 }

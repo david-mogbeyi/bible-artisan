@@ -38,6 +38,11 @@ export const META_TABLE = '"SequelizeMeta"';
  */
 export interface MigrationContext {
   query(sql: string): Promise<void>;
+  /**
+   * A read-only lookup in the same transaction (e.g. `SELECT current_schema()`), for migrations
+   * whose DDL depends on the database they run in. Never use it to splice data into DDL.
+   */
+  select<T extends object>(sql: string): Promise<T[]>;
 }
 
 type MigrationFn = (params: {
@@ -106,6 +111,8 @@ export function createMigrator(
             query: async (sql) => {
               await db.query(sql, { transaction });
             },
+            select: <T extends object>(sql: string) =>
+              db.query<T>(sql, { type: QueryTypes.SELECT, transaction }),
           };
           await (step as MigrationFn)({ name, path: filePath, context });
           await db.query(

@@ -16,6 +16,7 @@ import {
 } from '../src/modules/bible-content/corpus/corpus-importer';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 import { createTestApp } from './app';
+import { withCorpusDropAllowed } from './support/corpus-drop';
 import { MutationProbeModule } from './support/mutation-probe';
 
 const MIGRATION = '20261001074053_add_study_last_event_sequence.ts';
@@ -49,7 +50,8 @@ describe('migration: study.last_event_sequence backfill', () => {
 
   it('sets each study to its highest existing sequence, so the next mutation allocates max + 1', async () => {
     const migrator = createMigrator(db);
-    await migrator.down({ to: MIGRATION });
+    // Reverting this far drops the active corpus too, which needs the explicit opt-in.
+    await withCorpusDropAllowed(() => migrator.down({ to: MIGRATION }));
     expect((await migrator.pending()).map((m) => m.name)).toStrictEqual(
       shippedMigrationNames().filter((name) => name >= MIGRATION),
     );

@@ -22,6 +22,7 @@ async function main(): Promise<void> {
       books: result.books,
       chapters: result.chapters,
       verses: result.verses,
+      superscriptions: result.superscriptions,
       artifactSha256: result.artifactSha256,
       contentSha256: result.contentSha256,
       durationMs: Date.now() - started,

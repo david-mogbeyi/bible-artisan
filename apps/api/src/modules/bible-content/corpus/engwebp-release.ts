@@ -8,7 +8,12 @@ import type { CorpusRelease } from './corpus';
  * publisher regenerates the download URL in place. Every structural value and checksum below was
  * produced by parsing that artifact with this module's parser, and independently re-derived with a
  * separate parser and cross-checked against eBible's own verse-per-line rendering of the same
- * generation; none was typed from memory. Changing the artifact means a new release (a new
+ * generation; none was typed from memory. The superscription count and the content checksum that
+ * includes superscriptions were regenerated the same way when superscriptions were added: the
+ * count also equals the number of `\d` lines in the raw USFM (a unit test recounts it), and the
+ * checksum is recomputed independently in SQL from the stored rows on every activation. Verse text
+ * was unaffected: hashing the verses alone still gives the previous verse-only checksum
+ * (`c7083981…95b4`). Changing the artifact means a new release (a new
  * `sourceRelease`) with values re-derived the same way, never edits to these values.
  */
 export const ENGWEBP_RELEASE: CorpusRelease = {
@@ -92,6 +97,8 @@ export const ENGWEBP_RELEASE: CorpusRelease = {
   ],
   chapterCount: 1189,
   verseCount: 31103,
+  superscriptionCount: 138,
+  superscriptionBooks: ['PSA'],
   emptyVerses: [
     { book: 'LUK', chapter: 17, verse: 36 },
     { book: 'ACT', chapter: 8, verse: 37 },
@@ -149,7 +156,7 @@ export const ENGWEBP_RELEASE: CorpusRelease = {
       textSha256: 'a5ae586ae75e8a2eb0bf778e382201e89ea426ae5bc3f6a54f7d5093769b8352',
     },
   ],
-  contentSha256: 'c7083981d77c5b1c41ea867ace86a9da1094f7a4de43010bb545a1ee357995b4',
+  contentSha256: '228800e9c09d4b6d08ba7fa1862e7e04f308bb3591178c1c963adb600c71e9aa',
   licenseStatus: 'public_domain',
   attribution: 'World English Bible (WEB), public domain. Published by eBible.org.',
   rightsRecord: {

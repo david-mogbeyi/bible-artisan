@@ -16,9 +16,11 @@ describe('healthResponseSchema', () => {
       migrations: 'current',
       corpus: 'missing',
     };
+    const corruptCorpus = { ...noCorpus, corpus: 'corrupt' };
     expect(healthResponseSchema.parse(ready)).toStrictEqual(ready);
     expect(healthResponseSchema.parse(notReady)).toStrictEqual(notReady);
     expect(healthResponseSchema.parse(noCorpus)).toStrictEqual(noCorpus);
+    expect(healthResponseSchema.parse(corruptCorpus)).toStrictEqual(corruptCorpus);
   });
 
   it('rejects an unknown status and extra fields', () => {

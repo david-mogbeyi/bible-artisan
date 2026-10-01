@@ -10,12 +10,16 @@ import {
   readCorpusArtifact,
 } from '../src/modules/bible-content/corpus/corpus-importer';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
+import { withCorpusDropAllowed } from './support/corpus-drop';
+
+const CORPUS_MIGRATION = '20261001094438_create_bible_corpus.ts';
 
 const DOMAIN_TABLES = [
   'auth_challenge',
   'auth_session',
   'bible_book',
   'bible_edition',
+  'bible_superscription',
   'bible_verse',
   'mutation_receipt',
   'study',
@@ -63,6 +67,24 @@ describe('migration reversibility', () => {
     await db.close();
   });
 
+  it('refuses to drop an active Bible corpus without the explicit opt-in, changing nothing', async () => {
+    const before = await recordedMigrations(db);
+    const migrator = createMigrator(db);
+    const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as { cause?: unknown }).cause).toMatchObject({
+      message: 'bible corpus drop refused: an active edition exists (set ALLOW_CORPUS_DROP=1)',
+      parent: expect.objectContaining({ code: '23000' }),
+    });
+    expect(await recordedMigrations(db)).toStrictEqual(before);
+    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
+    const [active] = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM bible_edition WHERE activated_at IS NOT NULL`,
+      { type: QueryTypes.SELECT },
+    );
+    expect(active).toStrictEqual({ n: 1 });
+  });
+
   it('reverts every migration to zero, then reapplies them all to latest', async () => {
     const migrator = createMigrator(db);
     // Expected set comes from the filesystem, independent of the migrator's own bookkeeping.
@@ -73,7 +95,8 @@ describe('migration reversibility', () => {
     expect(await recordedMigrations(db)).toStrictEqual(allNames);
     expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
 
-    const reverted = await migrator.down({ to: 0 });
+    // Dropping the active corpus needs the explicit opt-in (ADR 0001, BIB-14 addendum).
+    const reverted = await withCorpusDropAllowed(() => migrator.down({ to: 0 }));
     expect(reverted.map((m) => m.name)).toStrictEqual([...allNames].reverse());
     expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual([]);
     expect(await recordedMigrations(db)).toStrictEqual([]);

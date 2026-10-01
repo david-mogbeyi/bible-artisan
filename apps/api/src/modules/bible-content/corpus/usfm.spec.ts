@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { parseArtifact } from './corpus';
+import { parseArtifact, readArtifact } from './corpus';
 import { readCorpusArtifact } from './corpus-importer';
 import { ENGWEBP_RELEASE } from './engwebp-release';
 import { collapseAsciiWhitespace, parseUsfmBook, usfmBookCode, UsfmFormatError } from './usfm';
-import { readZip } from './zip';
 
 /*
  * Every Scripture input here is sliced out of the committed publisher artifact at test time, and
@@ -13,7 +12,7 @@ import { readZip } from './zip';
  */
 
 const sources = new Map<string, string>();
-for (const [name, data] of readZip(readCorpusArtifact(ENGWEBP_RELEASE))) {
+for (const [name, data] of readArtifact(readCorpusArtifact(ENGWEBP_RELEASE), ENGWEBP_RELEASE)) {
   if (!name.endsWith('.usfm')) continue;
   const text = data.toString('utf8');
   sources.set(usfmBookCode(text), text);
@@ -106,30 +105,73 @@ describe('parseUsfmBook on real WEB source lines', () => {
     expect(corpus.verses.filter((v) => / [?.,;:!”’)]/.test(v.text))).toStrictEqual([]);
   });
 
-  it('keeps Psalm superscriptions out of every verse', () => {
+  it('stores every \\d line as a superscription of the verse after it, under verse-text rules', () => {
     const source = bookSource('PSA');
-    const psalms = parseUsfmBook(source).verses;
-    // `\d` lines that come before the chapter's first verse.
-    const superscriptions = source.split(/\\c /).flatMap((chunk) => {
-      const chapter = Number(/^\d+/.exec(chunk)?.[0]);
-      const preamble = chunk.slice(0, chunk.indexOf('\\v '));
-      return (preamble.match(/^\\d .*$/gm) ?? []).map((line) => [chapter, line.slice(3)] as const);
+    const book = parseUsfmBook(source);
+    // Every raw `\d` line, located by the chapter it is in and the first verse after it.
+    const lines = source.split('\n');
+    const expected: { chapter: number; beforeVerse: number; text: string }[] = [];
+    let chapter = 0;
+    lines.forEach((line, i) => {
+      chapter = Number(/^\\c (\d+)/.exec(line)?.[1] ?? chapter);
+      if (!/^\\d /.test(line)) return;
+      const next = lines.slice(i + 1).join('\n');
+      const beforeVerse = Number(/\\v (\d+) /.exec(next)?.[1]);
+      expect(next.search(/\\v \d+ /)).toBeLessThan(next.search(/\\c |$(?![\s\S])/));
+      // The same content parsed as if it were a verse's text: same markup and whitespace rules.
+      expected.push({ chapter, beforeVerse, text: parseVerse(chapter, `\\v 1 ${line.slice(3)}`) });
     });
-    expect(superscriptions.length).toBeGreaterThan(100);
-    for (const [chapter, line] of superscriptions) {
-      const heading = collapseAsciiWhitespace(
-        line.replace(/\\\+?w ([^|\\]*)\|[^\\]*\\\+?w\*/g, '$1').replace(/\\[a-z0-9]+\*? ?/g, ''),
-      );
-      const verses = psalms.filter((v) => v.chapter === Number(chapter));
-      expect(verses.some((v) => v.text.includes(heading))).toBe(false);
+    expect(expected).toHaveLength(ENGWEBP_RELEASE.superscriptionCount);
+    expect(book.superscriptions).toStrictEqual(expected);
+    // Titles open their psalm; the rest are Psalm 119 stanza headings between verses.
+    expect(book.superscriptions.filter((d) => d.beforeVerse !== 1).map((d) => d.chapter)).toEqual(
+      expect.arrayContaining([119]),
+    );
+    expect(
+      new Set(book.superscriptions.filter((d) => d.beforeVerse !== 1).map((d) => d.chapter)),
+    ).toStrictEqual(new Set([119]));
+    for (const d of book.superscriptions) {
+      expect(d.text).not.toBe('');
+      expect(d.text).toBe(d.text.normalize('NFC'));
+      expect(d.text).not.toMatch(/\\|\|/);
     }
   });
 
-  it('drops a Psalm 119 stanza heading between verses without touching either verse', () => {
+  it('removes a footnote inside a superscription, as it would in a verse', () => {
+    const line = bookSource('PSA')
+      .split('\n')
+      .find((l) => l.startsWith('\\d ') && l.includes('\\f '));
+    expect(line).toBeDefined();
+    const raw = line ?? '';
+    const footnote = /\\f .*?\\f\*/s.exec(raw)?.[0] ?? '';
+    const wrap = (d: string): string =>
+      `\\id TST\n\\toc2 Test\n\\toc3 Tst\n\\c 1\n${d}\n\\q1\n\\v 1 x`;
+    const [withNote] = parseUsfmBook(wrap(raw)).superscriptions;
+    const [withoutNote] = parseUsfmBook(wrap(raw.replace(footnote, ''))).superscriptions;
+    expect(withNote).toStrictEqual(withoutNote);
+  });
+
+  it('keeps Psalm superscriptions out of every verse', () => {
+    const book = parseUsfmBook(bookSource('PSA'));
+    expect(book.superscriptions.length).toBeGreaterThan(100);
+    for (const d of book.superscriptions.filter((s) => s.beforeVerse === 1)) {
+      const verses = book.verses.filter((v) => v.chapter === d.chapter);
+      expect(verses.some((v) => v.text.includes(d.text))).toBe(false);
+    }
+  });
+
+  it('keeps a Psalm 119 stanza heading out of the verses on either side of it', () => {
     const raw = rawVerse('PSA', 119, 8);
     const stanza = /\n\\d [^\n]*/.exec(raw)?.[0] ?? '';
     expect(stanza).not.toBe('');
-    expect(parseVerse(119, raw)).toBe(parseVerse(119, raw.replace(stanza, '')));
+    // Parsed alone, a trailing `\d` with no verse after it is refused; in the book, verse 8 is
+    // exactly the verse without the stanza line, which becomes verse 9's superscription.
+    expect(() => parseVerse(119, raw)).toThrow(UsfmFormatError);
+    expect(fullBookVerse('PSA', 119, 8)).toBe(parseVerse(119, raw.replace(stanza, '')));
+    const book = parseUsfmBook(bookSource('PSA'));
+    const heading = book.superscriptions.find((d) => d.chapter === 119 && d.beforeVerse === 9);
+    expect(heading?.text).toBe(parseVerse(119, `\\v 1 ${stanza.slice('\n\\d '.length)}`));
+    expect(fullBookVerse('PSA', 119, 9)).not.toContain(heading?.text);
   });
 
   it('drops Song of Songs speaker labels inside a verse', () => {
@@ -176,12 +218,40 @@ describe('parseUsfmBook rejections (synthetic input)', () => {
     ['a verse bridge', wrap('\\v 1-2 a')],
     ['a duplicate verse', wrap('\\v 1 a\n\\v 1 b')],
     ['text outside any verse', wrap('a\n\\v 1 b')],
-    ['a heading line that opens a verse', wrap('\\v 1 a\n\\d b \\v 2 c')],
+    ['a heading line that opens a verse', wrap('\\v 1 a\n\\s b \\v 2 c')],
+    ['a superscription line that opens a verse', wrap('\\v 1 a\n\\d b \\v 2 c')],
+    [
+      'a superscription before any chapter',
+      '\\id TST\n\\toc2 Test\n\\toc3 Tst\n\\d a\n\\c 1\n\\v 1 b',
+    ],
+    ['a superscription at the end of a chapter', wrap('\\v 1 a\n\\d b\n\\q1\n\\c 2\n\\v 1 c')],
+    ['a superscription at the end of the book', wrap('\\v 1 a\n\\d b\n\\q1')],
+    ['two superscriptions before one verse', wrap('\\d a\n\\d b\n\\q1\n\\v 1 c')],
+    ['a superscription marker inside a line', wrap('\\v 1 a \\d b')],
+    ['a nested superscription marker', wrap('\\d a \\+d b\n\\q1\n\\v 1 c')],
+    ['text between a superscription and its verse', wrap('\\d a\n\\q1 b\n\\v 1 c')],
     ['a verse before any chapter', '\\id TST\n\\toc2 Test\n\\toc3 Tst\n\\v 1 a'],
     ['a missing \\id', '\\toc2 Test\n\\toc3 Tst\n\\c 1\n\\v 1 a'],
     ['missing book names', '\\id TST\n\\c 1\n\\v 1 a'],
   ])('refuses %s', (_case, source) => {
     expect(() => parseUsfmBook(source)).toThrow(UsfmFormatError);
+  });
+});
+
+describe('parseUsfmBook superscriptions (synthetic input)', () => {
+  it('attaches a title and a mid-chapter heading to the verses that follow them', () => {
+    const book = parseUsfmBook(
+      '\\id TST\n\\toc2 Test\n\\toc3 Tst\n\\c 1\n\\d a \\w b|strong="H1"\\w*  \n\\q1\n\\v 1 c\n' +
+        '\\q1 d\n\\d e\n\\q1\n\\v 2 f',
+    );
+    expect(book.superscriptions).toStrictEqual([
+      { chapter: 1, beforeVerse: 1, text: 'a b' },
+      { chapter: 1, beforeVerse: 2, text: 'e' },
+    ]);
+    expect(book.verses).toStrictEqual([
+      { chapter: 1, verse: 1, text: 'c d' },
+      { chapter: 1, verse: 2, text: 'f' },
+    ]);
   });
 });
 

@@ -5,12 +5,13 @@ import {
   CorpusValidationError,
   type ParsedCorpus,
   parseArtifact,
+  readArtifact,
   sha256Hex,
   validateCorpus,
 } from './corpus';
 import { readCorpusArtifact } from './corpus-importer';
 import { ENGWEBP_RELEASE } from './engwebp-release';
-import { readZip } from './zip';
+import { usfmBookCode } from './usfm';
 
 /*
  * The real artifact, parsed once. Failure cases mutate a deep copy structurally (drop, reorder,
@@ -43,12 +44,50 @@ describe('the pinned engwebp release', () => {
     expect(sha256Hex(readCorpusArtifact(ENGWEBP_RELEASE))).toBe(ENGWEBP_RELEASE.artifactSha256);
   });
 
-  it('parses and validates: 66 books, 1,189 chapters, 31,103 verses', () => {
+  it('parses and validates: 66 books, 1,189 chapters, 31,103 verses, 138 superscriptions', () => {
     expect(() => validateCorpus(corpus, ENGWEBP_RELEASE)).not.toThrow();
     expect(corpus.books).toHaveLength(66);
     expect(corpus.books.reduce((n, b) => n + b.chapterCount, 0)).toBe(1189);
     expect(corpus.verses).toHaveLength(31103);
-    expect(contentSha256(corpus.verses)).toBe(ENGWEBP_RELEASE.contentSha256);
+    expect(corpus.superscriptions).toHaveLength(138);
+    expect(contentSha256(corpus.verses, corpus.superscriptions)).toBe(
+      ENGWEBP_RELEASE.contentSha256,
+    );
+  });
+
+  it('has exactly as many superscriptions as the raw USFM has \\d lines, all in Psalms', () => {
+    // Counted straight from the source, independently of the parser.
+    const rawLines = new Map<string, number>();
+    for (const [name, data] of readArtifact(readCorpusArtifact(ENGWEBP_RELEASE), ENGWEBP_RELEASE)) {
+      if (!name.endsWith('.usfm')) continue;
+      const source = data.toString('utf8');
+      const code = usfmBookCode(source);
+      if (ENGWEBP_RELEASE.ignoredBooks.includes(code)) continue;
+      const count = (source.match(/^\\d[ \t]/gm) ?? []).length;
+      if (count > 0) rawLines.set(code, count);
+    }
+    expect(Object.fromEntries(rawLines)).toStrictEqual({
+      PSA: ENGWEBP_RELEASE.superscriptionCount,
+    });
+    expect(ENGWEBP_RELEASE.superscriptionBooks).toStrictEqual(['PSA']);
+    expect(corpus.superscriptions).toHaveLength(ENGWEBP_RELEASE.superscriptionCount);
+    expect(new Set(corpus.superscriptions.map((d) => d.bookCode))).toStrictEqual(new Set(['PSA']));
+  });
+
+  it('hashes superscriptions into the content checksum, so dropping them changes it', () => {
+    expect(contentSha256(corpus.verses, [])).not.toBe(ENGWEBP_RELEASE.contentSha256);
+  });
+
+  it('never parses an artifact whose SHA-256 differs from the pinned release', () => {
+    const tampered = Buffer.from(readCorpusArtifact(ENGWEBP_RELEASE));
+    tampered[100] = (tampered[100] ?? 0) ^ 0x01;
+    for (const read of [
+      () => parseArtifact(tampered, ENGWEBP_RELEASE),
+      () => readArtifact(tampered, ENGWEBP_RELEASE),
+    ]) {
+      expect(read).toThrow(CorpusValidationError);
+      expect(read).toThrow(expect.objectContaining({ code: 'CORPUS_ARTIFACT_CHECKSUM' }));
+    }
   });
 
   it('is internally consistent', () => {
@@ -60,7 +99,9 @@ describe('the pinned engwebp release', () => {
   });
 
   it("quotes the publisher's license notice verbatim from the artifact", () => {
-    const html = readZip(readCorpusArtifact(ENGWEBP_RELEASE)).get('copr.htm')?.toString('utf8');
+    const html = readArtifact(readCorpusArtifact(ENGWEBP_RELEASE), ENGWEBP_RELEASE)
+      .get('copr.htm')
+      ?.toString('utf8');
     const notice = (html ?? '').replace(/<[^>]*>/g, ' ').replace(/[ \t\r\n]+/g, ' ');
     const { rightsRecord } = ENGWEBP_RELEASE;
     expect(notice).toContain(String(rightsRecord.notice));
@@ -141,6 +182,58 @@ describe('validateCorpus refuses a corrupt or incomplete corpus', () => {
         const v = c.verses[1]!;
         v.text += '.';
         v.textSha256 = sha256Hex(v.text);
+      },
+    ],
+    [
+      'a missing superscription',
+      'CORPUS_SUPERSCRIPTION_COUNT',
+      (c) => void c.superscriptions.pop(),
+    ],
+    [
+      'a superscription in a book the release does not allow',
+      'CORPUS_SUPERSCRIPTION',
+      (c) => void (c.superscriptions[0]!.bookCode = 'GEN'),
+    ],
+    [
+      'a superscription before a verse that does not exist',
+      'CORPUS_SUPERSCRIPTION',
+      (c) => void (c.superscriptions[0]!.beforeVerse = 999),
+    ],
+    [
+      'two superscriptions before one verse',
+      'CORPUS_SUPERSCRIPTION',
+      (c) => void c.superscriptions.splice(1, 0, { ...c.superscriptions[0]! }),
+    ],
+    [
+      'an empty superscription',
+      'CORPUS_UNICODE',
+      (c) => {
+        const d = c.superscriptions[0]!;
+        d.text = '';
+        d.textSha256 = sha256Hex('');
+      },
+    ],
+    [
+      'a superscription that is not NFC',
+      'CORPUS_UNICODE',
+      (c) => {
+        const d = c.superscriptions[0]!;
+        d.text += 'e\u0301';
+        d.textSha256 = sha256Hex(d.text);
+      },
+    ],
+    [
+      'a stale superscription checksum',
+      'CORPUS_VERSE_CHECKSUM',
+      (c) => void (c.superscriptions[0]!.textSha256 = sha256Hex('x')),
+    ],
+    [
+      'changed superscription text',
+      'CORPUS_CONTENT_CHECKSUM',
+      (c) => {
+        const d = c.superscriptions[0]!;
+        d.text += '.';
+        d.textSha256 = sha256Hex(d.text);
       },
     ],
   ])('%s', (_case, code, change) => {

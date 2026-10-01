@@ -27,6 +27,7 @@ import { type CorpusPin, ReadinessProbe } from './readiness';
         code: ENGWEBP_RELEASE.code,
         sourceRelease: ENGWEBP_RELEASE.sourceRelease,
         artifactSha256: ENGWEBP_RELEASE.artifactSha256,
+        contentSha256: ENGWEBP_RELEASE.contentSha256,
       } satisfies CorpusPin,
     },
     {

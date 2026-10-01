@@ -165,8 +165,8 @@ return mutations.execute(ownerId, mutation, {
 
 **Import pipeline** (`apps/api/src/modules/bible-content/corpus/`, `pnpm corpus:import`):
 
-1. Verify the artifact SHA-256 against the pinned release (`engwebp-release.ts`).
-2. Unzip it with a small `node:zlib` reader (no dependency) that checks each member's CRC-32 and size.
+1. Verify the artifact SHA-256 against the pinned release (`engwebp-release.ts`). Every exported path from artifact bytes to parsed text (`readArtifact`, `parseArtifact`, `importCorpus`) does this first; the write half (`importParsedCorpus`) is module-internal.
+2. Unzip it with a small `node:zlib` reader (no dependency), hardened for hostile input even though it only sees verified bytes. It bounds-checks every offset and length (the EOCD comment must run exactly to the end of the file, and the central directory must end exactly at the EOCD). Each local header must match its central entry (name, flags, method, CRC-32, sizes). Members may not overlap. Encryption, data descriptors, ZIP64 and multi-disk archives are refused. Inflation is capped at each member's declared size (`maxOutputLength`), with limits of 16 MiB per member and 128 MiB in total, so a deflate bomb fails fast. Size and CRC-32 are verified. Every failure is a `ZipFormatError` with the fixed code `CORPUS_ZIP_FORMAT` and a fixed message.
 3. Parse each canon book's USFM. `FRT` and `GLO` are skipped by their `\id`, and any other unlisted book fails.
 4. Validate everything against the manifest.
 5. Write the edition (inactive), its books and its verses in ONE transaction, activate it, and COMMIT.
@@ -183,18 +183,28 @@ The command is a separate step, not a migration: migrations only get `context.qu
 **Text rules (USFM to verse text).** There is an explicit allowlist, and an unknown marker fails the import rather than being guessed at.
 
 - Dropped with their content: footnotes `\f…\f*` and cross-references `\x…\x*`.
-- Dropped as whole lines: book identification and titles (`\id \ide \h \toc1-3 \mt1-3`), `\ms1`, `\s`, Psalm superscriptions and Psalm 119 stanza letters (`\d`), speaker labels (`\sp`), and `\cl`. A heading line that also opens a chapter or verse is refused. These are not verse text in English versification; a later reader ticket can import headings from the same artifact.
+- Dropped as whole lines: book identification and titles (`\id \ide \h \toc1-3 \mt1-3`), `\ms1`, `\s`, speaker labels (`\sp`), and `\cl`. A heading line that also opens a chapter or verse is refused. These are not verse text in English versification; a later reader ticket can import headings from the same artifact.
+- Kept, but not as verse text: superscriptions (`\d`). They are part of the published text, so each is stored verbatim in `bible_superscription`, keyed by the verse it immediately precedes (`before_verse`). Placement:
+  - In this artifact every `\d` is a whole line in Psalms (138 lines, counted straight from the raw USFM). 117 come before a psalm's first verse: the titles, including Psalm 119's first stanza heading. The other 21 are Psalm 119 stanza headings between verses.
+  - The parser refuses any other placement: a `\d` that is not a line of its own, one before the first chapter, one not followed by a verse in its chapter, two before one verse, or text between a `\d` and its verse.
+  - Validation refuses superscriptions outside the release's `superscriptionBooks` (`['PSA']`) and any count other than `superscriptionCount`.
+  - Their text follows exactly the verse-text rules below (footnotes removed, character markers dropped, ASCII whitespace collapsed, NFC).
 - Markers dropped, content kept: `\w`/`\+w` (Strong's attributes removed), `\wj`, `\qs`, and `\bk`. An opening character marker consumes the one whitespace character after it, which the USFM spec defines as the delimiter; a closing marker consumes nothing.
 - Paragraph and poetry markers become word boundaries.
 - ASCII whitespace runs collapse to one space and the ends are trimmed. Nothing else is touched: curly quotes, dashes, and the publisher's three no-break spaces (U+00A0) are preserved. JavaScript `\s` and `trim()` are deliberately not used, since both treat U+00A0 as whitespace.
 - The result:
   - 66 books, 1,189 chapters, 31,103 verses, contiguous from 1, all NFC.
+  - 138 superscriptions, all in Psalms.
   - 5 verses the edition numbers but gives only in footnotes are stored with empty text: LUK 17:36, ACT 8:37, ACT 15:34, ACT 24:7, ROM 16:25.
 - Book names are the publisher's `\toc2`/`\toc3`. Aliases belong to BIB-15.
 
 **How the expected values were obtained (no Scripture typed).** Every count, the book list, the 5 empty verses, 8 sample-verse SHA-256s, and the content SHA-256 were produced by running this parser over the artifact and pasted as generated output.
 
-- They were re-derived independently with a separate Python implementation of the same rules: identical content SHA-256 `c7083981d77c5b1c41ea867ace86a9da1094f7a4de43010bb545a1ee357995b4`, identical sample hashes, identical chapter counts.
+- They were re-derived independently with a separate Python implementation of the same rules: identical verse-only content SHA-256 `c7083981d77c5b1c41ea867ace86a9da1094f7a4de43010bb545a1ee357995b4`, identical sample hashes, identical chapter counts.
+- **Superscriptions (merge-gate fix).** The edition checksum now also covers superscriptions. Each verse's line is preceded by its superscription's line, `book \t chapter \t d<verse> \t text \n`, both in TypeScript `contentSha256()` and in SQL `bible_edition_content_sha256()`. The pinned content SHA-256 is now `228800e9c09d4b6d08ba7fa1862e7e04f308bb3591178c1c963adb600c71e9aa`. It was obtained by running the parser over the artifact and was not typed. It was confirmed independently:
+  - The SQL activation trigger recomputes it from the stored rows on every import, so the import only succeeds if both implementations agree.
+  - Hashing the verses alone still gives `c7083981…95b4`, so adding superscriptions changed no verse text.
+  - The superscription count (138) equals the number of raw `\d` lines, which a unit test recounts from the zip. It also equals the 117 + 21 superscription and stanza differences the VPL cross-check below attributes to `\d`.
 - That parse was cross-checked against eBible's own VPL rendering of the same generation (`engwebp_vpl.zip`, SHA-256 `7d2e0b91ba43e2500fcab9c64d9db1962750deeff4e1186aed4c30220f5689be`). It matched 30,960 of 31,103 verses exactly. All 143 differences are VPL rendering choices that this import deliberately does not copy:
   - 117 Psalm superscriptions and 21 Psalm 119 stanza letters folded into verse text;
   - 4 Song of Songs speaker labels;
@@ -203,17 +213,38 @@ The command is a separate step, not a migration: migrations only get `context.qu
 
 **Immutability is enforced by PostgreSQL**, not by convention (migration `create_bible_corpus`):
 
-- Books and verses can be inserted only while their edition is not yet activated. The insert trigger takes `FOR SHARE` on the edition row, so a racing activation either counts the row or refuses the insert.
-- Books and verses can never be updated, deleted, or truncated.
+- An edition can only be inserted inactive: a BEFORE INSERT trigger refuses `activated_at IS NOT NULL`, so activation always goes through the checked update.
+- Books, verses and superscriptions can be inserted only while their edition is not yet activated. The insert trigger takes `FOR SHARE` on the edition row, so a racing activation either counts the row or refuses the insert.
+- Books, verses and superscriptions can never be updated, deleted, or truncated. A superscription has a composite FK to the verse it precedes.
 - An edition can never be deleted or truncated. Its only permitted update is the single activation (`activated_at` NULL to a timestamp, nothing else changed).
-- Activation recomputes, in SQL, the verse count, every `text_sha256`, each book's chapter count, and the edition `content_sha256` (`bible_edition_content_sha256()`, the same serialization as `contentSha256()` in TypeScript). It refuses on any mismatch.
+- Activation recomputes, in SQL, the verse and superscription counts (`verse_count`, `superscription_count`), every `text_sha256`, each book's chapter count, and the edition `content_sha256` (`bible_edition_content_sha256()`, the same serialization as `contentSha256()` in TypeScript). It refuses on any mismatch.
+- **Search-path safe.** Every corpus function declares `SET search_path = pg_catalog, pg_temp` and names every table and helper function by schema. The schema is the one the migration runs in, read with `current_schema()` through the migrator's read-only `context.select`, so the import test's own schema works too. A caller who puts lookalike tables or a lookalike checksum function earlier on `search_path` cannot make an incomplete edition activate. An integration test attacks `public` this way.
 - All refusals are SQLSTATE 23000 with content-free messages.
-- `down` drops the tables (DROP fires no row or TRUNCATE triggers).
-- A superuser could still disable triggers. That is an operator action outside the app's reach, and re-running `corpus:import` would detect any drift through the stored checksum.
+- **Guarded `down`.** `down` refuses with a fixed message ("bible corpus drop refused: an active edition exists (set ALLOW_CORPUS_DROP=1)", SQLSTATE 23000), and changes nothing, while an active edition exists. It proceeds only with `ALLOW_CORPUS_DROP=1` in the migrator's environment, e.g. `ALLOW_CORPUS_DROP=1 pnpm --filter @bible-artisan/api db:migrate:down`. DROP fires no row or TRUNCATE triggers, so this opt-in is the only guard. The reversibility tests set it explicitly, and a test asserts the refusal without it.
 
-**Readiness.** `GET /v1/health` also requires this build's pinned release (code, release, artifact SHA-256) to be active. The check is part of the same single statement as the migrations check, and the response gains `corpus: 'ready' | 'missing' | 'unknown'`. A deployment that skipped `corpus:import` is not ready, and the web status line says "Bible corpus missing".
+**What the database cannot prevent, and how it is detected.**
 
-**Privacy.** The CLI logs one `corpus_import` line with counts, checksums, edition code, release, and duration. A failure is the usual `process_failed` line with a fixed `code` (e.g. `CORPUS_ARTIFACT_CHECKSUM`). Validation messages may name a verse, so they are never logged (NFR-PRIV-001). An integration test runs the CLI with production JSON logging and asserts the exact allowlisted line.
+- **The owner can bypass the triggers.** A table owner can `ALTER TABLE … DISABLE TRIGGER` (or drop the trigger) and then change rows. Verified on PostgreSQL 16 with a non-superuser owner role:
+  - `CREATE EVENT TRIGGER` fails with "Must be superuser to create an event trigger", so no event-trigger guard is possible for a non-superuser owner.
+  - `ALTER TABLE … DISABLE TRIGGER` succeeds for that owner.
+  - `SET session_replication_role` is refused.
+
+  No owner-proof guard exists inside the database without superuser.
+
+- **Detection at startup.** The API recomputes the active pinned edition's content checksum in SQL once per process. It runs in the `ReadinessProbe`'s `onApplicationBootstrap`, before the app listens, on the probe's own short-lived connection. A mismatch with the pinned `contentSha256` makes readiness answer 503 with `corpus: 'corrupt'` for the life of the process. If startup could not reach a verdict (database down, release not imported yet, timeout), the first probe that finds the release active verifies it inside its single statement instead.
+- **Cost.** Measured on the full corpus (31,103 verses and 138 superscriptions, local PostgreSQL 16): about 41 ms median end to end, 36 to 45 ms over 20 runs, against about 5 ms for the plain readiness check. That is cheap enough to hash the full text rather than a cheaper proxy, but not something to repeat on every probe. A tamper after startup is caught on the next restart, and re-running `corpus:import` also detects it via the stored checksum.
+- **Production recommendation: separate roles.**
+  - Run migrations and `corpus:import` as a migrator role that owns the corpus tables.
+  - Run the API and worker as a separate app role that is not the owner and has only `SELECT` on `bible_edition`, `bible_book`, `bible_verse` and `bible_superscription`. That role cannot disable triggers or write the corpus at all.
+  - Today the migrator, the importer and the API share one `DATABASE_URL`, so they run as one role that owns everything. Splitting it into `DATABASE_URL` (app) and a migrator URL with grants is a **deploy follow-up** for the first real deployment (hosting is undecided, see above). It needs no new infrastructure, only a second role and its grants.
+
+**Readiness.** `GET /v1/health` also requires this build's pinned release (code, release, artifact SHA-256, and content SHA-256) to be active. The check is part of the same single statement as the migrations check, and the response gains `corpus: 'ready' | 'missing' | 'corrupt' | 'unknown'`:
+
+- An edition with the pinned label but a different stored content checksum is `missing`.
+- A stored text that no longer hashes to the pin, found by the startup integrity check above, is `corrupt`.
+- A deployment that skipped `corpus:import` is not ready, and the web status line says "Bible corpus missing" (or "corrupt").
+
+**Privacy.** The CLI logs one `corpus_import` line with counts (superscriptions included), checksums, edition code, release, and duration. The API logs one `corpus_integrity` line at startup with the verdict (`verified`, `corrupt` or `unverified`) and duration only. A failure is the usual `process_failed` line with a fixed `code` (e.g. `CORPUS_ARTIFACT_CHECKSUM`). Validation messages may name a verse, so they are never logged (NFR-PRIV-001). An integration test runs the CLI with production JSON logging and asserts the exact allowlisted line.
 
 **Not in BIB-14:** aliases and reference parsing (BIB-15), `search_vector`/GIN (BIB-16), `/bible` routes and the reader (BIB-17), anchors (BIB-18), AI citation checks (BIB-41).
 

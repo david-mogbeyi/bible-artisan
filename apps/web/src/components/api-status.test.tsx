@@ -74,6 +74,19 @@ describe('ApiStatus', () => {
     expect(await statusText()).toBe('API unavailable · database up · Bible corpus missing');
   });
 
+  it('shows a corrupt Bible corpus from the 503 readiness body', async () => {
+    respondWith(
+      jsonResponse(503, {
+        status: 'unavailable',
+        database: 'up',
+        migrations: 'current',
+        corpus: 'corrupt',
+      }),
+    );
+    renderWithQuery(<ApiStatus />);
+    expect(await statusText()).toBe('API unavailable · database up · Bible corpus corrupt');
+  });
+
   it('shows unreachable on a network error', async () => {
     respondWith(new TypeError('Failed to fetch'));
     renderWithQuery(<ApiStatus />);

@@ -38,7 +38,8 @@ export class HealthController {
 
   /**
    * Readiness: 200 only when the database answers within the timeout, every shipped migration
-   * is applied, and the pinned Bible corpus release is active; otherwise 503 with the same body shape, so the platform marks the deployment
+   * is applied, and the pinned Bible corpus release is active and passed this process's integrity
+   * check; otherwise 503 with the same body shape, so the platform marks the deployment
    * unhealthy. A probe status report rather than an API error, so it is not the error envelope.
    * Single-flight and briefly cached (`ReadinessProbe`), which logs failed checks.
    */

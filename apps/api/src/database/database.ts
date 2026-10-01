@@ -3,6 +3,7 @@ import { AuthChallenge } from './models/auth-challenge.model';
 import { AuthSession } from './models/auth-session.model';
 import { BibleBook } from './models/bible-book.model';
 import { BibleEdition } from './models/bible-edition.model';
+import { BibleSuperscription } from './models/bible-superscription.model';
 import { BibleVerse } from './models/bible-verse.model';
 import { MutationReceipt } from './models/mutation-receipt.model';
 import { StudyEvent } from './models/study-event.model';
@@ -67,6 +68,7 @@ export function createDatabase(
       BibleEdition,
       BibleBook,
       BibleVerse,
+      BibleSuperscription,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

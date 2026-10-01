@@ -69,7 +69,7 @@ function buildDocument(): OpenApiDocument {
           responses: {
             200: jsonResponse('Ready', 'HealthResponse'),
             503: jsonResponse(
-              'Not ready (database down, migrations pending, or Bible corpus missing)',
+              'Not ready (database down, migrations pending, or Bible corpus missing or corrupt)',
               'HealthResponse',
             ),
             default: errorResponse,

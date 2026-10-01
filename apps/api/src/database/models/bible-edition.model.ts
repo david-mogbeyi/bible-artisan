@@ -3,8 +3,9 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
 /**
  * Hand-written model for `bible_edition` (migration 20261001094438): one immutable corpus release.
  * Written only by the corpus importer (`modules/bible-content/corpus`). After activation the
- * database refuses every change (see the migration's triggers); `activatedAt` is null only inside
- * the import transaction.
+ * database refuses every change (see the migration's triggers). It must be inserted with
+ * `activatedAt` null (an insert trigger refuses anything else) and is activated by one checked update
+ * inside the import transaction.
  */
 @Table({ tableName: 'bible_edition', timestamps: false })
 export class BibleEdition extends Model {
@@ -42,6 +43,10 @@ export class BibleEdition extends Model {
 
   @Column({ field: 'verse_count', type: DataType.INTEGER, allowNull: false })
   declare verseCount: number;
+
+  /** Number of `bible_superscription` rows (the publisher's `\d` lines); checked on activation. */
+  @Column({ field: 'superscription_count', type: DataType.INTEGER, allowNull: false })
+  declare superscriptionCount: number;
 
   /** CHECK-constrained to 'public_domain'. */
   @Column({ field: 'license_status', type: DataType.TEXT, allowNull: false })
