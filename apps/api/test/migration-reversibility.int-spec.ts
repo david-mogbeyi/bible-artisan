@@ -4,7 +4,7 @@ import { QueryTypes } from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
-import { createMigrator, MIGRATIONS_DIR } from '../src/database/migrator';
+import { createMigrator, MIGRATIONS_DIR, shippedMigrationNames } from '../src/database/migrator';
 import {
   importCorpus,
   readCorpusArtifact,
@@ -22,6 +22,7 @@ const DOMAIN_TABLES = [
   'bible_superscription',
   'bible_verse',
   'mutation_receipt',
+  'scripture_reference',
   'study',
   'study_event',
   'study_node',
@@ -68,8 +69,16 @@ describe('migration reversibility', () => {
   });
 
   it('refuses to drop an active Bible corpus without the explicit opt-in, changing nothing', async () => {
-    const before = await recordedMigrations(db);
     const migrator = createMigrator(db);
+    // Revert the migrations after the corpus first (they need no opt-in), so the next `down`
+    // reaches the corpus migration's own guard; `afterAll` and the next test restore latest.
+    const later = shippedMigrationNames().filter((name) => name > CORPUS_MIGRATION);
+    if (later[0]) await migrator.down({ to: later[0] });
+    const before = await recordedMigrations(db);
+    expect(before.at(-1)).toBe(CORPUS_MIGRATION);
+    const tablesBefore = await publicTables(db, DOMAIN_TABLES);
+    expect(tablesBefore).toEqual(expect.arrayContaining(['bible_edition', 'bible_verse']));
+
     const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
     expect((error as { cause?: unknown }).cause).toMatchObject({
@@ -77,12 +86,13 @@ describe('migration reversibility', () => {
       parent: expect.objectContaining({ code: '23000' }),
     });
     expect(await recordedMigrations(db)).toStrictEqual(before);
-    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
+    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(tablesBefore);
     const [active] = await db.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM bible_edition WHERE activated_at IS NOT NULL`,
       { type: QueryTypes.SELECT },
     );
     expect(active).toStrictEqual({ n: 1 });
+    await migrator.up();
   });
 
   it('reverts every migration to zero, then reapplies them all to latest', async () => {

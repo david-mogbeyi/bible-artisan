@@ -6,6 +6,7 @@ import { BibleEdition } from './models/bible-edition.model';
 import { BibleSuperscription } from './models/bible-superscription.model';
 import { BibleVerse } from './models/bible-verse.model';
 import { MutationReceipt } from './models/mutation-receipt.model';
+import { ScriptureReference } from './models/scripture-reference.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
 import { Study } from './models/study.model';
@@ -69,6 +70,7 @@ export function createDatabase(
       BibleBook,
       BibleVerse,
       BibleSuperscription,
+      ScriptureReference,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

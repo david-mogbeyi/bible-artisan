@@ -1,3 +1,5 @@
+import type { ReferenceErrorCode } from '@bible-artisan/contracts';
+
 /**
  * Domain exception classes the global exception filter maps to the shared error envelope
  * (PRD §24). Throw these from module services; never hand-roll a response body in a controller
@@ -111,5 +113,27 @@ export class DependencyUnavailableError extends Error {
   constructor(message = 'A required service is temporarily unavailable') {
     super(message);
     this.name = 'DependencyUnavailableError';
+  }
+}
+
+const REFERENCE_MESSAGES: Record<ReferenceErrorCode, string> = {
+  REFERENCE_MALFORMED: 'This is not a complete Bible reference',
+  REFERENCE_UNKNOWN_BOOK: 'No book in this translation matches that name',
+  REFERENCE_CHAPTER_OUT_OF_RANGE: 'That chapter does not exist in this book',
+  REFERENCE_VERSE_OUT_OF_RANGE: 'That verse does not exist in this chapter',
+  REFERENCE_RANGE_REVERSED: 'The passage ends before it starts',
+  REFERENCE_RANGE_TOO_LONG: 'A passage can span at most 200 verses',
+  REFERENCE_MULTIPLE_PASSAGES: 'Enter one passage from one book at a time',
+};
+
+/**
+ * A typed Bible reference cannot be resolved (FR-BIBLE-002, PRD §24: 422). The code says which
+ * part is wrong; the message is fixed per code and never echoes the input, a book name, or a
+ * number (NFR-PRIV-001). No nearby verse is ever offered in its place.
+ */
+export class ReferenceInvalidError extends Error {
+  constructor(readonly code: ReferenceErrorCode) {
+    super(REFERENCE_MESSAGES[code]);
+    this.name = 'ReferenceInvalidError';
   }
 }

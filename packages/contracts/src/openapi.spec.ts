@@ -117,6 +117,24 @@ describe('buildOpenApiDocument', () => {
             },
           },
         },
+        '/bible/resolve': {
+          post: {
+            description:
+              'Resolves a typed Bible reference against an active edition: a canonical range validated against the imported corpus, book candidates for an ambiguous name, or not_reference. Never returns verse text; an invalid reference is 422, never a nearby verse.',
+            security: [{ sessionCookie: [] }],
+            requestBody: {
+              required: true,
+              content: { 'application/json': { schema: ref('ResolveReferenceRequest') } },
+            },
+            responses: {
+              200: {
+                description: 'Resolution outcome',
+                content: { 'application/json': { schema: ref('ResolveReferenceResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+        },
       },
     });
     expect(doc.components.securitySchemes).toStrictEqual({
@@ -190,6 +208,8 @@ describe('buildOpenApiDocument', () => {
       'OtpStartResponse',
       'OtpVerifyRequest',
       'MeResponse',
+      'ResolveReferenceRequest',
+      'ResolveReferenceResponse',
     ]);
   });
 });

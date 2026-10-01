@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { DatabaseError, ForeignKeyConstraintError, UniqueConstraintError } from 'sequelize';
+import {
+  DatabaseError,
+  ForeignKeyConstraintError,
+  Op,
+  type Transaction,
+  UniqueConstraintError,
+} from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
@@ -10,6 +16,7 @@ import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { BibleSuperscription } from '../src/database/models/bible-superscription.model';
 import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
+import { ScriptureReference } from '../src/database/models/scripture-reference.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
@@ -555,4 +562,98 @@ describe('Sequelize models against the real schema', () => {
       .catch((e: unknown) => e);
     if (outcome !== rollback) throw outcome;
   }
+
+  /**
+   * Runs `work` against the active WEB edition inside a transaction that is always rolled back,
+   * so no scripture_reference row outlives the test. Resolves with what `work` resolved, or
+   * rejects with what it threw.
+   */
+  async function inReferenceTransaction<T>(
+    work: (editionId: string, transaction: Transaction) => Promise<T>,
+  ): Promise<T> {
+    const edition = await BibleEdition.findOne({
+      where: { code: 'engwebp', activatedAt: { [Op.ne]: null } },
+      rejectOnEmpty: true,
+    });
+    const rollback = new Error('rollback');
+    let result: { value: T } | { error: unknown } | undefined;
+    await expect(
+      db.transaction(async (transaction) => {
+        try {
+          result = { value: await work(edition.id, transaction) };
+        } catch (error) {
+          result = { error };
+        }
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    if (!result) throw new Error('no result');
+    if ('error' in result) throw result.error;
+    return result.value;
+  }
+
+  const romans = (startVerse: number, endVerse: number) => ({
+    bookCode: 'ROM',
+    startChapter: 1,
+    startVerse,
+    endChapter: 1,
+    endVerse,
+  });
+
+  it('creates a ScriptureReference through the model and reads it back with defaults', async () => {
+    const read = await inReferenceTransaction(async (editionId, transaction) => {
+      const created = await ScriptureReference.create(
+        { editionId, ...romans(1, 2) },
+        { transaction },
+      );
+      const found = await ScriptureReference.findByPk(created.id, { transaction });
+      return { editionId, found: found?.get({ plain: true }) };
+    });
+    expect(read.found).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      editionId: read.editionId,
+      ...romans(1, 2),
+      createdAt: expect.any(Date),
+    });
+  });
+
+  it('rejects a ScriptureReference endpoint that is not a corpus verse (composite FK)', async () => {
+    await expect(
+      inReferenceTransaction((editionId, transaction) =>
+        ScriptureReference.create({ editionId, ...romans(1, 999) }, { transaction }),
+      ),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+  });
+
+  it('rejects a reversed ScriptureReference range (CHECK)', async () => {
+    const error = await inReferenceTransaction((editionId, transaction) =>
+      ScriptureReference.create({ editionId, ...romans(2, 1) }, { transaction }),
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DatabaseError);
+    expect((error as DatabaseError).parent).toMatchObject({
+      code: '23514',
+      constraint: 'scripture_reference_order_check',
+    });
+  });
+
+  it('rejects a duplicate ScriptureReference range for the same edition (UNIQUE)', async () => {
+    await expect(
+      inReferenceTransaction(async (editionId, transaction) => {
+        await ScriptureReference.create({ editionId, ...romans(3, 4) }, { transaction });
+        await ScriptureReference.create({ editionId, ...romans(3, 4) }, { transaction });
+      }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+  });
+
+  it('refuses to update a ScriptureReference (immutable identity)', async () => {
+    const error = await inReferenceTransaction(async (editionId, transaction) => {
+      const created = await ScriptureReference.create(
+        { editionId, ...romans(5, 6) },
+        { transaction },
+      );
+      await created.update({ endVerse: 7 }, { transaction });
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DatabaseError);
+    expect((error as DatabaseError).parent).toMatchObject({ code: '23000' });
+  });
 });
