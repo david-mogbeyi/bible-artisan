@@ -6,6 +6,10 @@ import {
   otpVerifyRequestSchema,
 } from './auth';
 import {
+  biblePassageResponseSchema,
+  bibleReferenceRequestSchema,
+  bibleReferenceResponseSchema,
+  bibleTranslationsResponseSchema,
   DEFAULT_SEARCH_LIMIT,
   MAX_SEARCH_CURSOR_LENGTH,
   MAX_SEARCH_LIMIT,
@@ -166,6 +170,18 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/bible/references': {
+        post: {
+          description:
+            'Returns the shared reference for a chapter, or one verse of it, of an active edition, chosen by book code and numbers (no text parsing) and validated against the imported corpus. Without verse it is the whole chapter: the same reference POST /bible/resolve gives for that chapter. A book, chapter or verse the edition lacks is 422 with a reference error code, never a nearby one. Idempotent upsert; never returns verse text.',
+          security: sessionCookie,
+          requestBody: jsonBody('BibleReferenceRequest'),
+          responses: {
+            200: jsonResponse('The reference', 'BibleReferenceResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/bible/search': {
         get: {
           description:
@@ -202,6 +218,32 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/bible/translations': {
+        get: {
+          description:
+            "Lists the active Bible editions with their attribution and books (canon order, chapter counts), for the reader's translation and book/chapter selectors.",
+          security: sessionCookie,
+          responses: {
+            200: jsonResponse('Active editions', 'BibleTranslationsResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/bible/passages': {
+        get: {
+          description:
+            "Returns one chapter of an active edition, the reading context: every verse exactly as stored (a verse the edition gives no text for has empty text), the publisher's superscriptions separately, the edition attribution, and the neighboring chapters across books, each with its whole-chapter referenceId. The chapter is the one holding the reference's start, and the reference fixes the edition (reach a chapter or verse with POST /bible/resolve or POST /bible/references first), so only opaque IDs travel in the URL. editionId is optional; an unknown reference, or an editionId that is not the reference's edition, is 404.",
+          security: sessionCookie,
+          parameters: [
+            queryParam('referenceId', true, { type: 'string', format: 'uuid' }),
+            queryParam('editionId', false, { type: 'string', format: 'uuid' }),
+          ],
+          responses: {
+            200: jsonResponse('One chapter', 'BiblePassageResponse'),
+            default: errorResponse,
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {
@@ -218,6 +260,10 @@ function buildDocument(): OpenApiDocument {
         ResolveReferenceRequest: toSchema(resolveReferenceRequestSchema),
         ResolveReferenceResponse: toSchema(resolveReferenceResponseSchema),
         SearchBibleResponse: toSchema(searchBibleResponseSchema),
+        BibleTranslationsResponse: toSchema(bibleTranslationsResponseSchema),
+        BiblePassageResponse: toSchema(biblePassageResponseSchema),
+        BibleReferenceRequest: toSchema(bibleReferenceRequestSchema),
+        BibleReferenceResponse: toSchema(bibleReferenceResponseSchema),
       },
     },
   };

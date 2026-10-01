@@ -462,6 +462,113 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs Bible passages, structured references and translations without the reference, book, or text', async () => {
+    const edition = await BibleEdition.findOne({ where: { code: 'engwebp' }, rejectOnEmpty: true });
+    const route = { method: 'GET', route: '/v1/bible/passages' };
+    const passageFor = (params: Record<string, string>): Test =>
+      withPrivateChannels(http().get('/v1/bible/passages').query(params), cookie);
+    /** Tracks returned Scripture; short strings are skipped so they cannot match by accident. */
+    const trackText = (text: string): void => {
+      if (text.length >= 20) track(text);
+    };
+
+    const translations = await withPrivateChannels(http().get('/v1/bible/translations'), cookie);
+    expect(translations.status).toBe(200);
+    await expectLogged(translations, {
+      method: 'GET',
+      route: '/v1/bible/translations',
+      status: 200,
+    });
+
+    /** Resolves as the reader does; the id and label are tracked as private. */
+    const resolveId = async (input: string): Promise<string> => {
+      const resolved = await http()
+        .post('/v1/bible/resolve')
+        .set('Cookie', `ba_session=${cookie}`)
+        .send({ input, editionId: edition.id })
+        .expect(200);
+      const { reference } = resolved.body as { reference: { id: string; label: string } };
+      track(reference.id);
+      track(reference.label);
+      return reference.id;
+    };
+
+    // A chapter with a superscription: neither the reference, the verse text, the title, the book
+    // name nor the neighbors reach a log line.
+    const psalm = await passageFor({
+      editionId: edition.id,
+      referenceId: await resolveId('Psalms 3'),
+    });
+    const body = psalm.body as {
+      book: { name: string };
+      verses: { text: string }[];
+      superscriptions: { text: string }[];
+      previous: { referenceId: string };
+      next: { referenceId: string };
+    };
+    track(body.book.name);
+    track(body.previous.referenceId);
+    track(body.next.referenceId);
+    for (const verse of body.verses) trackText(verse.text);
+    for (const superscription of body.superscriptions) trackText(superscription.text);
+    await expectLogged(psalm, { ...route, status: 200 });
+
+    // Without editionId: the reference fixes the edition.
+    const verse = await passageFor({ referenceId: await resolveId('Romans 8:28') });
+    for (const v of (verse.body as { verses: { text: string }[] }).verses) trackText(v.text);
+    await expectLogged(verse, { ...route, status: 200 });
+
+    // Structured navigation: the book code and numbers travel in the body, which is never logged.
+    const referencesRoute = { method: 'POST', route: '/v1/bible/references' };
+    const chosen = await withPrivateChannels(http().post('/v1/bible/references'), cookie).send({
+      editionId: edition.id,
+      bookCode: track('HAB'),
+      chapter: 3,
+      verse: 17,
+    });
+    const chosenReference = (chosen.body as { reference: { id: string; label: string } }).reference;
+    track(chosenReference.id);
+    track(chosenReference.label);
+    await expectLogged(chosen, { ...referencesRoute, status: 200 });
+    const missing = await withPrivateChannels(http().post('/v1/bible/references'), cookie).send({
+      editionId: edition.id,
+      bookCode: 'HAB',
+      chapter: 4,
+    });
+    await expectLogged(
+      missing,
+      { ...referencesRoute, status: 422 },
+      {
+        errorType: 'ReferenceInvalidError',
+        body: envelope({
+          code: 'REFERENCE_CHAPTER_OUT_OF_RANGE',
+          message: 'That chapter does not exist in this book',
+        }),
+      },
+    );
+
+    const unknown = await passageFor({ editionId: edition.id, referenceId: track(randomUUID()) });
+    await expectLogged(
+      unknown,
+      { ...route, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+
+    const invalid = await passageFor({ editionId: edition.id, referenceId: secret('reference') });
+    await expectLogged(
+      invalid,
+      { ...route, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { referenceId: ['Invalid UUID'] },
+        }),
+      },
+    );
+  });
+
   it('logs a cross-site mutation refused before routing (403)', async () => {
     const res = await withPrivateChannels(http().post(`/v1/auth/logout${query()}`))
       .set('Origin', `https://${secret('origin').toLowerCase()}.example`)

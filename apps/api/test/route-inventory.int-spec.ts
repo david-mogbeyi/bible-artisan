@@ -70,6 +70,28 @@ const ROUTES: Record<string, Access> = {
       test: 'gives another user the same shared results for the same query',
     },
   },
+  // Shared corpus data, not owner-scoped: another user gets the same chapter or edition list.
+  'GET /v1/bible/passages': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-passages.int-spec.ts',
+      test: 'gives another user the same shared chapter for the same request',
+    },
+  },
+  'POST /v1/bible/references': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-passages.int-spec.ts',
+      test: 'answers 401 without a session and gives another user the same shared reference',
+    },
+  },
+  'GET /v1/bible/translations': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-passages.int-spec.ts',
+      test: 'answers 401 without a session and gives another user the same shared list',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

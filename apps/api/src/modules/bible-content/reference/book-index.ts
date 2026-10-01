@@ -86,6 +86,46 @@ export class BookIndex {
     return this.books.find((book) => book.code === code);
   }
 
+  /** Every book of the edition, in canon order. */
+  all(): readonly IndexBook[] {
+    return this.books;
+  }
+
+  /** The deterministic display label of a range in one of this edition's books. */
+  label(range: ReferenceRange): string {
+    const book = this.book(range.bookCode);
+    if (!book) throw new Error('BookIndex: range names a book not in this edition');
+    return referenceLabel(book, range);
+  }
+
+  /**
+   * A whole chapter, or one verse of it, chosen by book code and numbers (structured navigation,
+   * BIB-17): no text is parsed. The whole chapter is the same range `resolveParsedReference` gives
+   * for `<Book> <chapter>` (or the bare name of a single-chapter book), so it maps to the same
+   * shared reference row. A book, chapter or verse the edition lacks is an error, never adjusted.
+   */
+  chapterRange(
+    bookCode: string,
+    chapter: number,
+    verse?: number,
+  ): Extract<Resolution, { outcome: 'resolved' | 'invalid' }> {
+    const book = this.book(bookCode);
+    if (!book) return { outcome: 'invalid', code: 'REFERENCE_UNKNOWN_BOOK' };
+    const last = book.versesPerChapter[chapter - 1];
+    if (last === undefined) return { outcome: 'invalid', code: 'REFERENCE_CHAPTER_OUT_OF_RANGE' };
+    if (verse !== undefined && verse > last) {
+      return { outcome: 'invalid', code: 'REFERENCE_VERSE_OUT_OF_RANGE' };
+    }
+    const range: ReferenceRange = {
+      bookCode,
+      startChapter: chapter,
+      startVerse: verse ?? 1,
+      endChapter: chapter,
+      endVerse: verse ?? last,
+    };
+    return { outcome: 'resolved', range, label: referenceLabel(book, range) };
+  }
+
   /**
    * Every book the token could mean, in canon order: exact key matches plus (for a token of at
    * least two letters) books whose normalized name starts with it. Book-only input never matches

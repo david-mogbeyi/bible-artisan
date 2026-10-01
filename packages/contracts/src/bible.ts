@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { httpUrlSchema } from './url';
 
 /**
  * Bible reference resolution DTOs (BIB-15; PRD sections 14, 23, 24; FR-BIBLE-001..003).
@@ -172,3 +173,117 @@ export type SearchBibleResponse = z.infer<typeof searchBibleResponseSchema>;
  * a `referenceSuggestion`.
  */
 export const SEARCH_QUERY_IS_REFERENCE = 'SEARCH_QUERY_IS_REFERENCE';
+
+/**
+ * Reader DTOs (BIB-17; PRD sections 11, 14, 20, 24; FR-BIBLE-007/009, NFR-PERF-001). Verse and
+ * superscription text is the imported corpus's, byte for byte; nothing is reconstructed.
+ */
+
+/** Attribution shown beside every display of an edition's text (PRD section 20). */
+export const bibleEditionAttributionSchema = z.object({
+  id: z.uuid(),
+  name: z.string(),
+  abbreviation: z.string(),
+  /** The publisher's attribution line, verbatim from the edition's rights record. */
+  attribution: z.string(),
+  /** The publisher's notice page (http/https only), or null when the edition records none. */
+  noticeUrl: httpUrlSchema.nullable(),
+});
+
+export type BibleEditionAttribution = z.infer<typeof bibleEditionAttributionSchema>;
+
+export const bibleBookSummarySchema = z.object({
+  code: z.string(),
+  /** The publisher's book name, e.g. `1 Corinthians`. */
+  name: z.string(),
+  chapterCount: z.number().int().positive(),
+});
+
+export type BibleBookSummary = z.infer<typeof bibleBookSummarySchema>;
+
+export const bibleTranslationSchema = bibleEditionAttributionSchema.extend({
+  code: z.string(),
+  language: z.string(),
+  /** Every book of the edition, in canon order. */
+  books: z.array(bibleBookSummarySchema),
+});
+
+export type BibleTranslation = z.infer<typeof bibleTranslationSchema>;
+
+export const bibleTranslationsResponseSchema = z.object({
+  /** Active editions only. */
+  translations: z.array(bibleTranslationSchema),
+});
+
+export type BibleTranslationsResponse = z.infer<typeof bibleTranslationsResponseSchema>;
+
+/**
+ * `GET /bible/passages`: one chapter, the reading context (PRD section 11): the chapter holding
+ * the reference's start, with the reference. The reference fixes the edition, so a bookmarked
+ * `referenceId` always opens the same edition. `editionId` (PRD section 24) is optional; when
+ * given it must be the reference's edition, else 404. Only opaque ids travel in the URL, so no
+ * Scripture reference appears in any request log (NFR-PRIV-001).
+ */
+export const biblePassageQuerySchema = z.object({
+  referenceId: z.uuid(),
+  editionId: z.uuid().optional(),
+});
+
+export type BiblePassageQuery = z.infer<typeof biblePassageQuerySchema>;
+
+/** A neighboring chapter, with the id of its whole-chapter reference: one request to open it. */
+export const bibleChapterLinkSchema = z.object({
+  bookCode: z.string(),
+  bookName: z.string(),
+  chapter: z.number().int().positive(),
+  /** The whole chapter's shared `scripture_reference` id (same identity as `POST /bible/resolve`). */
+  referenceId: z.uuid(),
+});
+
+export type BibleChapterLink = z.infer<typeof bibleChapterLinkSchema>;
+
+export const biblePassageResponseSchema = z.object({
+  edition: bibleEditionAttributionSchema,
+  book: bibleBookSummarySchema,
+  chapter: z.number().int().positive(),
+  /**
+   * Every verse of the chapter in order, text exactly as stored. A verse the edition numbers but
+   * gives no text for has `text: ''`; it is returned, never dropped or filled.
+   */
+  verses: z.array(z.object({ verse: z.number().int().positive(), text: z.string() })),
+  /** The publisher's superscriptions (Psalm titles, stanza headings), never part of a verse. */
+  superscriptions: z.array(
+    z.object({ beforeVerse: z.number().int().positive(), text: z.string() }),
+  ),
+  /** The requested reference (it may continue into later chapters). */
+  reference: scriptureReferenceSchema,
+  /** Neighboring chapters in canon order, across books; null at either end of the canon. */
+  previous: bibleChapterLinkSchema.nullable(),
+  next: bibleChapterLinkSchema.nullable(),
+});
+
+export type BiblePassageResponse = z.infer<typeof biblePassageResponseSchema>;
+
+/** Highest chapter or verse number accepted before the corpus check (Psalms has 150 chapters). */
+export const MAX_CHAPTER_OR_VERSE = 999;
+
+/**
+ * `POST /bible/references`: the reference for a chapter, or one verse of it, chosen by structure
+ * (the book/chapter picker, a translation change, a search result), validated against the
+ * edition's corpus with no text parsing. Without `verse` it is the whole chapter, the same shared
+ * reference `POST /bible/resolve` gives for that chapter. A book, chapter or verse the edition
+ * lacks is 422 with a reference error code, never the nearest one that exists.
+ */
+export const bibleReferenceRequestSchema = z.object({
+  editionId: z.uuid(),
+  /** USFM book code, e.g. `ROM`. */
+  bookCode: z.string().regex(/^[1-4A-Z][A-Z0-9]{2}$/, 'Enter a book code such as ROM'),
+  chapter: z.number().int().positive().max(MAX_CHAPTER_OR_VERSE),
+  verse: z.number().int().positive().max(MAX_CHAPTER_OR_VERSE).optional(),
+});
+
+export type BibleReferenceRequest = z.infer<typeof bibleReferenceRequestSchema>;
+
+export const bibleReferenceResponseSchema = z.object({ reference: scriptureReferenceSchema });
+
+export type BibleReferenceResponse = z.infer<typeof bibleReferenceResponseSchema>;

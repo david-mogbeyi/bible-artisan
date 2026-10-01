@@ -1,11 +1,18 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { ResolveReferenceResponse, SearchReferenceSuggestion } from '@bible-artisan/contracts';
+import {
+  type BibleEditionAttribution,
+  httpUrlSchema,
+  type ResolveReferenceResponse,
+  type ScriptureReference as ScriptureReferenceDto,
+  type SearchReferenceSuggestion,
+} from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import { NotFoundError, ReferenceInvalidError } from '../../../common/errors/domain-errors';
 import { DATABASE } from '../../../database/database.module';
 import type { Database } from '../../../database/database';
 import { BibleBook } from '../../../database/models/bible-book.model';
 import { BibleEdition } from '../../../database/models/bible-edition.model';
+import { ScriptureReference } from '../../../database/models/scripture-reference.model';
 import {
   BookIndex,
   type IndexBook,
@@ -27,6 +34,18 @@ export type BookOnlyResolution = Extract<Resolution, { outcome: 'resolved' | 'am
 export type SearchPrecedence =
   { kind: 'keywords' } | { kind: 'book'; resolution: BookOnlyResolution } | { kind: 'reference' };
 
+/**
+ * An active edition as the reader needs it: its attribution and its book index. Cached for the
+ * process lifetime: the database refuses every change to an activated edition row, its books and
+ * its verses (BIB-14).
+ */
+export interface ActiveEdition {
+  attribution: BibleEditionAttribution;
+  code: string;
+  language: string;
+  index: BookIndex;
+}
+
 interface ChapterRow {
   bookCode: string;
   chapter: number;
@@ -42,16 +61,16 @@ interface ChapterRow {
 @Injectable()
 export class ReferenceService {
   /**
-   * One book index per ACTIVE edition. Safe to keep for the process lifetime: the database
-   * refuses every change to an activated edition's books and verses (BIB-14).
+   * One entry per ACTIVE edition. Safe to keep for the process lifetime: the database refuses
+   * every change to an activated edition row, its books and its verses (BIB-14).
    */
-  private readonly indexes = new Map<string, Promise<BookIndex>>();
+  private readonly editions = new Map<string, Promise<ActiveEdition>>();
 
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   /** Unknown or not-yet-active edition: 404. Invalid reference: `ReferenceInvalidError` (422). */
   async resolve(editionId: string, input: string): Promise<ResolveReferenceResponse> {
-    const index = await this.indexFor(editionId);
+    const { index } = await this.activeEdition(editionId);
     const resolution = resolveParsedReference(index, parseReference(input));
     switch (resolution.outcome) {
       case 'invalid':
@@ -64,9 +83,59 @@ export class ReferenceService {
     }
   }
 
+  /**
+   * A stored reference with its active edition (whose attribution and index come from the cache,
+   * so the caller needs no second edition lookup). The reference fixes the edition; a given
+   * `editionId` must be that edition. Unknown id, another edition, or an inactive edition: the
+   * same 404.
+   */
+  async storedReference(
+    referenceId: string,
+    editionId?: string,
+  ): Promise<{ reference: ScriptureReferenceDto; edition: ActiveEdition }> {
+    const row = await ScriptureReference.findByPk(referenceId);
+    if (!row || (editionId !== undefined && row.editionId !== editionId)) throw new NotFoundError();
+    const edition = await this.activeEdition(row.editionId);
+    const range: ReferenceRange = {
+      bookCode: row.bookCode,
+      startChapter: row.startChapter,
+      startVerse: row.startVerse,
+      endChapter: row.endChapter,
+      endVerse: row.endVerse,
+    };
+    return {
+      reference: {
+        id: row.id,
+        editionId: row.editionId,
+        ...range,
+        label: edition.index.label(range),
+      },
+      edition,
+    };
+  }
+
+  /**
+   * The shared reference for a whole chapter, or one verse of it, chosen by structure (no text
+   * parsing): validated against the corpus and persisted exactly as `resolve` persists the same
+   * range, so both give the same id. Unknown or inactive edition: 404. A book, chapter or verse
+   * the edition lacks: `ReferenceInvalidError` (422), never the nearest one that exists.
+   */
+  async chapterReference(
+    editionId: string,
+    bookCode: string,
+    chapter: number,
+    verse?: number,
+  ): Promise<ScriptureReferenceDto> {
+    const { index } = await this.activeEdition(editionId);
+    const result = index.chapterRange(bookCode, chapter, verse);
+    if (result.outcome === 'invalid') throw new ReferenceInvalidError(result.code);
+    const id = await this.persist(editionId, result.range);
+    return { id, editionId, ...result.range, label: result.label };
+  }
+
   /** The active edition's book index (cached). Unknown or not-yet-active edition: 404. */
-  bookIndex(editionId: string): Promise<BookIndex> {
-    return this.indexFor(editionId);
+  async bookIndex(editionId: string): Promise<BookIndex> {
+    return (await this.activeEdition(editionId)).index;
   }
 
   /**
@@ -76,7 +145,7 @@ export class ReferenceService {
    * Unknown or not-yet-active edition: 404.
    */
   async searchPrecedence(editionId: string, input: string): Promise<SearchPrecedence> {
-    const index = await this.indexFor(editionId);
+    const { index } = await this.activeEdition(editionId);
     const parsed = parseReference(input);
     const resolution = resolveParsedReference(index, parsed);
     if (resolution.outcome === 'not_reference') return { kind: 'keywords' };
@@ -114,28 +183,42 @@ export class ReferenceService {
   }
 
   /**
-   * Single flight: the first caller stores one promise covering the active-edition check and the
+   * The active edition (cached). Unknown or not-yet-active edition: 404.
+   *
+   * Single flight: the first caller stores one promise covering the active-edition read and the
    * corpus load, and every concurrent caller awaits that same promise, so the full-corpus
    * aggregation runs once. A rejection (unknown or inactive edition, a database blip) is evicted,
    * so a later call retries.
    */
-  private indexFor(editionId: string): Promise<BookIndex> {
-    const cached = this.indexes.get(editionId);
+  activeEdition(editionId: string): Promise<ActiveEdition> {
+    const cached = this.editions.get(editionId);
     if (cached) return cached;
-    const loading = this.loadActiveIndex(editionId);
-    this.indexes.set(editionId, loading);
+    const loading = this.loadActiveEdition(editionId);
+    this.editions.set(editionId, loading);
     loading.catch(() => {
-      if (this.indexes.get(editionId) === loading) this.indexes.delete(editionId);
+      if (this.editions.get(editionId) === loading) this.editions.delete(editionId);
     });
     return loading;
   }
 
-  private async loadActiveIndex(editionId: string): Promise<BookIndex> {
-    const active = await BibleEdition.count({
+  private async loadActiveEdition(editionId: string): Promise<ActiveEdition> {
+    const edition = await BibleEdition.findOne({
       where: { id: editionId, activatedAt: { [Op.ne]: null } },
     });
-    if (active === 0) throw new NotFoundError();
-    return this.loadIndex(editionId);
+    if (!edition) throw new NotFoundError();
+    const notice = httpUrlSchema.safeParse(edition.rightsRecord.publisherNoticeUrl);
+    return {
+      attribution: {
+        id: edition.id,
+        name: edition.name,
+        abbreviation: edition.abbreviation,
+        attribution: edition.attribution,
+        noticeUrl: notice.success ? notice.data : null,
+      },
+      code: edition.code,
+      language: edition.language,
+      index: await this.loadIndex(editionId),
+    };
   }
 
   private async loadIndex(editionId: string): Promise<BookIndex> {

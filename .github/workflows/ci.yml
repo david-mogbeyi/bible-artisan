@@ -31,6 +31,8 @@ jobs:
       # Shared 2-vCPU runners are noisy: the concurrent search p95 is measured and printed, but held
       # to a looser bound than NFR-PERF-002's 750 ms production target (ADR 0001, BIB-16 addendum).
       SEARCH_P95_BUDGET_MS: '2000'
+      # Same for the reader's concurrent passage p95 (NFR-PERF-001's 500 ms target; BIB-17).
+      READER_P95_BUDGET_MS: '2000'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

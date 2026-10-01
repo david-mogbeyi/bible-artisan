@@ -8,6 +8,7 @@ import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
+import { PassageService } from '../src/modules/bible-content/passage/passage.service';
 import { ReferenceService } from '../src/modules/bible-content/reference/reference.service';
 import { createTestApp } from './app';
 
@@ -20,15 +21,14 @@ function sqlOf(sql: unknown): string {
 
 const isCorpusAggregation = (sql: string): boolean =>
   /FROM bible_verse/.test(sql) && /GROUP BY book_code, chapter/.test(sql);
-const isEditionCheck = (sql: string): boolean =>
-  /FROM "bible_edition"/.test(sql) && /count\(/i.test(sql);
+const isEditionCheck = (sql: string): boolean => /FROM "bible_edition"/.test(sql);
 
 /**
  * ReferenceService's per-edition index cache (BIB-15): one single-flight promise covers the
  * active-edition check and the full-corpus aggregation, and a failure is evicted so a later call
  * retries. Each test builds a fresh service, so it starts with an empty cache.
  */
-describe('ReferenceService edition index cache', () => {
+describe('ReferenceService active edition cache', () => {
   let app: INestApplication<Server>;
   let db: Database;
   let editionId: string;
@@ -107,3 +107,45 @@ describe('ReferenceService edition index cache', () => {
     expect(queriesMatching(spy, isCorpusAggregation)).toBe(0);
   });
 });
+
+describe('PassageService on the active edition cache', () => {
+  let app: INestApplication<Server>;
+  let db: Database;
+
+  beforeAll(async () => {
+    app = await createTestApp();
+    db = app.get<Database>(DATABASE);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('reads a warm chapter with no edition query and no second index load (attribution is cached)', async () => {
+    const edition = await BibleEdition.findOne({
+      where: { code: ENGWEBP_RELEASE.code, activatedAt: { [Op.ne]: null } },
+      rejectOnEmpty: true,
+    });
+    const references = new ReferenceService(db);
+    const passages = new PassageService(references);
+    const { id } = await references.chapterReference(edition.id, 'ROM', 9);
+    const first = await passages.passage({ referenceId: id });
+
+    const spy = vi.spyOn(db, 'query');
+    const again = await passages.passage({ referenceId: id });
+    expect(again).toStrictEqual(first);
+    expect(queriesMatchingSql(spy, isEditionCheck)).toBe(0);
+    expect(queriesMatchingSql(spy, isCorpusAggregation)).toBe(0);
+  });
+});
+
+function queriesMatchingSql(
+  spy: { mock: { calls: unknown[][] } },
+  test: (sql: string) => boolean,
+): number {
+  return spy.mock.calls.filter(([sql]) => test(sqlOf(sql))).length;
+}

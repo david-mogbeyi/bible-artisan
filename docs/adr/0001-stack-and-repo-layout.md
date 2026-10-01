@@ -353,6 +353,41 @@ The command is a separate step, not a migration: migrations only get `context.qu
 
 **Not in BIB-16:** the search screen (BIB-17), anchors (BIB-18), `search_performed` events (BIB-55), study/library search (BIB-21), searching Psalm superscriptions (verse text only in MVP), and semantic search (post-MVP).
 
+## Addendum (2026-10-01, BIB-17): the reader
+
+`GET /v1/bible/translations`, `GET /v1/bible/passages` and `POST /v1/bible/references` (`modules/bible-content/`) serve the reader. All are authenticated and not owner-scoped (shared corpus). The only writes are idempotent upserts of shared `scripture_reference` rows, as `POST /bible/resolve` already does.
+
+- **One chapter per response, by reference only.** The chapter is the reading context (PRD section 11). `GET /bible/passages?referenceId=` returns the chapter that holds the reference's start, with the reference, so the client marks its verses. A reference covering the whole chapter marks nothing. The longest response is Psalm 119 (176 verses).
+- **The reference fixes the edition.** A `scripture_reference` row belongs to one edition, so the passage's edition is the reference's. PRD section 24's `editionId` is accepted but optional; when given it must be the reference's edition, else 404. A bookmark (`/bible?ref=`) therefore keeps opening the same edition when another edition is activated. The first version defaulted to the first active edition by name, which would have broken bookmarks.
+- **Structured navigation, no text round-trips.** `previous`/`next` carry the neighboring chapter's whole-chapter `referenceId`; the server upserts those rows with the same identity rules as `resolve` (BIB-15). So Previous/Next is a single request. The book/chapter picker, a translation change, and opening a search result use `POST /bible/references` with `{ editionId, bookCode, chapter, verse? }`. It validates against the corpus index (422 with the BIB-15 reference codes, never a nearby chapter) and returns the same shared reference `resolve` gives for that range. The single-chapter-book rule lives only in the server (`BookIndex.chapterRange`), and a unit test proves that for all 1,189 chapters it matches resolving `<Book> <n>` (or the bare name).
+- **Attribution is cached with the index.** An activated `bible_edition` row is immutable (BIB-14 triggers), so `ReferenceService` caches each active edition's attribution with its book index. A warm passage read makes no edition query.
+- **Verbatim, never repaired.** Verses and superscriptions are the stored rows, byte for byte. The 5 verses with empty text come back as `text: ''`, and the web shows the number with "No text for this verse in this edition." Psalm titles and stanza headings stay in `superscriptions` and are never merged into verse text. A `referenceId` that is unknown or bound to another edition is 404. Nonexistent chapters and verses are refused by `POST /bible/resolve` and `POST /bible/references` (422), never repaired.
+
+  An integration test walks all 1,189 chapters, starting from Genesis 1, by following each response's `next.referenceId`, exactly as the web does. It compares each whole body to the stored rows.
+
+- **Attribution** (`bible_edition.attribution` plus the rights record's publisher notice URL, validated with `httpUrlSchema`) comes with every passage and is shown beside the text and under search results.
+- **Performance (NFR-PERF-001).** Measured locally, over three runs: 100 concurrent requests, p95 2.3 to 3.4 ms; single requests at most 3.6 ms. The test holds p95 to `READER_P95_BUDGET_MS` (500 locally, 2,000 in CI, like BIB-16). BIB-52 measures on deployment hardware.
+- **URL and privacy: opaque ids only.** PRD section 9 allows stable query parameters for reader state, but a reference in a URL also lands in browser history and in every request log on the way. The Next dev server prints `GET /bible?book=ROM&chapter=9`, and hosting proxies log URLs the same way. AGENTS.md rule 6 and NFR-PRIV-001 keep Scripture references out of logs.
+
+  So `/bible` holds only `ref=<scripture_reference id>`. Previous/next use the id the link carries. The picker, a translation change and a search result send book code and numbers in the body of `POST /bible/references`, and typed text goes in the body of `POST /bible/resolve`; request bodies are never logged. Only the resulting id goes in the URL.
+
+  - Overlapping navigations are ordered on the client: each one the user starts takes a sequence token, and only the latest token's result is applied, so the last-initiated chapter wins.
+  - The search text stays in component state only, and nothing goes to localStorage.
+  - The API logs route patterns only. `log-redaction.int-spec.ts` covers both routes.
+  - `GET /bible/search?q=` still carries the query in the API URL, as PRD section 24 specifies (BIB-16); our logs record only its route pattern.
+
+- **Search UI (deferred from BIB-16).** One input resolves first (`POST /bible/resolve`):
+  - `resolved` opens the reference;
+  - `ambiguous` offers the candidate books;
+  - a 422 shows the correction and runs no keyword search;
+  - `not_reference` runs a terms search.
+
+  A quoted input or "Exact phrase" goes straight to phrase search. The `referenceSuggestion` shows as "Open <label>". Results and candidates are kept per edition. Changing the translation drops them, so they never show under another edition's attribution, and a result opens in the edition it was found in. "Recent local Bible searches" (PRD section 11) is deferred, because it would persist queries on the device.
+
+- **Errors in the UI** are chosen from status and `code`; a server `message` is never rendered. 429/503 (and envelopes marked `retryable`) offer Retry, held until `Retry-After`. A 401 re-checks the session, so `RequireAuth` sends the user to sign in with `next` set to the current path.
+
+- **Not in BIB-17:** the study inspector mount, `POST /studies/:id/activity` and visit events (FR-BIBLE-008; no study can exist before BIB-19, so this belongs to BIB-55 and the workspace ticket), anchors/selection (BIB-18), phone tabs (BIB-38), and offline chapters.
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  biblePassageQuerySchema,
+  bibleReferenceRequestSchema,
   resolveReferenceRequestSchema,
   resolveReferenceResponseSchema,
   searchBibleQuerySchema,
@@ -158,6 +160,46 @@ describe('searchBibleResponseSchema', () => {
       page,
     ]) {
       expect(searchBibleResponseSchema.safeParse(body).success).toBe(false);
+    }
+  });
+});
+
+describe('biblePassageQuerySchema', () => {
+  it('requires an opaque reference id; the edition id is optional', () => {
+    const referenceId = '00000000-0000-4000-8000-000000000003';
+    expect(biblePassageQuerySchema.parse({ editionId, referenceId })).toStrictEqual({
+      editionId,
+      referenceId,
+    });
+    expect(biblePassageQuerySchema.parse({ referenceId })).toStrictEqual({ referenceId });
+    for (const query of [
+      { editionId },
+      { editionId, referenceId: 'rom-9-1' },
+      { editionId: 'webp', referenceId },
+    ]) {
+      expect(biblePassageQuerySchema.safeParse(query).success).toBe(false);
+    }
+  });
+});
+
+describe('bibleReferenceRequestSchema', () => {
+  it('takes a book code and numbers, never reference text', () => {
+    expect(
+      bibleReferenceRequestSchema.parse({ editionId, bookCode: 'ROM', chapter: 9 }),
+    ).toStrictEqual({ editionId, bookCode: 'ROM', chapter: 9 });
+    expect(
+      bibleReferenceRequestSchema.parse({ editionId, bookCode: '1CO', chapter: 2, verse: 4 }),
+    ).toStrictEqual({ editionId, bookCode: '1CO', chapter: 2, verse: 4 });
+    for (const body of [
+      { editionId, bookCode: 'Romans', chapter: 9 },
+      { editionId, bookCode: 'ROM', chapter: 0 },
+      { editionId, bookCode: 'ROM', chapter: 1.5 },
+      { editionId, bookCode: 'ROM', chapter: '9' },
+      { editionId, bookCode: 'ROM', chapter: 1000 },
+      { editionId, bookCode: 'ROM', chapter: 9, verse: 0 },
+      { bookCode: 'ROM', chapter: 9 },
+    ]) {
+      expect(bibleReferenceRequestSchema.safeParse(body).success).toBe(false);
     }
   });
 });
