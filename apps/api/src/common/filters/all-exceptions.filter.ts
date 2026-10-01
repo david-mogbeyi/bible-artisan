@@ -1,7 +1,6 @@
 import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
 import { Catch, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import type { ErrorEnvelope } from '@bible-artisan/contracts';
-import { randomUUID } from 'node:crypto';
 import { STATUS_CODES } from 'node:http';
 import { ConnectionError, TimeoutError } from 'sequelize';
 import {
@@ -15,7 +14,7 @@ import {
   UnauthenticatedError,
   ValidationError,
 } from '../errors/domain-errors';
-import { isUuid } from '../validation/uuid';
+import { correlationIdOf, errorTypeOf } from '../../modules/observability/correlation';
 
 /**
  * Minimal structural typing for the underlying HTTP request/response so this filter doesn't need
@@ -53,24 +52,16 @@ const CONNECTION_LOSS_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * PostgreSQL SQLSTATEs for a transaction PostgreSQL aborted because of a concurrent one, not
- * because the request is wrong: 40P01 deadlock_detected, 40001 serialization_failure. The whole
- * transaction (domain writes, event, receipt) was rolled back, so retrying the identical request
- * with the same Idempotency-Key is safe and normally succeeds.
+ * PostgreSQL SQLSTATEs for a transaction PostgreSQL aborted for a reason other than the request
+ * being wrong: 40P01 deadlock_detected, 40001 serialization_failure, 57014 query_canceled (our
+ * statement_timeout, e.g. a waiter behind a long-held row lock), 25P03
+ * idle_in_transaction_session_timeout. The whole transaction (domain writes, event, receipt) was
+ * rolled back, so retrying the identical request with the same Idempotency-Key is safe.
  */
-const TRANSIENT_CONFLICT_CODES: ReadonlySet<string> = new Set(['40P01', '40001']);
+const TRANSIENT_CONFLICT_CODES: ReadonlySet<string> = new Set(['40P01', '40001', '57014', '25P03']);
 
 /** Seconds a client should wait before retrying a transient conflict. */
 const TRANSIENT_CONFLICT_RETRY_AFTER_SECONDS = 1;
-
-/**
- * A client-supplied `x-correlation-id` is echoed and logged, so only a bounded opaque value (a
- * UUID) is accepted. Anything else (missing, empty, repeated, over-long, free text) is replaced
- * by a freshly generated ID, so a client cannot inject arbitrary content into logs.
- */
-export function resolveCorrelationId(header: string | string[] | undefined): string {
-  return isUuid(header) ? header : randomUUID();
-}
 
 /**
  * Maps every thrown exception to the shared error envelope (PRD §24), the only shape a 4xx/5xx
@@ -96,22 +87,29 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<ExpressLikeResponse>();
     const request = ctx.getRequest<ExpressLikeRequest>();
 
-    const correlationId = resolveCorrelationId(request.headers['x-correlation-id']);
+    // The ID `requestLogging` assigned at the start of this request, so the envelope, the
+    // X-Correlation-Id header, and every log line for the request agree.
+    const correlationId = correlationIdOf(request);
     const { status, envelope, retryAfterSeconds } = this.toEnvelope(exception, correlationId);
+    // Allowlisted fields only: the code is a fixed constant or a status name, never input.
+    const fields = {
+      code: envelope.code,
+      status,
+      correlationId,
+      errorType: errorTypeOf(exception),
+    };
 
     if (response.headersSent) {
       // Part of a response already went out, so no envelope can follow it. Destroy the response
       // rather than end() it, so the client sees a failed (not a silently truncated) response.
-      this.logger.error(
-        `${envelope.code} status=${status} correlationId=${correlationId} errorType=${errorTypeOf(exception)} headersSent=true`,
-      );
+      this.logger.error('http_error', { ...fields, headersSent: true });
       response.destroy();
       return;
     }
 
-    this.logger.error(
-      `${envelope.code} status=${status} correlationId=${correlationId} errorType=${errorTypeOf(exception)}`,
-    );
+    // 4xx are expected client outcomes (warn); 5xx are server faults (error).
+    if (status >= 500) this.logger.error('http_error', fields);
+    else this.logger.warn('http_error', fields);
 
     if (retryAfterSeconds !== undefined) {
       response.setHeader('Retry-After', String(retryAfterSeconds));
@@ -296,7 +294,7 @@ function sqlStatesOf(exception: unknown): string[] {
   );
 }
 
-/** True when PostgreSQL aborted the transaction as a deadlock victim or serialization failure. */
+/** True when PostgreSQL aborted the transaction for a transient reason (see TRANSIENT_CONFLICT_CODES). */
 function isTransientConflict(exception: unknown): boolean {
   return sqlStatesOf(exception).some((code) => TRANSIENT_CONFLICT_CODES.has(code));
 }
@@ -312,10 +310,4 @@ function isDependencyUnavailable(exception: unknown): boolean {
   return sqlStatesOf(exception).some(
     (code) => code.startsWith('08') || CONNECTION_LOSS_CODES.has(code),
   );
-}
-
-/** Content-free diagnostic: the thrown value's class name only (e.g. `TypeError`). */
-function errorTypeOf(exception: unknown): string {
-  if (exception instanceof Error) return exception.constructor.name;
-  return exception === null ? 'null' : typeof exception;
 }

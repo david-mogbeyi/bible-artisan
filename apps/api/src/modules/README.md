@@ -15,6 +15,11 @@ Rules (see /AGENTS.md for the full list):
   Every new route goes into `test/route-inventory.int-spec.ts` with its cross-user test.
 - Every study mutation follows the mutation contract below. See ADR 0001's BIB-12 addendum.
 - Controllers speak DTOs from `@bible-artisan/contracts`. Never return Sequelize model instances directly.
+- Logging (BIB-13): every request already gets a correlation ID and one access line
+  (`observability/request-logging.ts`), and every error one `http_error` line. Don't log request
+  data yourself. If a module needs its own line, use Nest's `Logger` with a fixed message and
+  allowlisted fields only (opaque IDs, counts, latency, status, error class), and extend
+  `test/log-redaction.int-spec.ts` when the route takes new private input.
 
 ## Mutation contract (BIB-12): the only way to change study data
 

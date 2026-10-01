@@ -1,7 +1,8 @@
-/* CLI: tsx src/database/migrate.ts <latest|down|make name> */
+/* CLI: tsx src/database/migrate.ts <latest|down|make name> [--dir <migrations dir>] */
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadEnv } from '../config/env';
+import { runEntrypoint } from '../modules/observability/entrypoint';
 import { createDatabase } from './database';
 import { createMigrator, MIGRATIONS_DIR } from './migrator';
 
@@ -21,19 +22,28 @@ export async function down({ context }: { context: MigrationContext }): Promise<
 `;
 
 async function main(): Promise<void> {
-  const [command, name] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  // `--dir` runs another directory's migrations (the CLI's failure-logging test uses a fixture).
+  const dirFlag = args.indexOf('--dir');
+  const dir = dirFlag === -1 ? MIGRATIONS_DIR : path.resolve(args[dirFlag + 1] ?? '');
+  const [command, name] = dirFlag === -1 ? args : args.slice(0, dirFlag);
 
   if (command === 'make') {
-    if (!name || !/^[a-z0-9_]+$/.test(name)) throw new Error('Usage: make <snake_case_name>');
+    if (!name || !/^[a-z0-9_]+$/.test(name)) {
+      // Printed directly: a thrown error's message is deliberately never logged.
+      console.log('Usage: make <snake_case_name>');
+      process.exitCode = 1;
+      return;
+    }
     const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
-    const file = path.join(MIGRATIONS_DIR, `${stamp}_${name}.ts`);
+    const file = path.join(dir, `${stamp}_${name}.ts`);
     writeFileSync(file, TEMPLATE, { flag: 'wx' });
     console.log(`created ${path.relative(process.cwd(), file)}`);
     return;
   }
 
   const db = createDatabase(loadEnv().DATABASE_URL);
-  const migrator = createMigrator(db);
+  const migrator = createMigrator(db, { dir });
   try {
     // "down" reverts exactly one step (the most recently applied migration).
     const results = command === 'down' ? await migrator.down() : await migrator.up();
@@ -45,7 +55,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  console.error(err);
-  process.exit(1);
-});
+// A failure is logged as one content-free JSON line (migration name, error classes, SQLSTATE),
+// never the error itself: its message and properties carry the SQL, bound parameters, and
+// PostgreSQL `detail`, which quotes row values (NFR-PRIV-001). Exits 1.
+void runEntrypoint('migrate', main);

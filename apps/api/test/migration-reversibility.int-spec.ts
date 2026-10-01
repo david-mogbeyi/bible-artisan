@@ -79,7 +79,7 @@ describe('migration reversibility', () => {
   it('rolls a migration that fails midway back completely and does not record it', async () => {
     const before = await recordedMigrations(db);
     const failing = createMigrator(db, {
-      glob: path.join(__dirname, 'fixtures/failing-migration/*.ts'),
+      dir: path.join(__dirname, 'fixtures/failing-migration'),
     });
 
     await expect(failing.up()).rejects.toThrow(/29990101000000_fails_midway/);
@@ -92,7 +92,7 @@ describe('migration reversibility', () => {
   it('runs a create-then-index migration on its own transaction via context.query', async () => {
     const before = await recordedMigrations(db);
     const migrator = createMigrator(db, {
-      glob: path.join(__dirname, 'fixtures/create-and-index-migration/*.ts'),
+      dir: path.join(__dirname, 'fixtures/create-and-index-migration'),
     });
     try {
       const applied = await migrator.up();
@@ -117,11 +117,30 @@ describe('migration reversibility', () => {
     expect(await recordedMigrations(db)).toStrictEqual(before);
   });
 
+  it("runs migrations without the pool's request-sized statement_timeout", async () => {
+    const [pool] = await db.query<{ statement_timeout: string }>('SHOW statement_timeout', {
+      type: QueryTypes.SELECT,
+    });
+    expect(pool).toStrictEqual({ statement_timeout: '30s' });
+    const migrator = createMigrator(db, {
+      dir: path.join(__dirname, 'fixtures/statement-timeout-migration'),
+    });
+    try {
+      await migrator.up();
+      const recorded = await db.query<{ v: string }>('SELECT v FROM migration_timeout_probe', {
+        type: QueryTypes.SELECT,
+      });
+      expect(recorded).toStrictEqual([{ v: '0' }]);
+    } finally {
+      await migrator.down({ to: 0 });
+    }
+  });
+
   it('refuses to revert a migration without down() and keeps its SequelizeMeta row', async () => {
     const before = await recordedMigrations(db);
     const name = '29990103000000_no_down.ts';
     const migrator = createMigrator(db, {
-      glob: path.join(__dirname, 'fixtures/missing-down-migration/*.ts'),
+      dir: path.join(__dirname, 'fixtures/missing-down-migration'),
     });
     try {
       await migrator.up();

@@ -29,6 +29,7 @@ describe('GET /v1/openapi.json when the contracts barrel was loaded before AppMo
     expect(body.openapi).toBe('3.0.0');
     expect(Object.keys(body.components.schemas)).toStrictEqual([
       'HealthResponse',
+      'LivenessResponse',
       'ErrorEnvelope',
       'OtpStartRequest',
       'OtpStartResponse',

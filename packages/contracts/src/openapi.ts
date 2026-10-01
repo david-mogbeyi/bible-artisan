@@ -6,7 +6,7 @@ import {
   otpVerifyRequestSchema,
 } from './auth';
 import { errorEnvelopeSchema } from './error-envelope';
-import { healthResponseSchema } from './health';
+import { healthResponseSchema, livenessResponseSchema } from './health';
 
 /** JSON-schema object as emitted by `z.toJSONSchema` (OpenAPI 3.0 target). */
 type SchemaObject = Record<string, unknown>;
@@ -64,12 +64,20 @@ function buildDocument(): OpenApiDocument {
     paths: {
       '/health': {
         get: {
-          description: 'Reports API and database liveness.',
+          description:
+            'Readiness: the database answers and every shipped migration is applied. Public.',
           responses: {
-            200: {
-              description: 'OK',
-              content: { 'application/json': { schema: ref('HealthResponse') } },
-            },
+            200: jsonResponse('Ready', 'HealthResponse'),
+            503: jsonResponse('Not ready (database down or migrations pending)', 'HealthResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/health/live': {
+        get: {
+          description: 'Liveness: the process serves HTTP. Never touches the database. Public.',
+          responses: {
+            200: jsonResponse('Alive', 'LivenessResponse'),
             default: errorResponse,
           },
         },
@@ -134,6 +142,7 @@ function buildDocument(): OpenApiDocument {
       },
       schemas: {
         HealthResponse: toSchema(healthResponseSchema),
+        LivenessResponse: toSchema(livenessResponseSchema),
         ErrorEnvelope: toSchema(errorEnvelopeSchema),
         OtpStartRequest: toSchema(otpStartRequestSchema),
         OtpStartResponse: toSchema(otpStartResponseSchema),
