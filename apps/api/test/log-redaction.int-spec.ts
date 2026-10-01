@@ -829,6 +829,86 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs study edits without the title, description, question, tags, ids, or keys', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ question: track(`SENTINEL-question-${randomUUID()}`) })
+      .expect(201);
+    const studyId = track((created.body as { studyId: string }).studyId);
+    const route = { method: 'PATCH', route: '/v1/studies/:studyId' };
+    const edit = (body: Record<string, unknown>, key: string, id = studyId): Test =>
+      withPrivateChannels(http().patch(`/v1/studies/${id}${query()}`), cookie)
+        .set('Idempotency-Key', key)
+        .send(body);
+
+    // Tracked rather than `secret`: the owner's own 200 returns them, which is not an echo.
+    const body = {
+      expectedRevision: 1,
+      title: track(`SENTINEL-edit-title-${randomUUID()}`),
+      description: track(`SENTINEL-description-${randomUUID()}`),
+      mainQuestion: { text: track(`SENTINEL-new-question-${randomUUID()}`) },
+      pinned: true,
+      tags: [track(`SENTINEL-tag-${randomUUID()}`)],
+    };
+    const key = track(randomUUID());
+    const edited = await edit(body, key);
+    expect(edited.status).toBe(200);
+    await expectLogged(edited, { ...route, status: 200 });
+    const editedBody = edited.body as { tags: { id: string }[]; mainQuestion: { nodeId: string } };
+    track(editedBody.mainQuestion.nodeId);
+    for (const tag of editedBody.tags) track(tag.id);
+    await expectLogged(await edit(body, key), { ...route, status: 200 });
+
+    const stale = await edit({ ...body, title: secret('stale-title') }, track(randomUUID()));
+    await expectLogged(
+      stale,
+      { ...route, status: 409 },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 2,
+        }),
+      },
+    );
+    const duplicated = secret('tag');
+    const badTag = await edit(
+      { expectedRevision: 2, tags: [duplicated, duplicated.toUpperCase()] },
+      track(randomUUID()),
+    );
+    expect(badTag.status).toBe(400);
+    await expectLogged(
+      badTag,
+      { ...route, status: 400 },
+      { errorType: 'ValidationError', body: badTag.body as Record<string, unknown> },
+    );
+    const missing = await edit(
+      { expectedRevision: 2, mainQuestion: { nodeId: track(randomUUID()) } },
+      track(randomUUID()),
+    );
+    await expectLogged(
+      missing,
+      { ...route, status: 422 },
+      {
+        errorType: 'QuestionNotFoundError',
+        body: envelope({
+          code: 'QUESTION_NOT_FOUND',
+          message: 'That question is not part of this study',
+        }),
+      },
+    );
+    const absent = await edit(
+      { expectedRevision: 1, title: secret('absent') },
+      track(randomUUID()),
+      track(randomUUID()),
+    );
+    await expectLogged(
+      absent,
+      { ...route, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+  });
+
   it('logs a request the client aborted with no status, never a default 200', async () => {
     const correlationId = randomUUID();
     // The probe holds its transaction for 1 s; the client gives up after 200 ms.

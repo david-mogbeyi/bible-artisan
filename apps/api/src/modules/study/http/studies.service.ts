@@ -4,19 +4,49 @@ import {
   createStudyRequestSchema,
   type ScriptureReference,
   type StudyResponse,
+  type UpdateStudyResponse,
+  updateStudyRequestSchema,
 } from '@bible-artisan/contracts';
-import { NotFoundError, ReferenceNotFoundError } from '../../../common/errors/domain-errors';
+import {
+  NotFoundError,
+  QuestionNotFoundError,
+  ReferenceNotFoundError,
+  StudyUnchangedError,
+} from '../../../common/errors/domain-errors';
 import type { MutationRequestInfo } from '../../../common/mutation/mutation-request';
 import { MutationResult, MutationService } from '../../../common/mutation/mutation.service';
+import type { StudyMutation } from '../../../common/mutation/study-mutation';
+import { requireExpectedRevision } from '../../../common/revision/expected-revision';
 import { parseBody } from '../../../common/validation/parse-body';
 import { StudyBranch } from '../../../database/models/study-branch.model';
 import { StudyNode } from '../../../database/models/study-node.model';
+import { Study } from '../../../database/models/study.model';
+import type { AppendEventInput } from '../../thread/thread.service';
 import { ReferenceService } from '../../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study-access.service';
 import { deriveStudyTitle } from '../study-title';
+import { readStudyState } from './study-state';
+import { applyTagSet, planTagSet } from './study-tags';
 
 /** PRD section 13: the thread-visible event every study starts with. */
 const STUDY_CREATED = 'study_created';
+
+/**
+ * Study edit events (BIB-20), one per real change, ids and booleans only: never the title,
+ * description, question or tag text (PRD section 23, NFR-PRIV-001). Intended visibility, for
+ * BIB-55's column: `study_renamed`, `question_created` and `main_question_changed` are
+ * thread-visible (PRD section 13); the rest are internal (section 11: list actions such as pin and
+ * tag make no reasoning events).
+ */
+export const STUDY_EDIT_EVENTS = {
+  renamed: 'study_renamed',
+  descriptionChanged: 'study_description_changed',
+  questionCreated: 'question_created',
+  mainQuestionChanged: 'main_question_changed',
+  pinned: 'study_pinned',
+  unpinned: 'study_unpinned',
+  tagsChanged: 'study_tags_changed',
+} as const;
 
 /**
  * Creates and reads studies (BIB-19). Creation goes through `MutationService.create`, so the
@@ -102,38 +132,165 @@ export class StudiesService {
 
   async get(ownerId: string, studyId: string): Promise<StudyResponse> {
     const study = await this.access.requireOwnedStudy(ownerId, studyId);
-    const scope = { studyId: study.id, ownerId };
-    const [question, branch, reference] = await Promise.all([
-      study.mainQuestionNodeId === null
-        ? null
-        : StudyNode.findOne({
-            where: { ...scope, id: study.mainQuestionNodeId, type: 'question', deletedAt: null },
-          }),
-      StudyBranch.findOne({
-        where: scope,
-        order: [
-          ['createdAt', 'ASC'],
-          ['id', 'ASC'],
-        ],
-      }),
+    const [state, reference] = await Promise.all([
+      readStudyState(study),
       study.startingReferenceId === null
         ? null
         : this.references.storedReference(study.startingReferenceId).then((r) => r.reference),
     ]);
     return {
       id: study.id,
-      title: study.title,
-      lifecycle: study.lifecycle,
-      revision: study.revision,
-      contentRevision: study.contentRevision,
+      ...state,
       startingReference: reference,
-      mainQuestion:
-        question?.title && question.questionStatus
-          ? { nodeId: question.id, text: question.title, status: question.questionStatus }
-          : null,
-      branchId: branch?.id ?? null,
       createdAt: study.createdAt.toISOString(),
     };
+  }
+
+  /**
+   * Edits a study's title, description, main question, pin and tags (BIB-20, FR-STUDY-003) in one
+   * `MutationService.execute`: 428 without `expectedRevision`, 400 for a bad body (both before any
+   * transaction), then under the study lock:
+   *
+   * 1. Revision check first, so a stale edit is 409 whatever else it says.
+   * 2. Work out what really changes; a field equal to its current value is no change, and an
+   *    edit that changes nothing is 422 STUDY_UNCHANGED (rolled back: no receipt, nothing).
+   * 3. Write: a new Question node (and the initial branch, for a study without one), the study
+   *    row (one revision bump for the whole edit), the tag set; one event per change.
+   *
+   * The original question is never rewritten; a study without one takes its first main question
+   * as the original (the DB trigger refuses any later change). `content_revision` moves only for a
+   * new title, description or main question: pin and tags are organizational.
+   */
+  async update(
+    ownerId: string,
+    studyId: string,
+    mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    const body = parseBody(updateStudyRequestSchema, mutation.body);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: false,
+      work: async (m) => {
+        // Locked by the pipeline (receipt -> study); this read joins the transaction.
+        const current = await Study.findOne({
+          where: { id: m.studyId, ownerId: m.ownerId },
+          rejectOnEmpty: true,
+        });
+        if (current.revision !== expectedRevision) {
+          // Throws 409 with the current revision (or 404), exactly as a write would.
+          await m.updateWithExpectedRevision(Study, {
+            id: m.studyId,
+            expectedRevision,
+            values: {},
+          });
+        }
+
+        const titleChanged = body.title !== undefined && body.title !== current.title;
+        const descriptionChanged =
+          body.description !== undefined && body.description !== current.description;
+        const pinChanged = body.pinned !== undefined && body.pinned !== (current.pinnedAt !== null);
+        const target = body.mainQuestion;
+        if (target && 'nodeId' in target) await requireLiveQuestion(m, target.nodeId);
+        const mainChanged =
+          target !== undefined &&
+          ('text' in target || target.nodeId !== current.mainQuestionNodeId);
+        const tagChange = body.tags === undefined ? null : await planTagSet(m, body.tags);
+        if (!titleChanged && !descriptionChanged && !pinChanged && !mainChanged && !tagChange) {
+          throw new StudyUnchangedError();
+        }
+
+        // A new main question is a new Question node; the old one (and the original) stay.
+        let createdQuestionId: string | null = null;
+        let createdBranchId: string | null = null;
+        if (target && 'text' in target) {
+          const node = await m.createChild(StudyNode, {
+            type: 'question',
+            title: target.text,
+            questionStatus: 'open',
+          });
+          createdQuestionId = node.id;
+          // A blank study's first question roots its initial branch, as at creation.
+          const hasBranch = await StudyBranch.count({
+            where: { studyId: m.studyId, ownerId: m.ownerId },
+          });
+          if (hasBranch === 0) {
+            createdBranchId = (await m.createChild(StudyBranch, { rootNodeId: node.id })).id;
+          }
+        }
+        const newMainId =
+          target === undefined ? null : 'text' in target ? createdQuestionId : target.nodeId;
+
+        const updated = await m.updateWithExpectedRevision(Study, {
+          id: m.studyId,
+          expectedRevision,
+          values: {
+            ...(titleChanged && body.title !== undefined ? { title: body.title } : {}),
+            ...(descriptionChanged ? { description: body.description ?? null } : {}),
+            ...(pinChanged ? { pinnedAt: body.pinned ? new Date() : null } : {}),
+            ...(mainChanged && newMainId !== null
+              ? {
+                  mainQuestionNodeId: newMainId,
+                  ...(current.originalQuestionNodeId === null
+                    ? { originalQuestionNodeId: newMainId }
+                    : {}),
+                }
+              : {}),
+          },
+        });
+        const addedTagIds = tagChange ? await applyTagSet(m, tagChange) : [];
+
+        const events: AppendEventInput[] = [];
+        if (titleChanged) events.push({ eventType: STUDY_EDIT_EVENTS.renamed });
+        if (descriptionChanged) {
+          events.push({
+            eventType: STUDY_EDIT_EVENTS.descriptionChanged,
+            payload: { cleared: body.description === null },
+          });
+        }
+        if (createdQuestionId !== null) {
+          events.push({
+            eventType: STUDY_EDIT_EVENTS.questionCreated,
+            payload: { questionNodeId: createdQuestionId, branchId: createdBranchId },
+          });
+        }
+        if (mainChanged && newMainId !== null) {
+          events.push({
+            eventType: STUDY_EDIT_EVENTS.mainQuestionChanged,
+            payload: {
+              fromNodeId: current.mainQuestionNodeId,
+              toNodeId: newMainId,
+              originalQuestionNodeId: updated.originalQuestionNodeId,
+            },
+          });
+        }
+        if (pinChanged) {
+          events.push({
+            eventType: body.pinned ? STUDY_EDIT_EVENTS.pinned : STUDY_EDIT_EVENTS.unpinned,
+          });
+        }
+        if (tagChange) {
+          events.push({
+            eventType: STUDY_EDIT_EVENTS.tagsChanged,
+            payload: { addedTagIds, removedTagIds: tagChange.removeTagIds },
+          });
+        }
+        // At least one: an edit without a change was refused above.
+        let lastEventSequence = '';
+        for (const input of events) lastEventSequence = (await m.appendEvent(input)).sequence;
+        if (titleChanged || descriptionChanged || mainChanged) m.bumpContentRevision();
+
+        const state = await readStudyState(updated);
+        const edited: UpdateStudyResponse = {
+          id: m.studyId,
+          ...state,
+          // The row predates the pipeline's counter write at the end of this mutation.
+          contentRevision: m.contentRevision,
+          lastEventSequence,
+        };
+        return { status: 200, body: edited };
+      },
+    });
   }
 
   /** The stored reference, in an active edition; otherwise 422 with nothing written. */
@@ -145,4 +302,22 @@ export class StudiesService {
       throw error;
     }
   }
+}
+
+/**
+ * The new main question named by id must be a live Question node of this study, queried by this
+ * study's id and the session owner, so another user's node and an absent one are the same 422.
+ */
+async function requireLiveQuestion(m: StudyMutation, nodeId: string): Promise<void> {
+  const node = await StudyNode.findOne({
+    where: {
+      id: nodeId,
+      studyId: m.studyId,
+      ownerId: m.ownerId,
+      type: 'question',
+      deletedAt: null,
+    },
+    attributes: ['id'],
+  });
+  if (!node) throw new QuestionNotFoundError();
 }

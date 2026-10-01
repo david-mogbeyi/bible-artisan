@@ -7,3 +7,4 @@ export * from './bible';
 export * from './anchor';
 export * from './study';
 export * from './user-text';
+export * from './study-edit';

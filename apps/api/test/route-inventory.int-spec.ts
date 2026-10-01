@@ -124,6 +124,13 @@ const ROUTES: Record<string, Access> = {
       test: 'GET /v1/studies/:studyId gives another user the same neutral 404 as an absent or malformed id',
     },
   },
+  'PATCH /v1/studies/:studyId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'study-edit.int-spec.ts',
+      test: 'PATCH /v1/studies/:studyId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

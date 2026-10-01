@@ -156,6 +156,17 @@ export class StudyMutation {
     if (count !== 1) throw new Error('StudyMutation: the created study row vanished');
   }
 
+  /**
+   * Marks this mutation as a content change (`content_revision + 1` at commit, once however often
+   * called), for work that only knows under the lock whether it changed content (BIB-20: a study
+   * edit bumps it for a new title, description or main question, not for a pin or tag change).
+   * Declare `bumpsContentRevision: true` on the spec instead when every run changes content.
+   */
+  bumpContentRevision(): void {
+    this.assertOpen();
+    this.lock.bumpContentRevision();
+  }
+
   /** Appends a Study Thread event for this study in this transaction; returns its sequence. */
   async appendEvent(input: AppendEventInput): Promise<AppendedEvent> {
     this.assertOpen();

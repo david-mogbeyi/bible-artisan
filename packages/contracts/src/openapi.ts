@@ -28,6 +28,7 @@ import {
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema, livenessResponseSchema } from './health';
 import { createStudyRequestSchema, createStudyResponseSchema, studyResponseSchema } from './study';
+import { updateStudyRequestSchema, updateStudyResponseSchema } from './study-edit';
 
 /** JSON-schema object as emitted by `z.toJSONSchema` (OpenAPI 3.0 target). */
 type SchemaObject = Record<string, unknown>;
@@ -50,6 +51,18 @@ export interface OpenApiDocument {
  */
 function toSchema(schema: z.ZodType): SchemaObject {
   const { $schema: _dialect, ...rest } = z.toJSONSchema(schema, { target: 'openapi-3.0' });
+  return rest;
+}
+
+/**
+ * A request body schema as the client sends it (Zod's input side), for schemas whose parsing
+ * transforms values (e.g. tag normalization), which have no output-side JSON schema.
+ */
+function toInputSchema(schema: z.ZodType): SchemaObject {
+  const { $schema: _dialect, ...rest } = z.toJSONSchema(schema, {
+    target: 'openapi-3.0',
+    io: 'input',
+  });
   return rest;
 }
 
@@ -273,7 +286,7 @@ function buildDocument(): OpenApiDocument {
       '/studies/{studyId}': {
         get: {
           description:
-            "Returns one of the signed-in user's studies: title, lifecycle, revisions, starting reference, main question and initial branch. Another user's, an absent, and a malformed id are the same 404.",
+            "Returns one of the signed-in user's studies: title, description, lifecycle, pin, revisions, starting reference, main and original questions, tags and initial branch. Another user's, an absent, and a malformed id are the same 404.",
           security: sessionCookie,
           parameters: [
             {
@@ -285,6 +298,25 @@ function buildDocument(): OpenApiDocument {
           ],
           responses: {
             200: jsonResponse('The study', 'StudyResponse'),
+            default: errorResponse,
+          },
+        },
+        patch: {
+          description:
+            "Edits one of the signed-in user's studies (FR-STUDY-003): title, description (null clears it), main question ({text} creates a new open Question node and makes it main; {nodeId} makes an existing live Question node of the study main), pin, and the whole tag set (owner-scoped tags, reused by normalized name). The original question is never rewritten; a study that had none gets the first main question as its original. expectedRevision is the study's revision and covers every field: missing is 428, stale is 409 with currentRevision. One StudyEvent per real change (study_renamed, study_description_changed, question_created, main_question_changed, study_pinned/study_unpinned, study_tags_changed; ids only) commits with the edit; contentRevision moves only for title, description or main question changes. An edit that changes nothing is 422 STUDY_UNCHANGED; a nodeId that is not a live question of this study is 422 QUESTION_NOT_FOUND. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, and a malformed id are the same 404.",
+          security: sessionCookie,
+          parameters: [
+            idempotencyKeyHeader,
+            {
+              name: 'studyId',
+              in: 'path',
+              required: true,
+              schema: { type: 'string', format: 'uuid' },
+            },
+          ],
+          requestBody: jsonBody('UpdateStudyRequest'),
+          responses: {
+            200: jsonResponse('The study as edited', 'UpdateStudyResponse'),
             default: errorResponse,
           },
         },
@@ -342,6 +374,8 @@ function buildDocument(): OpenApiDocument {
         CreateStudyRequest: toSchema(createStudyRequestSchema),
         CreateStudyResponse: toSchema(createStudyResponseSchema),
         StudyResponse: toSchema(studyResponseSchema),
+        UpdateStudyRequest: toInputSchema(updateStudyRequestSchema),
+        UpdateStudyResponse: toSchema(updateStudyResponseSchema),
       },
     },
   };

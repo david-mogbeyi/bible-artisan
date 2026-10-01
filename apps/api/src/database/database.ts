@@ -10,7 +10,9 @@ import { ScriptureReference } from './models/scripture-reference.model';
 import { StudyBranch } from './models/study-branch.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
+import { StudyTag } from './models/study-tag.model';
 import { Study } from './models/study.model';
+import { Tag } from './models/tag.model';
 import { User } from './models/user.model';
 import { enableTransactionPropagation } from './transaction-context';
 
@@ -65,6 +67,8 @@ export function createDatabase(
       StudyNode,
       StudyBranch,
       StudyEvent,
+      Tag,
+      StudyTag,
       AuthChallenge,
       AuthSession,
       MutationReceipt,

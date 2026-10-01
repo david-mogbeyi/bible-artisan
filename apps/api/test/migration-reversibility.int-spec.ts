@@ -28,6 +28,8 @@ const DOMAIN_TABLES = [
   'study_branch',
   'study_event',
   'study_node',
+  'study_tag',
+  'tag',
   'user',
 ];
 
@@ -126,6 +128,19 @@ describe('migration reversibility', () => {
         WHERE n.study_id = s.id AND n.type = 'question' AND s.owner_id = $1`,
       { bind: [row.user_id] },
     );
+    // What BIB-20 editing writes: a pin, a description, and a tag on the study.
+    await db.query(
+      `WITH t AS (
+         INSERT INTO tag (owner_id, name, normalized_name) VALUES ($1, 'Seeded', 'seeded')
+         RETURNING id, owner_id
+       ), s AS (
+         UPDATE study SET pinned_at = now(), description = 'Seeded description'
+          WHERE owner_id = $1 RETURNING id, owner_id
+       )
+       INSERT INTO study_tag (study_id, owner_id, tag_id)
+       SELECT s.id, s.owner_id, t.id FROM s, t`,
+      { bind: [row.user_id] },
+    );
     return row.user_id;
   }
 
@@ -174,11 +189,14 @@ describe('migration reversibility', () => {
     const studyData = async (): Promise<unknown[]> =>
       db.query(
         `SELECT s.title, s.starting_reference_id, s.original_question_node_id,
-                s.main_question_node_id, n.type, n.title AS node_title, n.question_status,
-                n.scripture_reference_id, b.root_node_id
+                s.main_question_node_id, s.pinned_at, s.description, n.type,
+                n.title AS node_title, n.question_status, n.scripture_reference_id,
+                b.root_node_id, t.name AS tag_name
            FROM study s
            JOIN study_node n ON n.study_id = s.id
            JOIN study_branch b ON b.study_id = s.id
+           JOIN study_tag st ON st.study_id = s.id
+           JOIN tag t ON t.id = st.tag_id
           WHERE s.owner_id = $1
           ORDER BY n.type`,
         { bind: [userId], type: QueryTypes.SELECT },
@@ -187,21 +205,29 @@ describe('migration reversibility', () => {
       const before = await recordedMigrations(db);
       expect(before).toStrictEqual(shippedMigrationNames());
       const tablesBefore = await publicTables(db, DOMAIN_TABLES);
-      const columnsBefore = await columns(['study', 'study_node', 'study_branch']);
+      const columnsBefore = await columns([
+        'study',
+        'study_node',
+        'study_branch',
+        'tag',
+        'study_tag',
+      ]);
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-19's study roots) is the first `down` toward
-      // the corpus and refuses before anything commits.
+      // No opt-in at all: the newest migration (BIB-20's study editing) is the first `down`
+      // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: 'study roots drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        message: 'study editing drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
       expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(tablesBefore);
-      expect(await columns(['study', 'study_node', 'study_branch'])).toStrictEqual(columnsBefore);
+      expect(
+        await columns(['study', 'study_node', 'study_branch', 'tag', 'study_tag']),
+      ).toStrictEqual(columnsBefore);
       expect(await studyData()).toStrictEqual(dataBefore);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });

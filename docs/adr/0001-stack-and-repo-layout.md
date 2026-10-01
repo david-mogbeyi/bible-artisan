@@ -493,6 +493,65 @@ Only step 2 differs:
 
 **Not in BIB-19:** editing the title or questions (BIB-20), the library and `last_activity_at` (BIB-21), archive and trash (BIB-22), notes (BIB-23), the node API and other node columns (BIB-25), canonical Scripture dedup (BIB-26), sessions and branch membership (BIB-33), the offline queue (BIB-36), and the workspace itself.
 
+## Addendum (2026-10-01, BIB-20): editing a study
+
+`PATCH /v1/studies/:studyId` (`modules/study/http/`) edits the title, description, main question, pin and tag set through `MutationService.execute`.
+
+**One revision, checked first.**
+
+- `study.revision` covers every editable field. Any successful edit bumps it once, so a concurrent edit to a different field still gets 409. The client reloads and reapplies its draft; field-level merge is BIB-37.
+- The work compares revisions before anything else, so a stale edit is always 409, whatever else the body says.
+- The web form diffs its draft against the study it started from (`base`), never against a copy reloaded after a conflict. So "Reload latest" followed by Save sends only the fields the user changed, and never resends an untouched field's old value.
+
+**No-op edits.**
+
+- A field equal to its current value is not a change. Tags compare by normalized key.
+- An edit with no change at all is 422 `STUDY_UNCHANGED` and rolls back (no receipt). The pipeline requires an event, and there is nothing true to record.
+
+**Content revision.**
+
+- `content_revision` moves only for a new title, description or main question. Pin and tags are organizational and must not stale the summary.
+- `StudyMutation.bumpContentRevision()` lets the work decide this under the lock (`bumpsContentRevision: false` on the spec).
+
+**Main and original question.**
+
+- `mainQuestion: { text }` creates a new open Question node; `{ nodeId }` points at a live Question node of the study. Another study's node, another user's node, or an absent one is 422 `QUESTION_NOT_FOUND`, all the same.
+- Question text is never edited here (BIB-25), so the original question's text cannot change.
+- `original_question_node_id` is set once. A study created without a question takes its first main question as its original. The `study_original_question_immutable` trigger refuses any later change; a study DELETE is not an UPDATE, so hard delete still cascades.
+- A blank study's first question also roots its initial branch, as at creation.
+
+**Tags.**
+
+- `tag (owner_id, name, normalized_name)` is one vocabulary per owner, with `UNIQUE (owner_id, normalized_name)`.
+- `study_tag` has composite FKs `(owner_id, study_id) → study` and `(owner_id, tag_id) → tag`, both cascading, so another owner's tag is unwritable on a study.
+- Normalization (`normalizeTagName` / `tagKey` in contracts):
+  - the display name is NFC, trimmed, with whitespace runs collapsed;
+  - the key is that name lower-cased with `toLowerCase`, not full Unicode case folding;
+  - names are 1–50 characters, with at most 20 per study (the request carries the whole set);
+  - duplicate keys in one request are a 400.
+- An existing tag keeps its first display name. Unused tags stay in the vocabulary; tag management is not in the MVP.
+- New tags are inserted with `INSERT … ON CONFLICT DO NOTHING` and then selected, in key order. Two studies of one owner, which hold different study locks, can add the same new tag at once and converge on one row. A test races them through a gate transaction holding the tag key.
+
+**Pin.** `study.pinned_at`, a study-level pin for the library's pinned group (BIB-21). No per-owner cap: the PRD sets none. Pinned nodes and citations are a different concept and are not in this ticket.
+
+**Events** (ids and booleans only; the title, description, question and tag text never enter a payload):
+
+- `study_renamed`
+- `study_description_changed {cleared}`
+- `question_created {questionNodeId, branchId}`
+- `main_question_changed {fromNodeId, toNodeId, originalQuestionNodeId}`
+- `study_pinned` / `study_unpinned`
+- `study_tags_changed {addedTagIds, removedTagIds}`
+
+There is one event per real change. Intended visibility for BIB-55's column: renamed, question_created and main_question_changed are thread-visible; the rest are internal (PRD section 11: list actions make no reasoning events).
+
+**Data and down.**
+
+- New CHECKs: `study.title` 1–200 and `description` NULL or 1–2,000. The description limit is an assumption: the PRD sets none, and 2,000 matches the edge-note bound.
+- The migration's `down` refuses while any tag or pin exists unless `ALLOW_STUDY_DATA_DROP=1`. Descriptions survive a `down`, because the column predates it.
+
+**Not in BIB-20:** the library and tag filter (BIB-21), archive and trash with the `STUDY_ARCHIVED` guard (BIB-22), editing question text or status (BIB-25), the save coordinator and conflict-review UI (BIB-35, BIB-37), and the event visibility column (BIB-55).
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

@@ -20,7 +20,9 @@ import { ScriptureReference } from '../src/database/models/scripture-reference.m
 import { StudyBranch } from '../src/database/models/study-branch.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
+import { StudyTag } from '../src/database/models/study-tag.model';
 import { Study } from '../src/database/models/study.model';
+import { Tag } from '../src/database/models/tag.model';
 import { User } from '../src/database/models/user.model';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -90,10 +92,76 @@ describe('Sequelize models against the real schema', () => {
       startingReferenceId: null,
       originalQuestionNodeId: null,
       mainQuestionNodeId: null,
+      pinnedAt: null,
       questionNodeType: 'question',
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
+  });
+
+  it('pins a Study and creates a Tag and StudyTag through the models (BIB-20)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const pinnedAt = new Date('2026-10-01T12:00:00.000Z');
+    await study.update({ pinnedAt, description: 'Romans first' });
+    const pinned = await Study.findByPk(study.id, { rejectOnEmpty: true });
+    expect([pinned.pinnedAt, pinned.description]).toStrictEqual([pinnedAt, 'Romans first']);
+
+    const tag = await Tag.create({ ownerId: owner.id, name: 'Grace', normalizedName: 'grace' });
+    expect(
+      (await Tag.findByPk(tag.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      ownerId: owner.id,
+      name: 'Grace',
+      normalizedName: 'grace',
+      createdAt: expect.any(Date),
+    });
+    await StudyTag.create({ studyId: study.id, ownerId: owner.id, tagId: tag.id });
+    const pair = await StudyTag.findOne({ where: { studyId: study.id }, rejectOnEmpty: true });
+    expect(pair.get({ plain: true })).toStrictEqual({
+      studyId: study.id,
+      tagId: tag.id,
+      ownerId: owner.id,
+      createdAt: expect.any(Date),
+    });
+  });
+
+  it('rejects model-level BIB-20 rows that break their invariants', async () => {
+    const owner = await createUser();
+    const other = await createUser();
+    const study = await createStudy(owner.id);
+    const code = async (work: Promise<unknown>): Promise<unknown> =>
+      work.then(
+        () => 'created',
+        (e: unknown) => (e as { parent?: { code?: string } }).parent?.code,
+      );
+    // Per-owner unique normalized name; another owner may use it.
+    await Tag.create({ ownerId: owner.id, name: 'Grace', normalizedName: 'grace' });
+    expect(
+      await code(Tag.create({ ownerId: owner.id, name: 'grace', normalizedName: 'grace' })),
+    ).toBe('23505');
+    const othersTag = await Tag.create({
+      ownerId: other.id,
+      name: 'Grace',
+      normalizedName: 'grace',
+    });
+    // Name bounds, title and description bounds (CHECK).
+    expect(
+      await code(Tag.create({ ownerId: owner.id, name: 'x'.repeat(51), normalizedName: 'x' })),
+    ).toBe('23514');
+    expect(await code(Tag.create({ ownerId: owner.id, name: '', normalizedName: 'empty' }))).toBe(
+      '23514',
+    );
+    expect(await code(study.update({ title: '' }))).toBe('23514');
+    expect(await code(study.update({ description: 'd'.repeat(2001) }))).toBe('23514');
+    // Another owner's tag on this study, under either owner (composite FKs).
+    expect(
+      await code(StudyTag.create({ studyId: study.id, ownerId: owner.id, tagId: othersTag.id })),
+    ).toBe('23503');
+    expect(
+      await code(StudyTag.create({ studyId: study.id, ownerId: other.id, tagId: othersTag.id })),
+    ).toBe('23503');
   });
 
   it('creates a MutationReceipt through the model; keys are unique per owner, not globally', async () => {
