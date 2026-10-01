@@ -334,6 +334,38 @@ describe('resolveParsedReference against the WEB corpus', () => {
     }
   });
 
+  it('gives every chapter by structure the same range as resolving its name and number', () => {
+    let chapters = 0;
+    for (const b of books) {
+      for (let c = 1; c <= b.chapterCount; c++) {
+        // A single-chapter book's whole chapter is its bare name (a bare number is a verse).
+        const typed = b.chapterCount === 1 ? b.name : `${b.name} ${c}`;
+        expect(index.chapterRange(b.code, c)).toStrictEqual(resolve(typed));
+        chapters += 1;
+      }
+      const verse = lastVerse(b.code, b.chapterCount);
+      expect(index.chapterRange(b.code, b.chapterCount, verse)).toStrictEqual(
+        resolve(`${b.name} ${b.chapterCount}:${verse}`),
+      );
+    }
+    expect(chapters).toBe(1189);
+  });
+
+  it('refuses a structured book, chapter or verse the edition lacks, never adjusting it', () => {
+    expect(index.chapterRange('XYZ', 1)).toStrictEqual({
+      outcome: 'invalid',
+      code: 'REFERENCE_UNKNOWN_BOOK',
+    });
+    expect(index.chapterRange('JUD', 2)).toStrictEqual({
+      outcome: 'invalid',
+      code: 'REFERENCE_CHAPTER_OUT_OF_RANGE',
+    });
+    expect(index.chapterRange('ROM', 9, lastVerse('ROM', 9) + 1)).toStrictEqual({
+      outcome: 'invalid',
+      code: 'REFERENCE_VERSE_OUT_OF_RANGE',
+    });
+  });
+
   it('refuses to build when an explicit alias names a book the edition lacks', () => {
     expect(() => new BookIndex(books.filter((b) => b.code !== 'SNG'))).toThrow(
       'BookIndex: an explicit alias names a book not in this edition',

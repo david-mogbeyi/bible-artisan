@@ -1,12 +1,14 @@
 import {
   biblePassageResponseSchema,
+  bibleReferenceResponseSchema,
   bibleTranslationsResponseSchema,
   resolveReferenceResponseSchema,
   searchBibleResponseSchema,
-  type BibleBookSummary,
+  type BibleReferenceRequest,
   type BiblePassageResponse,
   type BibleTranslationsResponse,
   type ResolveReferenceResponse,
+  type ScriptureReference,
   type SearchBibleResponse,
   type SearchMode,
 } from '@bible-artisan/contracts';
@@ -14,9 +16,11 @@ import { apiFetch } from './api-client';
 
 /**
  * Reader data access (BIB-17). The reader is always positioned on a resolved reference: an opaque
- * `scripture_reference` id. Chapters and verses are reached by resolving their text through
- * `POST /bible/resolve` (a request body, never logged), so no Scripture reference appears in any
- * page or API URL, browser history entry, or request log (NFR-PRIV-001).
+ * `scripture_reference` id, which also fixes the edition. Typed text is resolved through
+ * `POST /bible/resolve`; a chapter or verse chosen by structure (picker, translation change,
+ * search result) through `POST /bible/references`; previous/next links already carry their id.
+ * Request bodies are never logged, so no Scripture reference appears in any page or API URL,
+ * browser history entry, or request log (NFR-PRIV-001).
  */
 
 export interface SearchRequest {
@@ -32,15 +36,13 @@ export function fetchTranslations(): Promise<BibleTranslationsResponse> {
   return apiFetch('/bible/translations', bibleTranslationsResponseSchema);
 }
 
-export function passageQueryKey(editionId: string, referenceId: string) {
-  return ['bible', 'passage', editionId, referenceId] as const;
+export function passageQueryKey(referenceId: string) {
+  return ['bible', 'passage', referenceId] as const;
 }
 
-export function fetchPassage(
-  editionId: string,
-  referenceId: string,
-): Promise<BiblePassageResponse> {
-  const params = new URLSearchParams({ editionId, referenceId });
+/** The chapter holding the reference; the reference fixes the edition. */
+export function fetchPassage(referenceId: string): Promise<BiblePassageResponse> {
+  const params = new URLSearchParams({ referenceId });
   return apiFetch(`/bible/passages?${params.toString()}`, biblePassageResponseSchema);
 }
 
@@ -52,6 +54,17 @@ export function resolveReference(
     method: 'POST',
     body: JSON.stringify({ input, editionId }),
   });
+}
+
+/** A whole chapter, or one verse of it, chosen by structure (no text, no client-side rules). */
+export type ChapterTarget = BibleReferenceRequest;
+
+export async function referenceFor(target: ChapterTarget): Promise<ScriptureReference> {
+  const { reference } = await apiFetch('/bible/references', bibleReferenceResponseSchema, {
+    method: 'POST',
+    body: JSON.stringify(target),
+  });
+  return reference;
 }
 
 export function searchBible(
@@ -68,40 +81,19 @@ export function searchBible(
   return apiFetch(`/bible/search?${params.toString()}`, searchBibleResponseSchema);
 }
 
-/**
- * The text that resolves to one whole chapter: the book's name and the chapter, or the name alone
- * for a single-chapter book (where a bare number is a verse). The API suite proves this resolves
- * to exactly that chapter for every chapter of the corpus.
- */
-export function chapterInput(book: BibleBookSummary, chapter: number): string {
-  return book.chapterCount === 1 ? book.name : `${book.name} ${chapter}`;
-}
-
-/** The text that resolves to one verse. */
-export function verseInput(book: BibleBookSummary, chapter: number, verse: number): string {
-  return `${book.name} ${chapter}:${verse}`;
-}
-
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A well-formed id from `/bible` query parameters, or null. */
-export function idFromParams(params: URLSearchParams, name: 'ref' | 'edition'): string | null {
-  const value = params.get(name);
+/** The well-formed reference id from the `/bible` query parameters, or null. */
+export function referenceIdFromParams(params: URLSearchParams): string | null {
+  const value = params.get('ref');
   return value !== null && UUID.test(value) ? value : null;
 }
 
 /**
- * The `/bible` URL: opaque ids only. The edition is included only when it is not the default.
- * Search text and references never go in the URL (PRD section 9, NFR-PRIV-001).
+ * The `/bible` URL: the opaque reference id only. The reference fixes the edition, so a bookmark
+ * keeps opening the same edition whichever editions are active. Search text and references never
+ * go in the URL (PRD section 9, NFR-PRIV-001).
  */
-export function bibleHref(
-  referenceId: string | null,
-  editionId: string | null,
-  defaultEditionId: string | null,
-): string {
-  const params = new URLSearchParams();
-  if (editionId && editionId !== defaultEditionId) params.set('edition', editionId);
-  if (referenceId) params.set('ref', referenceId);
-  const query = params.toString();
-  return query ? `/bible?${query}` : '/bible';
+export function bibleHref(referenceId: string | null): string {
+  return referenceId ? `/bible?${new URLSearchParams({ ref: referenceId }).toString()}` : '/bible';
 }

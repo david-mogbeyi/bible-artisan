@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import type {
   BiblePassageResponse,
+  BibleReferenceResponse,
   BibleTranslationsResponse,
   ResolveReferenceResponse,
 } from '@bible-artisan/contracts';
@@ -21,7 +22,7 @@ import { createTestApp } from './app';
 import { envelope, NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
 
 /**
- * GET /v1/bible/translations and GET /v1/bible/passages (BIB-17) against the real imported WEB
+ * GET /v1/bible/translations, GET /v1/bible/passages and POST /v1/bible/references (BIB-17) against the real imported WEB
  * corpus. No Scripture is typed: every expected verse, superscription and book name is read from
  * the stored rows at run time, so a passing test means the API returned those rows byte for byte.
  */
@@ -42,6 +43,7 @@ interface TextRow {
 
 const PATH = '/v1/bible/passages';
 const TRANSLATIONS_PATH = '/v1/bible/translations';
+const REFERENCES_PATH = '/v1/bible/references';
 
 /**
  * Server latency per passage request, as NFR-PERF-001 states it: each request's `durationMs`
@@ -83,11 +85,28 @@ describe('Bible reader routes', () => {
     if (!book) throw new Error(`no book ${code}`);
     return book;
   };
-  const link = (code: string, chapter: number) => ({
-    bookCode: code,
-    bookName: bookOf(code).name,
-    chapter,
-  });
+  const lastVerseOf = (code: string, chapter: number): number =>
+    chapters.get(key(code, chapter))?.length ?? 0;
+
+  /** The stored whole-chapter reference row's id, read from the database (null if absent). */
+  async function storedChapterId(code: string, chapter: number): Promise<string | null> {
+    const [row] = await db.query<{ id: string }>(
+      `SELECT id FROM scripture_reference
+        WHERE edition_id = $1 AND book_code = $2 AND start_chapter = $3 AND start_verse = 1
+          AND end_chapter = $3 AND end_verse = $4`,
+      { bind: [editionId, code, chapter, lastVerseOf(code, chapter)], type: QueryTypes.SELECT },
+    );
+    return row?.id ?? null;
+  }
+
+  /** A neighbor link, with the id of the whole-chapter row the server upserted for it. */
+  async function link(code: string, chapter: number) {
+    const referenceId = await storedChapterId(code, chapter);
+    if (!referenceId) throw new Error('neighbor reference row missing');
+    return { bookCode: code, bookName: bookOf(code).name, chapter, referenceId };
+  }
+  type Link = Awaited<ReturnType<typeof link>>;
+
   const editionBody = () => ({
     id: editionId,
     name: edition.name,
@@ -100,10 +119,7 @@ describe('Bible reader routes', () => {
   function expectedChapter(
     code: string,
     chapter: number,
-    neighbors: {
-      previous: ReturnType<typeof link> | null;
-      next: ReturnType<typeof link> | null;
-    },
+    neighbors: { previous: Link | null; next: Link | null },
     reference: BiblePassageResponse['reference'],
   ): BiblePassageResponse {
     const book = bookOf(code);
@@ -122,16 +138,18 @@ describe('Bible reader routes', () => {
     const req = request(app.getHttpServer()).get(PATH).query(query);
     return cookie ? req.set('Cookie', cookie) : req;
   };
-  const passage = (query: Record<string, string>) => passageAs(alice, { editionId, ...query });
+  const passage = (query: Record<string, string>) => passageAs(alice, query);
 
-  /**
-   * What the web reader sends to reach a whole chapter: the book's name and the chapter number,
-   * or only the name for a single-chapter book (where a bare number would be a verse).
-   */
-  const chapterInput = (code: string, chapter: number): string =>
+  const referencesAs = (cookie: string | undefined, body: Record<string, unknown>) => {
+    const req = request(app.getHttpServer()).post(REFERENCES_PATH).send(body);
+    return cookie ? req.set('Cookie', cookie) : req;
+  };
+
+  /** The deterministic whole-chapter label: the bare name for a single-chapter book. */
+  const chapterLabel = (code: string, chapter: number): string =>
     bookOf(code).chapterCount === 1 ? bookOf(code).name : `${bookOf(code).name} ${chapter}`;
 
-  /** The whole-chapter reference `chapterInput` resolves to. */
+  /** The whole-chapter reference body. */
   const wholeChapter = (code: string, chapter: number, id: string) => ({
     id,
     editionId,
@@ -139,19 +157,46 @@ describe('Bible reader routes', () => {
     startChapter: chapter,
     startVerse: 1,
     endChapter: chapter,
-    endVerse: chapters.get(key(code, chapter))?.length ?? 0,
-    label: chapterInput(code, chapter),
+    endVerse: lastVerseOf(code, chapter),
+    label: chapterLabel(code, chapter),
   });
 
-  /** Resolves a chapter as the reader does, then loads it; returns the body and reference id. */
+  /** The whole-chapter reference id, as the reader's book/chapter picker gets it. */
+  async function chapterId(code: string, chapter: number): Promise<string> {
+    const res = await referencesAs(alice, { editionId, bookCode: code, chapter }).expect(200);
+    return (res.body as BibleReferenceResponse).reference.id;
+  }
+
+  /** Opens a chapter by structure, as the reader does, then loads it. */
   async function chapterOf(
     code: string,
     chapter: number,
   ): Promise<{ body: BiblePassageResponse; id: string }> {
-    const id = await resolve(chapterInput(code, chapter));
+    const id = await chapterId(code, chapter);
     const res = await passage({ referenceId: id }).expect(200);
     expect(res.headers['cache-control']).toBe('no-store');
     return { body: res.body as BiblePassageResponse, id };
+  }
+
+  /** The whole expected body of a chapter opened by `id`, its neighbors read from the database. */
+  async function expectedWholeChapter(code: string, chapter: number, id: string) {
+    const at = books.findIndex((b) => b.code === code);
+    const before = books[at - 1];
+    const after = books[at + 1];
+    const book = bookOf(code);
+    const previous =
+      chapter > 1
+        ? await link(code, chapter - 1)
+        : before
+          ? await link(before.code, before.chapterCount)
+          : null;
+    const next =
+      chapter < book.chapterCount
+        ? await link(code, chapter + 1)
+        : after
+          ? await link(after.code, 1)
+          : null;
+    return expectedChapter(code, chapter, { previous, next }, wholeChapter(code, chapter, id));
   }
 
   async function signedIn(): Promise<string> {
@@ -265,32 +310,36 @@ describe('Bible reader routes', () => {
   describe('GET /v1/bible/passages for whole chapters', () => {
     it('returns a chapter verbatim with its attribution and neighbors', async () => {
       const { body, id } = await chapterOf('ROM', 9);
-      expect(body).toStrictEqual(
-        expectedChapter(
-          'ROM',
-          9,
-          { previous: link('ROM', 8), next: link('ROM', 10) },
-          wholeChapter('ROM', 9, id),
-        ),
-      );
+      expect(body).toStrictEqual(await expectedWholeChapter('ROM', 9, id));
     });
 
-    it('resolves and returns every chapter of the corpus byte for byte, chained in canon order from Genesis 1 to Revelation 22', async () => {
-      let at: { bookCode: string; chapter: number } | null = { bookCode: 'GEN', chapter: 1 };
-      let previous: ReturnType<typeof link> | null = null;
+    it('returns every chapter of the corpus byte for byte, chained by the neighbor reference ids in canon order from Genesis 1 to Revelation 22', async () => {
+      let at: { bookCode: string; chapter: number; referenceId: string } | null = {
+        bookCode: 'GEN',
+        chapter: 1,
+        referenceId: await chapterId('GEN', 1),
+      };
+      let previous: Link | null = null;
       let count = 0;
       let verseCount = 0;
       while (at) {
-        const { body, id } = await chapterOf(at.bookCode, at.chapter);
+        // One request per chapter, by the id the previous chapter's `next` carried.
+        const res = await passage({ referenceId: at.referenceId }).expect(200);
+        const body = res.body as BiblePassageResponse;
         expect(body).toStrictEqual(
           expectedChapter(
             at.bookCode,
             at.chapter,
             { previous, next: body.next },
-            wholeChapter(at.bookCode, at.chapter, id),
+            wholeChapter(at.bookCode, at.chapter, at.referenceId),
           ),
         );
-        previous = link(at.bookCode, at.chapter);
+        previous = {
+          bookCode: at.bookCode,
+          bookName: bookOf(at.bookCode).name,
+          chapter: at.chapter,
+          referenceId: at.referenceId,
+        };
         verseCount += body.verses.length;
         count += 1;
         at = body.next;
@@ -298,16 +347,36 @@ describe('Bible reader routes', () => {
       }
       expect(count).toBe(1189);
       expect(verseCount).toBe(31103);
-      expect(previous).toStrictEqual(link('REV', 22));
+      expect(previous).toStrictEqual(await link('REV', 22));
     }, 180_000);
 
+    it('gives each neighbor the same shared reference as resolving that chapter by name', async () => {
+      const { body } = await chapterOf('ROM', 9);
+      expect(body.previous?.referenceId).toBe(await resolve(`${bookOf('ROM').name} 8`));
+      expect(body.next?.referenceId).toBe(await resolve(`${bookOf('ROM').name} 10`));
+      // A single-chapter book's whole chapter is its bare name.
+      const { body: titus } = await chapterOf('TIT', 3);
+      expect(titus.next?.referenceId).toBe(await resolve(bookOf('PHM').name));
+    });
+
     it('has no chapter before Genesis 1 or after Revelation 22, and crosses book boundaries', async () => {
+      for (const [code, chapter] of [
+        ['GEN', 1],
+        ['REV', 22],
+        ['EXO', 1],
+      ] as const) {
+        const { body, id } = await chapterOf(code, chapter);
+        expect(body).toStrictEqual(await expectedWholeChapter(code, chapter, id));
+      }
       const genesis = (await chapterOf('GEN', 1)).body;
-      expect([genesis.previous, genesis.next]).toStrictEqual([null, link('GEN', 2)]);
+      expect([genesis.previous, genesis.next]).toStrictEqual([null, await link('GEN', 2)]);
       const revelation = (await chapterOf('REV', 22)).body;
-      expect([revelation.previous, revelation.next]).toStrictEqual([link('REV', 21), null]);
+      expect([revelation.previous, revelation.next]).toStrictEqual([await link('REV', 21), null]);
       const exodus = (await chapterOf('EXO', 1)).body;
-      expect([exodus.previous, exodus.next]).toStrictEqual([link('GEN', 50), link('EXO', 2)]);
+      expect([exodus.previous, exodus.next]).toStrictEqual([
+        await link('GEN', 50),
+        await link('EXO', 2),
+      ]);
     });
 
     it('links a single-chapter book to its neighboring books', async () => {
@@ -316,7 +385,7 @@ describe('Bible reader routes', () => {
         expectedChapter(
           'JUD',
           1,
-          { previous: link('3JN', 1), next: link('REV', 1) },
+          { previous: await link('3JN', 1), next: await link('REV', 1) },
           wholeChapter('JUD', 1, id),
         ),
       );
@@ -324,19 +393,21 @@ describe('Bible reader routes', () => {
     });
 
     it('returns Psalm titles and stanza headings as superscriptions, never inside verse text', async () => {
-      const psalm3 = (await chapterOf('PSA', 3)).body;
-      expect(psalm3.superscriptions).toHaveLength(1);
-      expect(psalm3.superscriptions[0]?.beforeVerse).toBe(1);
-      const title = psalm3.superscriptions[0]?.text ?? '';
-      expect(title.length).toBeGreaterThan(0);
-      expect(psalm3.verses[0]?.text).toBe(chapters.get(key('PSA', 3))?.[0]?.text);
-      expect(psalm3.verses.some((v) => v.text.includes(title))).toBe(false);
-      expect(psalm3.superscriptions).toStrictEqual(superscriptions.get(key('PSA', 3)));
+      const psalm3 = await chapterOf('PSA', 3);
+      expect(psalm3.body).toStrictEqual(await expectedWholeChapter('PSA', 3, psalm3.id));
+      // The stored rows themselves: one title before verse 1, never part of any verse.
+      const title = superscriptions.get(key('PSA', 3)) ?? [];
+      expect(title.map((t) => t.beforeVerse)).toStrictEqual([1]);
+      const [only] = title;
+      expect(only && only.text.length > 0).toBe(true);
+      expect(psalm3.body.verses.some((v) => only !== undefined && v.text.includes(only.text))).toBe(
+        false,
+      );
 
-      const psalm119 = (await chapterOf('PSA', 119)).body;
-      expect(psalm119.verses).toHaveLength(176);
-      expect(psalm119.superscriptions).toHaveLength(22);
-      expect(psalm119.superscriptions.map((s) => s.beforeVerse)).toStrictEqual(
+      const psalm119 = await chapterOf('PSA', 119);
+      expect(psalm119.body).toStrictEqual(await expectedWholeChapter('PSA', 119, psalm119.id));
+      expect(lastVerseOf('PSA', 119)).toBe(176);
+      expect((superscriptions.get(key('PSA', 119)) ?? []).map((t) => t.beforeVerse)).toStrictEqual(
         Array.from({ length: 22 }, (_, i) => i * 8 + 1),
       );
     });
@@ -355,11 +426,13 @@ describe('Bible reader routes', () => {
         'ROM 16:25',
       ]);
       for (const v of empty) {
-        const { body } = await chapterOf(v.bookCode, v.chapter);
-        expect(body.verses.map((x) => x.verse)).toStrictEqual(
-          Array.from({ length: body.verses.length }, (_, i) => i + 1),
-        );
-        expect(body.verses[v.verse - 1]).toStrictEqual({ verse: v.verse, text: '' });
+        const { body, id } = await chapterOf(v.bookCode, v.chapter);
+        // The whole body equals the stored rows, which hold the empty verse in its place.
+        expect(body).toStrictEqual(await expectedWholeChapter(v.bookCode, v.chapter, id));
+        expect(chapters.get(key(v.bookCode, v.chapter))?.[v.verse - 1]).toStrictEqual({
+          verse: v.verse,
+          text: '',
+        });
       }
     });
   });
@@ -372,7 +445,7 @@ describe('Bible reader routes', () => {
         expectedChapter(
           'ROM',
           8,
-          { previous: link('ROM', 7), next: link('ROM', 9) },
+          { previous: await link('ROM', 7), next: await link('ROM', 9) },
           {
             id: referenceId,
             editionId,
@@ -387,15 +460,126 @@ describe('Bible reader routes', () => {
       );
     });
 
-    it('answers 404 for an unknown reference or an unknown edition', async () => {
+    it('takes the edition from the reference; a matching editionId gives the same body', async () => {
+      const referenceId = await resolve('Jude 3');
+      const alone = await passage({ referenceId }).expect(200);
+      const withEdition = await passage({ referenceId, editionId }).expect(200);
+      expect(withEdition.body).toStrictEqual(alone.body);
+      expect((alone.body as BiblePassageResponse).edition).toStrictEqual(editionBody());
+    });
+
+    it('answers 404 for an unknown reference or an editionId that is not the reference edition', async () => {
       const unknownReference = await passage({ referenceId: randomUUID() }).expect(404);
       expect(unknownReference.body).toStrictEqual(NOT_FOUND);
       const referenceId = await resolve('Jude 3');
-      const unknownEdition = await passageAs(alice, {
+      const otherEdition = await passage({ editionId: randomUUID(), referenceId }).expect(404);
+      expect(otherEdition.body).toStrictEqual(NOT_FOUND);
+    });
+  });
+
+  describe('POST /v1/bible/references', () => {
+    it('gives a whole chapter the same shared reference as resolving it by name', async () => {
+      const res = await referencesAs(alice, { editionId, bookCode: 'ROM', chapter: 9 }).expect(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      const id = await resolve(`${bookOf('ROM').name} 9`);
+      expect(res.body).toStrictEqual({ reference: wholeChapter('ROM', 9, id) });
+    });
+
+    it('gives a single-chapter book its whole chapter, the same as its bare name', async () => {
+      const res = await referencesAs(alice, { editionId, bookCode: 'JUD', chapter: 1 }).expect(200);
+      expect(res.body).toStrictEqual({
+        reference: wholeChapter('JUD', 1, await resolve(bookOf('JUD').name)),
+      });
+    });
+
+    it('gives one verse the same shared reference as resolving it by name', async () => {
+      const res = await referencesAs(alice, {
+        editionId,
+        bookCode: 'PSA',
+        chapter: 3,
+        verse: 2,
+      }).expect(200);
+      const label = `${bookOf('PSA').name} 3:2`;
+      expect(res.body).toStrictEqual({
+        reference: {
+          id: await resolve(label),
+          editionId,
+          bookCode: 'PSA',
+          startChapter: 3,
+          startVerse: 2,
+          endChapter: 3,
+          endVerse: 2,
+          label,
+        },
+      });
+    });
+
+    it('refuses a book, chapter or verse the edition lacks with a specific 422 and writes nothing', async () => {
+      const before = await db.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM scripture_reference',
+        { type: QueryTypes.SELECT },
+      );
+      const cases: [Record<string, unknown>, string, string][] = [
+        [
+          { bookCode: 'XYZ', chapter: 1 },
+          'REFERENCE_UNKNOWN_BOOK',
+          'No book in this translation matches that name',
+        ],
+        [
+          { bookCode: 'JUD', chapter: 2 },
+          'REFERENCE_CHAPTER_OUT_OF_RANGE',
+          'That chapter does not exist in this book',
+        ],
+        [
+          { bookCode: 'ROM', chapter: 9, verse: lastVerseOf('ROM', 9) + 1 },
+          'REFERENCE_VERSE_OUT_OF_RANGE',
+          'That verse does not exist in this chapter',
+        ],
+      ];
+      for (const [body, code, message] of cases) {
+        const res = await referencesAs(alice, { editionId, ...body }).expect(422);
+        expect(res.body).toStrictEqual(envelope({ code, message }));
+      }
+      const after = await db.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM scripture_reference',
+        { type: QueryTypes.SELECT },
+      );
+      expect(after).toStrictEqual(before);
+    });
+
+    it('rejects malformed bodies with fixed messages, and an unknown edition with 404', async () => {
+      const bad = await referencesAs(alice, { editionId, bookCode: 'Romans', chapter: '9' }).expect(
+        400,
+      );
+      expect(bad.body).toStrictEqual(
+        envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: {
+            bookCode: ['Enter a book code such as ROM'],
+            chapter: ['Invalid input: expected number, received string'],
+          },
+        }),
+      );
+      const unknown = await referencesAs(alice, {
         editionId: randomUUID(),
-        referenceId,
+        bookCode: 'ROM',
+        chapter: 9,
       }).expect(404);
-      expect(unknownEdition.body).toStrictEqual(NOT_FOUND);
+      expect(unknown.body).toStrictEqual(NOT_FOUND);
+    });
+
+    it('answers 401 without a session and gives another user the same shared reference', async () => {
+      const body = { editionId, bookCode: 'ROM', chapter: 9 };
+      const anonymous = await referencesAs(undefined, body).expect(401);
+      expect(anonymous.body).toStrictEqual(UNAUTHENTICATED);
+      const mine = await referencesAs(alice, body).expect(200);
+      const theirs = await request(app.getHttpServer())
+        .post('/v1/bible/references')
+        .send(body)
+        .set('Cookie', bob)
+        .expect(200);
+      expect(theirs.body).toStrictEqual(mine.body);
     });
   });
 
@@ -404,6 +588,12 @@ describe('Bible reader routes', () => {
       const cases: [Record<string, string>, Record<string, string[]>][] = [
         [{}, { referenceId: ['Invalid input: expected string, received undefined'] }],
         [{ referenceId: 'rom-9-1' }, { referenceId: ['Invalid UUID'] }],
+        [{ referenceId: randomUUID(), editionId: 'webp' }, { editionId: ['Invalid UUID'] }],
+        // A book and chapter in the URL is not a supported form: only opaque IDs travel there.
+        [
+          { book: 'ROM', chapter: '9' },
+          { referenceId: ['Invalid input: expected string, received undefined'] },
+        ],
       ];
       for (const [query, fieldErrors] of cases) {
         const res = await passage(query).expect(400);
@@ -411,27 +601,10 @@ describe('Bible reader routes', () => {
           envelope({ code: 'VALIDATION', message: 'Invalid request', fieldErrors }),
         );
       }
-      const missing = await passageAs(alice, { referenceId: randomUUID() }).expect(400);
-      expect(missing.body).toStrictEqual(
-        envelope({
-          code: 'VALIDATION',
-          message: 'Invalid request',
-          fieldErrors: { editionId: ['Invalid input: expected string, received undefined'] },
-        }),
-      );
-      // A book and chapter in the URL is not a supported form: only opaque IDs travel there.
-      const byChapter = await passage({ book: 'ROM', chapter: '9' }).expect(400);
-      expect(byChapter.body).toStrictEqual(
-        envelope({
-          code: 'VALIDATION',
-          message: 'Invalid request',
-          fieldErrors: { referenceId: ['Invalid input: expected string, received undefined'] },
-        }),
-      );
     });
 
     it('answers 401 without a session', async () => {
-      const res = await passageAs(undefined, { editionId, referenceId: randomUUID() }).expect(401);
+      const res = await passageAs(undefined, { referenceId: randomUUID() }).expect(401);
       expect(res.body).toStrictEqual(UNAUTHENTICATED);
     });
 
@@ -440,7 +613,7 @@ describe('Bible reader routes', () => {
       const mine = await passage({ referenceId }).expect(200);
       const theirs = await request(app.getHttpServer())
         .get('/v1/bible/passages')
-        .query({ editionId, referenceId })
+        .query({ referenceId })
         .set('Cookie', bob)
         .expect(200);
       expect(theirs.body).toStrictEqual(mine.body);

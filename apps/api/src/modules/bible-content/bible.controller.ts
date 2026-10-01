@@ -2,6 +2,8 @@ import { Body, Controller, Get, Header, HttpCode, Post, Query } from '@nestjs/co
 import {
   biblePassageQuerySchema,
   type BiblePassageResponse,
+  bibleReferenceRequestSchema,
+  type BibleReferenceResponse,
   type BibleTranslationsResponse,
   resolveReferenceRequestSchema,
   type ResolveReferenceResponse,
@@ -34,7 +36,8 @@ export class BibleController {
 
   /**
    * The chapter holding a resolved reference, verbatim from the corpus (BIB-17, FR-BIBLE-009).
-   * Only opaque IDs travel in the URL; the access line records only the route pattern.
+   * The reference fixes the edition. Only opaque IDs travel in the URL; the access line records
+   * only the route pattern.
    */
   @Get('passages')
   @Header('Cache-Control', 'no-store')
@@ -49,6 +52,21 @@ export class BibleController {
   async resolve(@Body() body: unknown): Promise<ResolveReferenceResponse> {
     const { input, editionId } = parseBody(resolveReferenceRequestSchema, body);
     return this.references.resolve(editionId, input);
+  }
+
+  /**
+   * The shared reference for a chapter or verse chosen by structure (BIB-17): book code and
+   * numbers in the body (never logged), validated against the corpus, no text parsing. Read +
+   * idempotent upsert, so 200.
+   */
+  @Post('references')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async reference(@Body() body: unknown): Promise<BibleReferenceResponse> {
+    const { editionId, bookCode, chapter, verse } = parseBody(bibleReferenceRequestSchema, body);
+    return {
+      reference: await this.references.chapterReference(editionId, bookCode, chapter, verse),
+    };
   }
 
   /**

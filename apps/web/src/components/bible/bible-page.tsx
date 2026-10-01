@@ -1,82 +1,107 @@
 'use client';
 
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { RequireAuth } from '@/components/require-auth';
 import {
   bibleHref,
-  chapterInput,
+  type ChapterTarget,
   fetchTranslations,
-  idFromParams,
-  resolveReference,
+  referenceFor,
+  referenceIdFromParams,
   TRANSLATIONS_QUERY_KEY,
-  verseInput,
 } from '@/lib/bible';
-import { BibleReader, type ChapterTarget, type FocusRequest } from './bible-reader';
-import { ReferenceSearch } from './bible-search';
+import { BibleReader, type FocusRequest, usePassage } from './bible-reader';
+import { type Navigation, ReferenceSearch } from './bible-search';
+import { ProblemAlert } from './problem-alert';
 
 /**
  * `/bible`: reading outside a study (PRD section 9). Records no study events. The URL holds only
- * opaque ids (`?ref=<scripture reference id>&edition=<id>`), so links, reload, and back/forward
- * work while no Scripture reference or search text reaches a URL, history entry, or request log.
+ * the opaque reference id (`?ref=<scripture reference id>`), which also fixes the edition, so
+ * links, bookmarks, reload, and back/forward reopen the same passage in the same edition while no
+ * Scripture reference or search text reaches a URL, history entry, or request log.
  */
 export function BiblePage() {
   return <RequireAuth>{() => <BibleWorkspace />}</RequireAuth>;
 }
 
-interface OpenRequest {
-  editionId: string;
-  input: string;
-  focus: boolean;
+interface Pending {
+  error: unknown;
+  retry: () => void;
 }
 
-const OPEN_FAILED = "We couldn't open that passage.";
+const OPEN_COPY = {
+  notFound: 'That passage is not available.',
+  refused: "We couldn't open that passage.",
+  unavailable: "We couldn't open that passage.",
+};
+const TRANSLATIONS_COPY = {
+  notFound: 'No Bible translation is available yet.',
+  refused: "We couldn't load the Bible translations.",
+  unavailable: "We couldn't load the Bible translations.",
+};
 
 function BibleWorkspace() {
   const router = useRouter();
   const params = useSearchParams();
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
-  const [openProblem, setOpenProblem] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [openProblem, setOpenProblem] = useState<Pending | null>(null);
+  const [chosenEditionId, setChosenEditionId] = useState<string | null>(null);
   const translations = useQuery({ queryKey: TRANSLATIONS_QUERY_KEY, queryFn: fetchTranslations });
+  const referenceId = referenceIdFromParams(params);
+  const passage = usePassage(referenceId);
 
   const list = translations.data?.translations ?? [];
-  const defaultEditionId = list[0]?.id ?? null;
-  const requestedEdition = idFromParams(params, 'edition');
-  const translation = list.find((t) => t.id === requestedEdition) ?? list[0];
-  const referenceId = idFromParams(params, 'ref');
+  // The open reference fixes the edition; with nothing open, the user's pick or the first one.
+  const editionId =
+    (referenceId ? passage.data?.edition.id : undefined) ?? chosenEditionId ?? list[0]?.id;
+  const translation = list.find((t) => t.id === editionId) ?? list[0];
 
-  const goTo = (id: string | null, editionId: string, focus: boolean) => {
+  /**
+   * Navigation order: every navigation the user starts takes the next token, and a result is
+   * applied only while its token is still the latest. So when requests overlap, the last one the
+   * user initiated wins, whatever order the responses arrive in; nothing is disabled or debounced.
+   */
+  const latest = useRef(0);
+  const begin = (): number => {
+    latest.current += 1;
+    setOpening(false);
     setOpenProblem(null);
-    if (focus && id) setFocusRequest((prev) => ({ referenceId: id, n: (prev?.n ?? 0) + 1 }));
-    router.push(bibleHref(id, editionId, defaultEditionId), { scroll: false });
+    return latest.current;
+  };
+  const open = (token: number, id: string, focus: boolean) => {
+    if (token !== latest.current) return;
+    if (focus) setFocusRequest((prev) => ({ referenceId: id, n: (prev?.n ?? 0) + 1 }));
+    router.push(bibleHref(id), { scroll: false });
+  };
+  const navigation: Navigation = { begin, open: (token, id) => open(token, id, true) };
+
+  /** Asks the API for a chapter's reference (a request body, never logged), then opens it. */
+  const openChapter = (target: ChapterTarget, focus: boolean) => {
+    const token = begin();
+    setOpening(true);
+    referenceFor(target).then(
+      (reference) => {
+        if (token !== latest.current) return;
+        setOpening(false);
+        open(token, reference.id, focus);
+      },
+      (error: unknown) => {
+        if (token !== latest.current) return;
+        setOpening(false);
+        setOpenProblem({ error, retry: () => openChapter(target, focus) });
+      },
+    );
   };
 
-  // Chapters and verses are reached by resolving their text (a request body, never logged), so
-  // only the resulting opaque reference id goes in the URL. The current chapter stays on screen
-  // until the new one is ready, and a failure is reported with Retry (FR-BIBLE-009).
-  const open = useMutation({
-    mutationFn: ({ editionId, input }: OpenRequest) => resolveReference(input, editionId),
-    onSuccess: (result, { editionId, focus }) => {
-      if (result.outcome !== 'resolved') {
-        setOpenProblem(OPEN_FAILED);
-        return;
-      }
-      setOpenProblem(null);
-      goTo(result.reference.id, editionId, focus);
-    },
-    onError: () => setOpenProblem(OPEN_FAILED),
-  });
-
-  const openChapter = ({ editionId, bookCode, chapter }: ChapterTarget, focus: boolean) => {
-    const book = list.find((t) => t.id === editionId)?.books.find((b) => b.code === bookCode);
-    if (!book) {
-      setOpenProblem('That book is not in this translation.');
-      return;
-    }
-    open.mutate({ editionId, input: chapterInput(book, chapter), focus });
-  };
+  const status = translations.isPending
+    ? 'Loading translations…'
+    : opening
+      ? 'Opening the passage…'
+      : '';
 
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-8">
@@ -87,74 +112,41 @@ function BibleWorkspace() {
       </nav>
       <h1 className="font-serif text-4xl">Bible</h1>
 
-      {translations.isPending ? (
-        <p role="status" className="text-muted">
-          Loading translations…
-        </p>
-      ) : null}
+      {/* One live region, mounted from the first render; only its text changes. */}
+      <p role="status" aria-live="polite" className={status ? 'text-muted' : 'sr-only'}>
+        {status}
+      </p>
       {translations.isError ? (
-        <div role="alert" className="flex flex-wrap items-center gap-3">
-          <p>We couldn&apos;t load the Bible translations.</p>
-          <button
-            type="button"
-            onClick={() => void translations.refetch()}
-            className="rounded border border-accent px-3 py-1 text-accent"
-          >
-            Retry
-          </button>
-        </div>
+        <ProblemAlert
+          error={translations.error}
+          copy={TRANSLATIONS_COPY}
+          onRetry={() => void translations.refetch()}
+        />
       ) : null}
       {translations.isSuccess && !translation ? (
         <p role="alert">No Bible translation is available yet.</p>
-      ) : null}
-      {requestedEdition && translation && requestedEdition !== translation.id ? (
-        <p role="alert">That translation is not available. Showing {translation.name} instead.</p>
       ) : null}
 
       {translation ? (
         <>
           <ReferenceSearch
             translation={translation}
-            onOpenReference={(id) => goTo(id, translation.id, true)}
-            onOpenVerse={(bookCode, chapter, verse) => {
-              const book = translation.books.find((b) => b.code === bookCode);
-              if (book) {
-                open.mutate({
-                  editionId: translation.id,
-                  input: verseInput(book, chapter, verse),
-                  focus: true,
-                });
-              }
-            }}
+            navigation={navigation}
+            onOpenVerse={(target) => openChapter(target, true)}
           />
-          {open.isPending ? (
-            <p role="status" className="text-muted">
-              Opening the passage…
-            </p>
-          ) : null}
           {openProblem ? (
-            <div
-              role="alert"
-              className="flex flex-wrap items-center gap-3 rounded border border-accent px-3 py-2"
-            >
-              <p>{openProblem}</p>
-              {open.variables && open.isError ? (
-                <button
-                  type="button"
-                  onClick={() => open.variables && open.mutate(open.variables)}
-                  className="rounded border border-accent px-3 py-1 text-accent"
-                >
-                  Retry
-                </button>
-              ) : null}
-            </div>
+            <ProblemAlert error={openProblem.error} copy={OPEN_COPY} onRetry={openProblem.retry} />
           ) : null}
           <BibleReader
             translations={list}
             editionId={translation.id}
             referenceId={referenceId}
             onOpenChapter={openChapter}
-            onChangeEdition={(editionId) => goTo(null, editionId, false)}
+            onOpenReference={(id) => open(begin(), id, true)}
+            onChangeEdition={(id) => {
+              begin();
+              setChosenEditionId(id);
+            }}
             focusRequest={focusRequest}
           />
         </>

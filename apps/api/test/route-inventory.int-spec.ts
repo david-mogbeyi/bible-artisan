@@ -78,6 +78,13 @@ const ROUTES: Record<string, Access> = {
       test: 'gives another user the same shared chapter for the same request',
     },
   },
+  'POST /v1/bible/references': {
+    access: 'private',
+    crossUserTest: {
+      file: 'bible-passages.int-spec.ts',
+      test: 'answers 401 without a session and gives another user the same shared reference',
+    },
+  },
   'GET /v1/bible/translations': {
     access: 'private',
     crossUserTest: {

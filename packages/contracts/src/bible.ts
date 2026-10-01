@@ -219,21 +219,25 @@ export type BibleTranslationsResponse = z.infer<typeof bibleTranslationsResponse
 
 /**
  * `GET /bible/passages`: one chapter, the reading context (PRD section 11): the chapter holding
- * the reference's start, with the reference. Only an opaque reference id travels in the URL, so
- * no Scripture reference appears in any request log (NFR-PRIV-001); clients reach a chapter by
- * resolving it first (`POST /bible/resolve`, whose body is never logged).
+ * the reference's start, with the reference. The reference fixes the edition, so a bookmarked
+ * `referenceId` always opens the same edition. `editionId` (PRD section 24) is optional; when
+ * given it must be the reference's edition, else 404. Only opaque ids travel in the URL, so no
+ * Scripture reference appears in any request log (NFR-PRIV-001).
  */
 export const biblePassageQuerySchema = z.object({
-  editionId: z.uuid(),
   referenceId: z.uuid(),
+  editionId: z.uuid().optional(),
 });
 
 export type BiblePassageQuery = z.infer<typeof biblePassageQuerySchema>;
 
+/** A neighboring chapter, with the id of its whole-chapter reference: one request to open it. */
 export const bibleChapterLinkSchema = z.object({
   bookCode: z.string(),
   bookName: z.string(),
   chapter: z.number().int().positive(),
+  /** The whole chapter's shared `scripture_reference` id (same identity as `POST /bible/resolve`). */
+  referenceId: z.uuid(),
 });
 
 export type BibleChapterLink = z.infer<typeof bibleChapterLinkSchema>;
@@ -259,3 +263,27 @@ export const biblePassageResponseSchema = z.object({
 });
 
 export type BiblePassageResponse = z.infer<typeof biblePassageResponseSchema>;
+
+/** Highest chapter or verse number accepted before the corpus check (Psalms has 150 chapters). */
+export const MAX_CHAPTER_OR_VERSE = 999;
+
+/**
+ * `POST /bible/references`: the reference for a chapter, or one verse of it, chosen by structure
+ * (the book/chapter picker, a translation change, a search result), validated against the
+ * edition's corpus with no text parsing. Without `verse` it is the whole chapter, the same shared
+ * reference `POST /bible/resolve` gives for that chapter. A book, chapter or verse the edition
+ * lacks is 422 with a reference error code, never the nearest one that exists.
+ */
+export const bibleReferenceRequestSchema = z.object({
+  editionId: z.uuid(),
+  /** USFM book code, e.g. `ROM`. */
+  bookCode: z.string().regex(/^[1-4A-Z][A-Z0-9]{2}$/, 'Enter a book code such as ROM'),
+  chapter: z.number().int().positive().max(MAX_CHAPTER_OR_VERSE),
+  verse: z.number().int().positive().max(MAX_CHAPTER_OR_VERSE).optional(),
+});
+
+export type BibleReferenceRequest = z.infer<typeof bibleReferenceRequestSchema>;
+
+export const bibleReferenceResponseSchema = z.object({ reference: scriptureReferenceSchema });
+
+export type BibleReferenceResponse = z.infer<typeof bibleReferenceResponseSchema>;

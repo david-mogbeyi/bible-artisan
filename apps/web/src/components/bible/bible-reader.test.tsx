@@ -3,27 +3,36 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chapter,
+  deferred,
   EDITION_ID,
   OTHER_EDITION_ID,
   OTHER_TRANSLATION,
   PSALM_3,
+  PSALM_3_ID,
   PSALM_4,
+  PSALM_4_ID,
   TRANSLATION,
   wholeChapterReference,
 } from '@/test/bible-fixtures';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { BibleReader, type FocusRequest } from './bible-reader';
 
-const PSALM_3_ID = '33333333-2222-4333-8444-555555555555';
-const PSALM_4_ID = '44444444-2222-4333-8444-555555555555';
-
-let responses: Map<string, Array<() => Response>>;
+type Respond = () => Response | Promise<Response>;
+let responses: Map<string, Respond[]>;
 let fetchMock: ReturnType<typeof vi.fn>;
 
 /** Queue responses per reference id; a request with nothing queued fails the test. */
-function respond(referenceId: string, ...make: Array<() => Response>) {
+function respond(referenceId: string, ...make: Respond[]) {
   responses.set(referenceId, [...(responses.get(referenceId) ?? []), ...make]);
 }
+
+const envelope = (code: string, extra: Record<string, unknown> = {}) => ({
+  code,
+  message: 'Server wording that must never be shown.',
+  retryable: false,
+  correlationId: 'c',
+  ...extra,
+});
 
 beforeEach(() => {
   responses = new Map();
@@ -31,8 +40,8 @@ beforeEach(() => {
     const url = new URL(input);
     if (init?.method && init.method !== 'GET') throw new Error('the reader must not write');
     if (!url.pathname.endsWith('/bible/passages')) throw new Error(`unexpected fetch ${input}`);
-    // Only opaque ids travel in the URL.
-    expect([...url.searchParams.keys()].sort()).toStrictEqual(['editionId', 'referenceId']);
+    // Only the opaque reference id travels in the URL; it fixes the edition.
+    expect([...url.searchParams.keys()]).toStrictEqual(['referenceId']);
     const id = url.searchParams.get('referenceId') ?? '';
     const next = responses.get(id)?.shift();
     if (!next) throw new Error(`no response queued for ${id}`);
@@ -47,11 +56,13 @@ afterEach(() => {
 
 function renderReader(referenceId: string | null, focusRequest: FocusRequest | null = null) {
   const onOpenChapter = vi.fn();
+  const onOpenReference = vi.fn();
   const onChangeEdition = vi.fn();
   const props = {
     translations: [TRANSLATION, OTHER_TRANSLATION],
     editionId: EDITION_ID,
     onOpenChapter,
+    onOpenReference,
     onChangeEdition,
   };
   const view = renderWithQuery(
@@ -63,10 +74,12 @@ function renderReader(referenceId: string | null, focusRequest: FocusRequest | n
         <BibleReader {...props} referenceId={next} focusRequest={focus} />
       </QueryClientProvider>,
     );
-  return { ...view, onOpenChapter, onChangeEdition, rerender };
+  return { ...view, onOpenChapter, onOpenReference, onChangeEdition, rerender };
 }
 
 const verseItems = () => within(screen.getByRole('list')).getAllByRole('listitem');
+const picker = () => screen.getByRole('form', { name: 'Choose a chapter' });
+const selected = (label: string) => within(picker()).getByLabelText<HTMLSelectElement>(label).value;
 
 describe('BibleReader', () => {
   it('asks for a reference when nothing is open', () => {
@@ -144,22 +157,27 @@ describe('BibleReader', () => {
     expect(textOf(three)).toContain('Marked verse 3');
   });
 
-  it('keeps the previous chapter on screen when the next fails, and Retry loads it', async () => {
+  it('opens the next chapter by the reference id its link carries, in one step', async () => {
+    respond(PSALM_3_ID, () => jsonResponse(200, PSALM_3));
+    const { onOpenReference, onOpenChapter } = renderReader(PSALM_3_ID);
+    await screen.findByRole('heading', { name: 'Psalms 3' });
+    fireEvent.click(screen.getByRole('button', { name: 'Next chapter: Psalms 4' }));
+    expect(onOpenReference).toHaveBeenCalledWith(PSALM_4_ID);
+    fireEvent.click(screen.getByRole('button', { name: 'Previous chapter: Psalms 2' }));
+    expect(onOpenReference).toHaveBeenLastCalledWith(PSALM_3.previous?.referenceId);
+    expect(onOpenChapter).not.toHaveBeenCalled();
+  });
+
+  it('keeps the previous chapter on screen when the next is unavailable (503), and Retry loads it', async () => {
     respond(PSALM_3_ID, () => jsonResponse(200, PSALM_3));
     respond(
       PSALM_4_ID,
-      () => jsonResponse(503, { code: 'DEPENDENCY_UNAVAILABLE' }),
-      () => jsonResponse(503, { code: 'DEPENDENCY_UNAVAILABLE' }),
+      () => jsonResponse(503, envelope('DEPENDENCY_UNAVAILABLE', { retryable: true })),
       () => jsonResponse(200, PSALM_4),
     );
-    const { onOpenChapter, rerender } = renderReader(PSALM_3_ID);
+    const { rerender } = renderReader(PSALM_3_ID);
     await screen.findByRole('heading', { name: 'Psalms 3' });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Next chapter: Psalms 4' }));
-    expect(onOpenChapter).toHaveBeenCalledWith(
-      { editionId: EDITION_ID, bookCode: 'PSA', chapter: 4 },
-      true,
-    );
     // The host asks for focus on Psalm 4 before its URL (and so this reader) has moved: the old
     // heading must not take it.
     const focus = { referenceId: PSALM_4_ID, n: 1 };
@@ -167,9 +185,8 @@ describe('BibleReader', () => {
     expect(document.activeElement).not.toBe(screen.getByRole('heading', { name: 'Psalms 3' }));
     rerender(PSALM_4_ID, focus);
 
-    // The reader retries a server error once (after ~1 s) before reporting it.
-    const alert = await screen.findByRole('alert', {}, { timeout: 4000 });
-    expect(textOf(alert)).toContain("We couldn't load this chapter.");
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toBe("We couldn't load this chapter.Retry");
     // FR-BIBLE-009: the last chapter stays visible with Retry.
     expect(screen.getByRole('heading', { name: 'Psalms 3' })).toBeTruthy();
     expect(screen.getByText('Placeholder text one.')).toBeTruthy();
@@ -180,20 +197,76 @@ describe('BibleReader', () => {
     await waitFor(() => expect(document.activeElement).toBe(heading));
   });
 
-  it('reports a reference that is not available without Retry or a substitute', async () => {
-    respond(PSALM_3_ID, () =>
-      jsonResponse(404, {
-        code: 'NOT_FOUND',
-        message: 'Resource not found',
-        retryable: false,
-        correlationId: 'c',
-      }),
+  it('holds Retry until Retry-After has passed when rate limited (429)', async () => {
+    respond(
+      PSALM_3_ID,
+      () =>
+        jsonResponse(429, envelope('RATE_LIMITED', { retryable: true }), { 'Retry-After': '1' }),
+      () => jsonResponse(200, PSALM_3),
     );
     renderReader(PSALM_3_ID);
     const alert = await screen.findByRole('alert');
-    expect(textOf(alert)).toBe('That passage is not available in this translation.');
+    expect(textOf(alert)).toBe('Too many requests right now. You can retry in 1 second.Retry');
+    const retry = within(alert).getByRole('button', { name: 'Retry' });
+    expect(retry.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(retry);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => expect(retry.getAttribute('aria-disabled')).toBeNull(), { timeout: 2500 });
+    expect(textOf(alert)).toBe('Too many requests right now.Retry');
+    fireEvent.click(retry);
+    expect(await screen.findByRole('heading', { name: 'Psalms 3' })).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-checks the session on 401 so the page sends the user to sign in, with no Retry', async () => {
+    respond(PSALM_3_ID, () =>
+      jsonResponse(401, { ...envelope('UNAUTHENTICATED'), message: 'Sign in to continue' }),
+    );
+    const { queryClient } = renderReader(PSALM_3_ID);
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toBe('Your session has ended. Taking you to sign in…');
+    expect(within(alert).queryByRole('button')).toBeNull();
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['me'] }));
+  });
+
+  it('reports a reference that is not available (404) without Retry or a substitute', async () => {
+    respond(PSALM_3_ID, () => jsonResponse(404, envelope('NOT_FOUND')));
+    renderReader(PSALM_3_ID);
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toBe('That passage is not available.');
     expect(within(alert).queryByRole('button')).toBeNull();
     expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  it('never renders a server message: an unknown refusal gets fixed copy', async () => {
+    respond(PSALM_3_ID, () => jsonResponse(400, envelope('VALIDATION')));
+    renderReader(PSALM_3_ID);
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toBe('That passage could not be opened.');
+    expect(screen.queryByText(/Server wording/)).toBeNull();
+  });
+
+  it('keeps one status region mounted and changes only its text while a chapter loads', async () => {
+    const slow = deferred<Response>();
+    respond(PSALM_3_ID, () => jsonResponse(200, PSALM_3));
+    respond(PSALM_4_ID, () => slow.promise);
+    const { rerender } = renderReader(null);
+    const status = screen.getByRole('status');
+    expect(textOf(status)).toBe('');
+
+    rerender(PSALM_3_ID);
+    await screen.findByRole('heading', { name: 'Psalms 3' });
+    expect(screen.getByRole('status')).toBe(status);
+    expect(textOf(status)).toBe('');
+
+    rerender(PSALM_4_ID);
+    await waitFor(() => expect(textOf(status)).toBe('Loading the passage…'));
+    slow.resolve(jsonResponse(200, PSALM_4));
+    await screen.findByRole('heading', { name: 'Psalms 4' });
+    expect(screen.getByRole('status')).toBe(status);
+    expect(textOf(status)).toBe('');
   });
 
   it('offers no previous chapter before Genesis 1 and no next after Revelation 22', async () => {
@@ -203,7 +276,7 @@ describe('BibleReader', () => {
         chapter({
           book: { code: 'GEN', name: 'Genesis', chapterCount: 50 },
           chapter: 1,
-          next: { bookCode: 'GEN', bookName: 'Genesis', chapter: 2 },
+          next: { bookCode: 'GEN', bookName: 'Genesis', chapter: 2, referenceId: PSALM_4_ID },
         }),
       ),
     );
@@ -213,7 +286,12 @@ describe('BibleReader', () => {
         chapter({
           book: { code: 'REV', name: 'Revelation', chapterCount: 22 },
           chapter: 22,
-          previous: { bookCode: 'REV', bookName: 'Revelation', chapter: 21 },
+          previous: {
+            bookCode: 'REV',
+            bookName: 'Revelation',
+            chapter: 21,
+            referenceId: PSALM_3_ID,
+          },
         }),
       ),
     );
@@ -234,31 +312,86 @@ describe('BibleReader', () => {
     respond(PSALM_3_ID, () => jsonResponse(200, PSALM_3));
     const { onOpenChapter } = renderReader(PSALM_3_ID);
     await screen.findByRole('heading', { name: 'Psalms 3' });
-    const picker = screen.getByRole('form', { name: 'Choose a chapter' });
-    expect(within(picker).getByLabelText<HTMLSelectElement>('Book').value).toBe('PSA');
-    expect(within(picker).getByLabelText<HTMLSelectElement>('Chapter').value).toBe('3');
+    expect(selected('Book')).toBe('PSA');
+    expect(selected('Chapter')).toBe('3');
 
-    fireEvent.change(within(picker).getByLabelText('Book'), { target: { value: 'JUD' } });
-    expect(within(within(picker).getByLabelText('Chapter')).getAllByRole('option')).toHaveLength(1);
-    fireEvent.change(within(picker).getByLabelText('Book'), { target: { value: 'REV' } });
-    fireEvent.change(within(picker).getByLabelText('Chapter'), { target: { value: '22' } });
+    fireEvent.change(within(picker()).getByLabelText('Book'), { target: { value: 'JUD' } });
+    expect(within(within(picker()).getByLabelText('Chapter')).getAllByRole('option')).toHaveLength(
+      1,
+    );
+    fireEvent.change(within(picker()).getByLabelText('Book'), { target: { value: 'REV' } });
+    fireEvent.change(within(picker()).getByLabelText('Chapter'), { target: { value: '22' } });
     expect(onOpenChapter).not.toHaveBeenCalled();
 
-    fireEvent.click(within(picker).getByRole('button', { name: 'Open' }));
+    fireEvent.click(within(picker()).getByRole('button', { name: 'Open' }));
     expect(onOpenChapter).toHaveBeenCalledWith(
       { editionId: EDITION_ID, bookCode: 'REV', chapter: 22 },
       true,
     );
   });
 
-  it('changes translation by reopening the same chapter, without moving focus or writing', async () => {
+  it('keeps the chapter picker mounted across chapters: it follows the chapter, but never overrides an edit', async () => {
+    respond(PSALM_3_ID, () => jsonResponse(200, PSALM_3));
+    respond(
+      PSALM_4_ID,
+      () => jsonResponse(200, PSALM_4),
+      () => jsonResponse(200, PSALM_4),
+    );
+    const { rerender } = renderReader(PSALM_3_ID);
+    await screen.findByRole('heading', { name: 'Psalms 3' });
+    const form = picker();
+
+    // Untouched, it follows the chapter on screen, without remounting.
+    rerender(PSALM_4_ID);
+    await screen.findByRole('heading', { name: 'Psalms 4' });
+    expect(picker()).toBe(form);
+    expect(selected('Chapter')).toBe('4');
+
+    // Mid-edit, a chapter change keeps the user's choice and keeps focus on the select.
+    const bookSelect = within(form).getByLabelText('Book');
+    bookSelect.focus();
+    fireEvent.change(bookSelect, { target: { value: 'REV' } });
+    rerender(PSALM_3_ID);
+    await screen.findByRole('heading', { name: 'Psalms 3' });
+    expect(picker()).toBe(form);
+    expect(selected('Book')).toBe('REV');
+    expect(selected('Chapter')).toBe('1');
+    expect(document.activeElement).toBe(bookSelect);
+  });
+
+  it('moves focus to the chapter heading on Back/Forward when focus would fall to the page', async () => {
+    respond(PSALM_3_ID, () => jsonResponse(200, PSALM_3));
+    respond(PSALM_4_ID, () => jsonResponse(200, PSALM_4));
+    const { rerender } = renderReader(PSALM_3_ID);
+    await screen.findByRole('heading', { name: 'Psalms 3' });
+    expect(document.activeElement).toBe(document.body); // the first load moves nothing
+
+    // A history move with no focus request (the browser's Back button).
+    rerender(PSALM_4_ID);
+    const heading = await screen.findByRole('heading', { name: 'Psalms 4' });
+    await waitFor(() => expect(document.activeElement).toBe(heading));
+  });
+
+  it('switches translation only on Apply: arrowing through the options moves nothing', async () => {
     respond(PSALM_3_ID, () => jsonResponse(200, PSALM_3));
     const { onOpenChapter } = renderReader(PSALM_3_ID);
     await screen.findByRole('heading', { name: 'Psalms 3' });
+    const form = screen.getByRole('form', { name: 'Choose a translation' });
+    const select = within(form).getByLabelText<HTMLSelectElement>('Translation');
 
-    fireEvent.change(screen.getByLabelText('Translation'), {
-      target: { value: OTHER_EDITION_ID },
-    });
+    // Keyboard arrowing fires a change for each option it passes.
+    select.focus();
+    fireEvent.keyDown(select, { key: 'ArrowDown' });
+    fireEvent.change(select, { target: { value: OTHER_EDITION_ID } });
+    fireEvent.keyDown(select, { key: 'ArrowUp' });
+    fireEvent.change(select, { target: { value: EDITION_ID } });
+    fireEvent.keyDown(select, { key: 'ArrowDown' });
+    fireEvent.change(select, { target: { value: OTHER_EDITION_ID } });
+    expect(onOpenChapter).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(select);
+
+    fireEvent.click(within(form).getByRole('button', { name: 'Apply' }));
+    expect(onOpenChapter).toHaveBeenCalledTimes(1);
     expect(onOpenChapter).toHaveBeenCalledWith(
       { editionId: OTHER_EDITION_ID, bookCode: 'PSA', chapter: 3 },
       false,
@@ -269,11 +402,13 @@ describe('BibleReader', () => {
     }
   });
 
-  it('changes translation with nothing open by switching the edition only', () => {
+  it('changes translation with nothing open by switching the edition only, on Apply', () => {
     const { onChangeEdition, onOpenChapter } = renderReader(null);
     fireEvent.change(screen.getByLabelText('Translation'), {
       target: { value: OTHER_EDITION_ID },
     });
+    expect(onChangeEdition).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     expect(onChangeEdition).toHaveBeenCalledWith(OTHER_EDITION_ID);
     expect(onOpenChapter).not.toHaveBeenCalled();
   });

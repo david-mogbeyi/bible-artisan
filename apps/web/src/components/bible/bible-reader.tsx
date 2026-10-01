@@ -9,7 +9,8 @@ import type {
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/lib/api-client';
-import { fetchPassage, passageQueryKey } from '@/lib/bible';
+import { type ChapterTarget, fetchPassage, passageQueryKey } from '@/lib/bible';
+import { ProblemAlert } from './problem-alert';
 
 /**
  * A deliberate navigation: once the passage for `referenceId` has loaded, its heading takes
@@ -20,28 +21,49 @@ export interface FocusRequest {
   n: number;
 }
 
-/** A whole chapter to open in an edition; the host resolves it to a reference. */
-export interface ChapterTarget {
-  editionId: string;
-  bookCode: string;
-  chapter: number;
+/**
+ * The passage query, shared by the reader and its host (same key, one request): the reference
+ * fixes the edition. Retries a transient failure once; never a 4xx, and never 429/503, which the
+ * user retries (after `Retry-After`).
+ */
+export function usePassage(referenceId: string | null) {
+  return useQuery({
+    queryKey: referenceId ? passageQueryKey(referenceId) : ['bible', 'passage', 'none'],
+    queryFn: () => {
+      if (!referenceId) throw new Error('no reference');
+      return fetchPassage(referenceId);
+    },
+    enabled: referenceId !== null,
+    placeholderData: keepPreviousData,
+    retry: (count, error) =>
+      count < 1 && !(error instanceof ApiError && (error.status < 500 || error.status === 503)),
+  });
 }
 
 interface BibleReaderProps {
   translations: BibleTranslation[];
+  /** The edition the selectors start from when no passage is shown. */
   editionId: string;
   /** The resolved reference to show (its chapter, with the range marked); null is empty. */
   referenceId: string | null;
   /**
-   * Opens a whole chapter. `focus` is true for a deliberate move (Open, previous/next): the
+   * Opens a whole chapter chosen by structure. `focus` is true for a deliberate move (Open): the
    * chapter heading takes focus once it loads. A translation change keeps focus where it is.
    */
   onOpenChapter: (target: ChapterTarget, focus: boolean) => void;
-  /** Opens nothing in the new edition (a translation chosen before any passage). */
+  /** Opens a neighboring chapter by its reference id (one request, no resolve). */
+  onOpenReference: (referenceId: string) => void;
+  /** Switches the edition with nothing open (a translation chosen before any passage). */
   onChangeEdition: (editionId: string) => void;
   /** The latest deliberate navigation, or null; see `FocusRequest`. */
   focusRequest: FocusRequest | null;
 }
+
+const PASSAGE_COPY = {
+  notFound: 'That passage is not available.',
+  refused: 'That passage could not be opened.',
+  unavailable: "We couldn't load this chapter.",
+};
 
 /**
  * The Bible reader (BIB-17, PRD section 11): translation selector, chapter navigation, and one
@@ -55,24 +77,15 @@ export function BibleReader({
   editionId,
   referenceId,
   onOpenChapter,
+  onOpenReference,
   onChangeEdition,
   focusRequest,
 }: BibleReaderProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const targetRef = useRef<HTMLLIElement>(null);
   const handledFocus = useRef(focusRequest?.n ?? 0);
-  const translation = translations.find((t) => t.id === editionId);
-
-  const passage = useQuery({
-    queryKey: referenceId ? passageQueryKey(editionId, referenceId) : ['bible', 'passage', 'none'],
-    queryFn: () => {
-      if (!referenceId) throw new Error('no reference');
-      return fetchPassage(editionId, referenceId);
-    },
-    enabled: referenceId !== null,
-    placeholderData: keepPreviousData,
-    retry: (count, error) => !(error instanceof ApiError && error.status < 500) && count < 1,
-  });
+  const settledOn = useRef<string | null>(null);
+  const passage = usePassage(referenceId);
 
   // The last chapter that loaded stays visible while the next loads and if it fails (PRD
   // section 11: loading never blanks saved content). Derived during render, not in an effect.
@@ -82,27 +95,38 @@ export function BibleReader({
   }
   const shown = referenceId ? (passage.data ?? lastLoaded) : null;
   const current = Boolean(passage.data) && !passage.isPlaceholderData;
+  const shownId = current ? (passage.data?.reference.id ?? null) : null;
+  const translation = translations.find((t) => t.id === (shown?.edition.id ?? editionId));
 
   useEffect(() => {
     // Only once the requested passage itself is on screen, never the one it replaces.
-    if (!current || !focusRequest || handledFocus.current === focusRequest.n) return;
-    if (referenceId !== focusRequest.referenceId) return;
-    handledFocus.current = focusRequest.n;
-    headingRef.current?.focus();
-    targetRef.current?.scrollIntoView?.({ block: 'center' });
-  }, [current, focusRequest, referenceId, shown]);
+    if (!shownId) return;
+    const previous = settledOn.current;
+    settledOn.current = shownId;
+    if (focusRequest && handledFocus.current !== focusRequest.n) {
+      if (focusRequest.referenceId !== shownId) return;
+      handledFocus.current = focusRequest.n;
+      headingRef.current?.focus();
+      targetRef.current?.scrollIntoView?.({ block: 'center' });
+      return;
+    }
+    // Back/Forward (or any move the user did not start here): keep focus where it is when that
+    // element is still on the page; never leave it on <body>. The first load moves nothing.
+    if (previous === null || previous === shownId) return;
+    const active = document.activeElement;
+    if (!active || active === document.body || !active.isConnected) headingRef.current?.focus();
+  }, [shownId, focusRequest]);
 
   const target = shown ? targetVerses(shown) : null;
-  const go = (link: BibleChapterLink) =>
-    onOpenChapter({ editionId, bookCode: link.bookCode, chapter: link.chapter }, true);
+  const loading = referenceId !== null && passage.isFetching && !current;
 
   return (
     <section aria-label="Reader" className="flex flex-col gap-4">
       <div className="flex flex-wrap items-end gap-4">
-        <TranslationSelect
+        <TranslationPicker
           translations={translations}
-          editionId={editionId}
-          onChange={(id) => {
+          editionId={translation?.id ?? editionId}
+          onApply={(id) => {
             // References are edition-bound, so the new edition opens the same book and chapter,
             // without the old target. Nothing is written (FR-BIBLE-007).
             if (shown) {
@@ -117,32 +141,31 @@ export function BibleReader({
         />
         {translation ? (
           <ChapterPicker
-            key={shown ? `${shown.book.code} ${shown.chapter}` : 'none'}
             translation={translation}
-            initialBook={shown?.book.code}
-            initialChapter={shown?.chapter}
-            onOpen={(bookCode, chapter) => onOpenChapter({ editionId, bookCode, chapter }, true)}
+            currentBook={shown?.book.code}
+            currentChapter={shown?.chapter}
+            onOpen={(bookCode, chapter) =>
+              onOpenChapter({ editionId: translation.id, bookCode, chapter }, true)
+            }
           />
         ) : null}
       </div>
 
-      {passage.isFetching && passage.isPlaceholderData ? (
-        <p role="status" className="text-muted">
-          Loading the passage…
-        </p>
-      ) : null}
+      {/* One live region, mounted from the first render; only its text changes. */}
+      <p role="status" aria-live="polite" className={loading ? 'text-muted' : 'sr-only'}>
+        {loading ? 'Loading the passage…' : ''}
+      </p>
       {passage.isError && referenceId ? (
-        <PassageError error={passage.error} onRetry={() => void passage.refetch()} />
+        <ProblemAlert
+          error={passage.error}
+          copy={PASSAGE_COPY}
+          onRetry={() => void passage.refetch()}
+        />
       ) : null}
 
       {!referenceId ? (
         <p className="text-muted">
           Enter a reference such as Romans 9:1, or choose a book and chapter, to start reading.
-        </p>
-      ) : null}
-      {referenceId && !shown && passage.isPending ? (
-        <p role="status" className="text-muted">
-          Loading the passage…
         </p>
       ) : null}
 
@@ -161,7 +184,7 @@ export function BibleReader({
             ) : null}
           </header>
           <Verses passage={shown} target={target} targetRef={targetRef} />
-          <ChapterLinks passage={shown} onGo={go} />
+          <ChapterLinks passage={shown} onGo={(link) => onOpenReference(link.referenceId)} />
         </article>
       ) : null}
     </section>
@@ -302,95 +325,89 @@ function ChapterLinks({
   );
 }
 
-function PassageError({ error, onRetry }: { error: Error; onRetry: () => void }) {
-  // A 4xx means this request cannot succeed as asked (a chapter or reference that does not
-  // exist): say so, never substitute another passage. Anything else may be transient: Retry.
-  const definite = error instanceof ApiError && error.status >= 400 && error.status < 500;
-  const message =
-    definite && error.status === 404
-      ? 'That passage is not available in this translation.'
-      : definite
-        ? (messageOf(error) ?? 'That passage does not exist in this translation.')
-        : "We couldn't load this chapter.";
-  return (
-    <div
-      role="alert"
-      className="flex flex-wrap items-center gap-3 rounded border border-accent px-3 py-2"
-    >
-      <p>{message}</p>
-      {definite ? null : (
-        <button
-          type="button"
-          onClick={onRetry}
-          className="rounded border border-accent px-3 py-1 text-accent"
-        >
-          Retry
-        </button>
-      )}
-    </div>
-  );
-}
-
-/** The server's fixed, content-free message for a refused reference (never echoes input). */
-function messageOf(error: ApiError): string | undefined {
-  const body = error.body as { message?: unknown } | undefined;
-  return typeof body?.message === 'string' ? body.message : undefined;
-}
-
-function TranslationSelect({
+/**
+ * The translation selector. A form with an Apply button, so arrowing through the options never
+ * moves the reader by itself (WCAG 3.2.2) or starts overlapping requests.
+ */
+function TranslationPicker({
   translations,
   editionId,
-  onChange,
+  onApply,
 }: {
   translations: BibleTranslation[];
   editionId: string;
-  onChange: (editionId: string) => void;
+  onApply: (editionId: string) => void;
 }) {
   const id = useId();
+  // The user's pick, kept until Apply; otherwise the select follows the shown edition.
+  const [draft, setDraft] = useState<string | null>(null);
+  const value = draft ?? editionId;
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    setDraft(null);
+    if (value !== editionId) onApply(value);
+  };
+
   return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-sm">
-        Translation
-      </label>
-      <select
-        id={id}
-        value={editionId}
-        onChange={(event) => onChange(event.target.value)}
-        className="rounded border border-muted bg-canvas px-2 py-2"
-      >
-        {translations.map((t) => (
-          <option key={t.id} value={t.id}>
-            {t.name} ({t.abbreviation})
-          </option>
-        ))}
-      </select>
-    </div>
+    <form
+      onSubmit={submit}
+      aria-label="Choose a translation"
+      className="flex flex-wrap items-end gap-2"
+    >
+      <div className="flex flex-col gap-1">
+        <label htmlFor={id} className="text-sm">
+          Translation
+        </label>
+        <select
+          id={id}
+          value={value}
+          onChange={(event) => setDraft(event.target.value)}
+          className="rounded border border-muted bg-canvas px-2 py-2"
+        >
+          {translations.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.name} ({t.abbreviation})
+            </option>
+          ))}
+        </select>
+      </div>
+      <button type="submit" className="rounded border border-accent px-3 py-2 text-accent">
+        Apply
+      </button>
+    </form>
   );
 }
 
 /**
  * Book and chapter selection. A form with an Open button, so changing a select never moves the
- * reader by itself (WCAG 3.2.2).
+ * reader by itself (WCAG 3.2.2). It is never remounted: the selects follow the shown chapter
+ * until the user changes one, and keep that choice until Open.
  */
 function ChapterPicker({
   translation,
-  initialBook,
-  initialChapter,
+  currentBook,
+  currentChapter,
   onOpen,
 }: {
   translation: BibleTranslation;
-  initialBook?: string;
-  initialChapter?: number;
+  currentBook?: string;
+  currentChapter?: number;
   onOpen: (book: string, chapter: number) => void;
 }) {
   const bookId = useId();
   const chapterId = useId();
-  const [book, setBook] = useState(initialBook ?? translation.books[0]?.code ?? '');
-  const [chapter, setChapter] = useState(initialChapter ?? 1);
-  const chapterCount = translation.books.find((b) => b.code === book)?.chapterCount ?? 1;
+  const [edit, setEdit] = useState<{ book: string; chapter: number } | null>(null);
+  const fallback = translation.books[0]?.code ?? '';
+  const chosen = edit ?? { book: currentBook ?? fallback, chapter: currentChapter ?? 1 };
+  const bookSummary = translation.books.find((b) => b.code === chosen.book);
+  const book = bookSummary ? chosen.book : fallback;
+  const chapterCount = bookSummary?.chapterCount ?? translation.books[0]?.chapterCount ?? 1;
+  const chapter = bookSummary && chosen.chapter <= chapterCount ? chosen.chapter : 1;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    setEdit(null);
     onOpen(book, chapter);
   };
 
@@ -407,10 +424,7 @@ function ChapterPicker({
         <select
           id={bookId}
           value={book}
-          onChange={(event) => {
-            setBook(event.target.value);
-            setChapter(1);
-          }}
+          onChange={(event) => setEdit({ book: event.target.value, chapter: 1 })}
           className="rounded border border-muted bg-canvas px-2 py-2"
         >
           {translation.books.map((b) => (
@@ -427,7 +441,7 @@ function ChapterPicker({
         <select
           id={chapterId}
           value={chapter}
-          onChange={(event) => setChapter(Number(event.target.value))}
+          onChange={(event) => setEdit({ book, chapter: Number(event.target.value) })}
           className="rounded border border-muted bg-canvas px-2 py-2"
         >
           {Array.from({ length: chapterCount }, (_, i) => i + 1).map((n) => (

@@ -1,29 +1,54 @@
 'use client';
 
-import {
-  REFERENCE_ERROR_CODES,
-  type BibleTranslation,
-  type ReferenceCandidate,
-  type SearchResult,
+import type {
+  BibleTranslation,
+  ReferenceCandidate,
+  SearchBibleResponse,
+  SearchResult,
 } from '@bible-artisan/contracts';
 import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
-import { type FormEvent, useId, useState } from 'react';
-import { ApiError } from '@/lib/api-client';
-import { resolveReference, searchBible, type SearchRequest } from '@/lib/bible';
+import { type FormEvent, useId, useRef, useState } from 'react';
+import { classifyError, REFERENCE_ERROR_COPY } from '@/lib/api-errors';
+import { type ChapterTarget, resolveReference, searchBible, type SearchRequest } from '@/lib/bible';
 import { Attribution } from './bible-reader';
-
-const REFERENCE_CODES: ReadonlySet<string> = new Set(REFERENCE_ERROR_CODES);
+import { ProblemAlert } from './problem-alert';
 
 /** Input wrapped in straight or curly double quotes is an exact phrase (PRD section 14). */
 const QUOTED = /^["“”](.+)["“”]$/s;
 
+/**
+ * The host's navigation order. `begin` is called when the user starts a navigation and returns
+ * its token; `open` applies a resolved reference only if that token is still the latest, so a
+ * slow answer never overrides a later choice.
+ */
+export interface Navigation {
+  begin: () => number;
+  open: (token: number, referenceId: string) => void;
+}
+
 interface ReferenceSearchProps {
   translation: BibleTranslation;
-  /** A resolved reference: open its chapter with the range marked. */
-  onOpenReference: (referenceId: string) => void;
-  /** A search result: open that verse in its chapter. */
-  onOpenVerse: (book: string, chapter: number, verse: number) => void;
+  navigation: Navigation;
+  /** A search result: open that verse, in the edition it was found in. */
+  onOpenVerse: (target: ChapterTarget) => void;
 }
+
+interface ResolveRequest {
+  text: string;
+  editionId: string;
+  token: number;
+}
+
+const LOOKUP_COPY = {
+  notFound: 'That translation is not available.',
+  refused: "We couldn't look that up.",
+  unavailable: "We couldn't look that up.",
+};
+const SEARCH_COPY = {
+  notFound: 'That translation is not available.',
+  refused: "We couldn't run that search.",
+  unavailable: "We couldn't search right now.",
+};
 
 /**
  * One input for references and keywords (PRD sections 11 and 14). A reference is resolved first
@@ -31,12 +56,11 @@ interface ReferenceSearchProps {
  * gets its correction and no keyword results. Only `not_reference` is searched. A quoted phrase
  * or "Exact phrase" is searched literally and never read as a reference. The search text stays
  * in this component's state: never in the URL, local storage, or analytics.
+ *
+ * Search state belongs to the edition it ran in: when the translation changes, results and
+ * candidates from the previous edition are dropped, never shown under the new attribution.
  */
-export function ReferenceSearch({
-  translation,
-  onOpenReference,
-  onOpenVerse,
-}: ReferenceSearchProps) {
+export function ReferenceSearch({ translation, navigation, onOpenVerse }: ReferenceSearchProps) {
   const inputId = useId();
   const phraseId = useId();
   const bookId = useId();
@@ -45,37 +69,80 @@ export function ReferenceSearch({
   const [exactPhrase, setExactPhrase] = useState(false);
   const [book, setBook] = useState('');
   const [inputError, setInputError] = useState<string | null>(null);
-  const [candidates, setCandidates] = useState<ReferenceCandidate[] | null>(null);
-  const [search, setSearch] = useState<SearchRequest | null>(null);
+  const [candidateState, setCandidates] = useState<{
+    editionId: string;
+    list: ReferenceCandidate[];
+  } | null>(null);
+  const [searchState, setSearch] = useState<SearchRequest | null>(null);
+  const search = searchState?.editionId === translation.id ? searchState : null;
+  const candidates = candidateState?.editionId === translation.id ? candidateState.list : null;
 
+  // The latest lookup or search submitted here; an older answer is never applied over it.
+  const lastLookup = useRef(0);
   const resolve = useMutation({
-    mutationFn: (text: string) => resolveReference(text, translation.id),
-    onSuccess: (result, text) => {
-      if (result.outcome === 'resolved') onOpenReference(result.reference.id);
-      else if (result.outcome === 'ambiguous') setCandidates(result.candidates);
-      else
-        setSearch({ q: text, mode: 'terms', editionId: translation.id, ...(book ? { book } : {}) });
+    mutationFn: ({ text, editionId }: ResolveRequest) => resolveReference(text, editionId),
+    onSuccess: (result, { text, editionId, token }) => {
+      if (token !== lastLookup.current) return;
+      if (result.outcome === 'resolved') navigation.open(token, result.reference.id);
+      else if (result.outcome === 'ambiguous') {
+        setCandidates({ editionId, list: result.candidates });
+      } else setSearch({ q: text, mode: 'terms', editionId, ...(book ? { book } : {}) });
     },
-    onError: (error) => {
-      setInputError(
-        error instanceof ApiError && error.code && REFERENCE_CODES.has(error.code)
-          ? `${referenceMessage(error)} Check the reference and try again.`
-          : "We couldn't look that up. Try again.",
-      );
+    onError: (error, { token }) => {
+      if (token !== lastLookup.current) return;
+      const kind = classifyError(error);
+      if (kind.kind === 'reference') {
+        setInputError(`${REFERENCE_ERROR_COPY[kind.code]} Check the reference and try again.`);
+      }
     },
   });
+  const lookUp = (text: string) => {
+    const token = navigation.begin();
+    lastLookup.current = token;
+    resolve.mutate({ text, editionId: translation.id, token });
+  };
+  const lookupFailed =
+    resolve.isError && classifyError(resolve.error).kind !== 'reference' ? resolve.error : null;
+
+  const results = useInfiniteQuery({
+    queryKey: ['bible', 'search', search] as const,
+    queryFn: ({ pageParam }) => {
+      if (!search) throw new Error('no search');
+      return searchBible(search, pageParam);
+    },
+    enabled: search !== null,
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
+  });
+  const pages = search ? (results.data?.pages ?? []) : [];
+  const items = pages.flatMap((page) => page.results);
+  const modeText = search?.mode === 'phrase' ? 'this exact phrase' : 'all of these words';
+
+  const status = resolve.isPending
+    ? 'Looking up…'
+    : !search
+      ? ''
+      : results.isPending
+        ? 'Searching…'
+        : results.isSuccess && items.length === 0
+          ? `No verses contain ${modeText}.`
+          : items.length > 0
+            ? `Showing ${items.length} ${items.length === 1 ? 'verse' : 'verses'} containing ${modeText}${results.hasNextPage ? ' (more available)' : ''}.`
+            : '';
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const text = input.trim();
     setCandidates(null);
     setInputError(null);
+    resolve.reset();
     if (text === '') {
       setInputError('Enter a reference such as Romans 9:1, or words to search for.');
       return;
     }
     const quoted = QUOTED.exec(text);
     if (exactPhrase || quoted) {
+      lastLookup.current = 0; // a pending lookup no longer applies
       setSearch({
         q: quoted?.[1]?.trim() ?? text,
         mode: 'phrase',
@@ -84,7 +151,7 @@ export function ReferenceSearch({
       });
       return;
     }
-    resolve.mutate(text);
+    lookUp(text);
   };
 
   return (
@@ -103,12 +170,8 @@ export function ReferenceSearch({
             maxLength={200}
             className="min-w-0 flex-1 rounded border border-muted bg-canvas px-3 py-2"
           />
-          <button
-            type="submit"
-            disabled={resolve.isPending}
-            className="rounded border border-accent px-4 py-2 text-accent disabled:opacity-60"
-          >
-            {resolve.isPending ? 'Looking up…' : 'Go'}
+          <button type="submit" className="rounded border border-accent px-4 py-2 text-accent">
+            Go
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-4 text-sm">
@@ -145,35 +208,129 @@ export function ReferenceSearch({
         ) : null}
       </form>
 
+      {/* One live region, mounted from the first render; only its text changes. */}
+      <p role="status" aria-live="polite" className={status ? 'text-sm text-muted' : 'sr-only'}>
+        {status}
+      </p>
+      {lookupFailed ? (
+        <ProblemAlert
+          error={lookupFailed}
+          copy={LOOKUP_COPY}
+          onRetry={() => resolve.variables && lookUp(resolve.variables.text)}
+        />
+      ) : null}
+
       {candidates ? (
         <Candidates
           candidates={candidates}
           onPick={(candidate) => {
             setCandidates(null);
-            resolve.mutate(candidate.input);
+            lookUp(candidate.input);
           }}
         />
       ) : null}
 
       {search ? (
-        <SearchResults
-          // A new search starts a fresh result list.
-          key={`${search.mode}|${search.book ?? ''}|${search.editionId}|${search.q}`}
-          request={search}
-          translation={translation}
-          onOpenReference={onOpenReference}
-          onOpenVerse={onOpenVerse}
-          onClear={() => setSearch(null)}
-          onPickCandidate={(candidate) => resolve.mutate(candidate.input)}
-        />
+        <section aria-labelledby={`${inputId}-results`} className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 id={`${inputId}-results`} className="font-serif text-2xl">
+              Search results
+            </h2>
+            <button
+              type="button"
+              onClick={() => setSearch(null)}
+              className="text-sm text-accent underline"
+            >
+              Clear search
+            </button>
+          </div>
+          <Suggestion
+            pages={pages}
+            onOpen={(id) => navigation.open(navigation.begin(), id)}
+            onPick={(candidate) => lookUp(candidate.input)}
+          />
+          {results.isError ? (
+            <ProblemAlert
+              error={results.error}
+              copy={SEARCH_COPY}
+              onRetry={() => void results.refetch()}
+            />
+          ) : null}
+          {items.length > 0 ? (
+            <>
+              <ol role="list" className="flex flex-col gap-3">
+                {items.map((result) => (
+                  <li
+                    key={`${result.reference.bookCode} ${result.reference.chapter}:${result.reference.verse}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        // The result's own edition and verse, never the reader's current edition.
+                        onOpenVerse({
+                          editionId: search.editionId,
+                          bookCode: result.reference.bookCode,
+                          chapter: result.reference.chapter,
+                          verse: result.reference.verse,
+                        })
+                      }
+                      className="font-semibold text-accent underline"
+                    >
+                      {result.reference.label}
+                    </button>
+                    <p className="font-serif text-lg">
+                      <HighlightedText result={result} />
+                    </p>
+                  </li>
+                ))}
+              </ol>
+              {results.hasNextPage ? (
+                <button
+                  type="button"
+                  onClick={() => void results.fetchNextPage()}
+                  disabled={results.isFetchingNextPage}
+                  className="self-start rounded border border-accent px-3 py-2 text-accent disabled:opacity-60"
+                >
+                  {results.isFetchingNextPage ? 'Loading more…' : 'Load more results'}
+                </button>
+              ) : null}
+              {/* `search.editionId` is this translation's id: results are kept per edition. */}
+              <Attribution edition={translation} />
+            </>
+          ) : null}
+        </section>
       ) : null}
     </section>
   );
 }
 
-function referenceMessage(error: ApiError): string {
-  const body = error.body as { message?: unknown } | undefined;
-  return typeof body?.message === 'string' ? `${body.message}.` : 'That reference is not valid.';
+function Suggestion({
+  pages,
+  onOpen,
+  onPick,
+}: {
+  pages: SearchBibleResponse[];
+  onOpen: (referenceId: string) => void;
+  onPick: (candidate: ReferenceCandidate) => void;
+}) {
+  const suggestion = pages[0]?.referenceSuggestion ?? null;
+  if (suggestion?.outcome === 'resolved') {
+    return (
+      <p>
+        <button
+          type="button"
+          onClick={() => onOpen(suggestion.reference.id)}
+          className="rounded border border-accent px-3 py-1 text-accent"
+        >
+          Open {suggestion.reference.label}
+        </button>
+      </p>
+    );
+  }
+  if (suggestion?.outcome === 'ambiguous') {
+    return <Candidates candidates={suggestion.candidates} onPick={onPick} />;
+  }
+  return null;
 }
 
 function Candidates({
@@ -200,127 +357,6 @@ function Candidates({
         ))}
       </ul>
     </div>
-  );
-}
-
-function SearchResults({
-  request,
-  translation,
-  onOpenReference,
-  onOpenVerse,
-  onClear,
-  onPickCandidate,
-}: {
-  request: SearchRequest;
-  translation: BibleTranslation;
-  onOpenReference: (referenceId: string) => void;
-  onOpenVerse: (book: string, chapter: number, verse: number) => void;
-  onClear: () => void;
-  onPickCandidate: (candidate: ReferenceCandidate) => void;
-}) {
-  const headingId = useId();
-  const results = useInfiniteQuery({
-    queryKey: ['bible', 'search', request] as const,
-    queryFn: ({ pageParam }) => searchBible(request, pageParam),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => last.nextCursor,
-  });
-  const pages = results.data?.pages ?? [];
-  const items = pages.flatMap((page) => page.results);
-  const suggestion = pages[0]?.referenceSuggestion ?? null;
-  const modeText = request.mode === 'phrase' ? 'this exact phrase' : 'all of these words';
-
-  return (
-    <section aria-labelledby={headingId} className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 id={headingId} className="font-serif text-2xl">
-          Search results
-        </h2>
-        <button type="button" onClick={onClear} className="text-sm text-accent underline">
-          Clear search
-        </button>
-      </div>
-
-      {suggestion?.outcome === 'resolved' ? (
-        <p>
-          <button
-            type="button"
-            onClick={() => onOpenReference(suggestion.reference.id)}
-            className="rounded border border-accent px-3 py-1 text-accent"
-          >
-            Open {suggestion.reference.label}
-          </button>
-        </p>
-      ) : null}
-      {suggestion?.outcome === 'ambiguous' ? (
-        <Candidates candidates={suggestion.candidates} onPick={onPickCandidate} />
-      ) : null}
-
-      {results.isPending ? (
-        <p role="status" className="text-muted">
-          Searching…
-        </p>
-      ) : null}
-      {results.isError ? (
-        <div role="alert" className="flex flex-wrap items-center gap-3">
-          <p>We couldn&apos;t search right now.</p>
-          <button
-            type="button"
-            onClick={() => void results.refetch()}
-            className="rounded border border-accent px-3 py-1 text-accent"
-          >
-            Retry
-          </button>
-        </div>
-      ) : null}
-      {results.isSuccess && items.length === 0 ? (
-        <p role="status">No verses contain {modeText}.</p>
-      ) : null}
-
-      {items.length > 0 ? (
-        <>
-          <p role="status" className="text-sm text-muted">
-            Showing {items.length} {items.length === 1 ? 'verse' : 'verses'} containing {modeText}
-            {results.hasNextPage ? ' (more available)' : ''}.
-          </p>
-          <ol role="list" className="flex flex-col gap-3">
-            {items.map((result) => (
-              <li
-                key={`${result.reference.bookCode} ${result.reference.chapter}:${result.reference.verse}`}
-              >
-                <button
-                  type="button"
-                  onClick={() =>
-                    onOpenVerse(
-                      result.reference.bookCode,
-                      result.reference.chapter,
-                      result.reference.verse,
-                    )
-                  }
-                  className="font-semibold text-accent underline"
-                >
-                  {result.reference.label}
-                </button>
-                <p className="font-serif text-lg">
-                  <HighlightedText result={result} />
-                </p>
-              </li>
-            ))}
-          </ol>
-          {results.hasNextPage ? (
-            <button
-              type="button"
-              onClick={() => void results.fetchNextPage()}
-              disabled={results.isFetchingNextPage}
-              className="self-start rounded border border-accent px-3 py-2 text-accent disabled:opacity-60"
-            >
-              {results.isFetchingNextPage ? 'Loading more…' : 'Load more results'}
-            </button>
-          ) : null}
-          <Attribution edition={translation} />
-        </>
-      ) : null}
-    </section>
   );
 }
 

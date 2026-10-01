@@ -72,19 +72,56 @@ export function chapter(
   };
 }
 
+export const PSALM_2_ID = '22222222-2222-4333-8444-555555555555';
+export const PSALM_3_ID = '33333333-2222-4333-8444-555555555555';
+export const PSALM_4_ID = '44444444-2222-4333-8444-555555555555';
+export const PSALM_5_ID = '55555555-3333-4333-8444-555555555555';
+
+const psalmLink = (chapterNumber: number, referenceId: string) => ({
+  bookCode: 'PSA',
+  bookName: 'Psalms',
+  chapter: chapterNumber,
+  referenceId,
+});
+
 export const PSALM_3 = chapter({
   book: { code: 'PSA', name: 'Psalms', chapterCount: 150 },
   chapter: 3,
   superscriptions: [{ beforeVerse: 1, text: 'Placeholder superscription.' }],
-  previous: { bookCode: 'PSA', bookName: 'Psalms', chapter: 2 },
-  next: { bookCode: 'PSA', bookName: 'Psalms', chapter: 4 },
+  reference: { ...wholeChapterReference('PSA', 3, 'Psalms'), id: PSALM_3_ID },
+  previous: psalmLink(2, PSALM_2_ID),
+  next: psalmLink(4, PSALM_4_ID),
 });
 
 export const PSALM_4 = chapter({
   book: { code: 'PSA', name: 'Psalms', chapterCount: 150 },
   chapter: 4,
   verses: [{ verse: 1, text: 'Placeholder text of the next chapter.' }],
-  reference: { ...wholeChapterReference('PSA', 4, 'Psalms'), endVerse: 1 },
-  previous: { bookCode: 'PSA', bookName: 'Psalms', chapter: 3 },
-  next: { bookCode: 'PSA', bookName: 'Psalms', chapter: 5 },
+  reference: { ...wholeChapterReference('PSA', 4, 'Psalms'), id: PSALM_4_ID, endVerse: 1 },
+  previous: psalmLink(3, PSALM_3_ID),
+  next: psalmLink(5, PSALM_5_ID),
 });
+
+/** Psalm 3 as the other edition prints it (same synthetic text, the other attribution). */
+export const OTHER_PSALM_3_ID = '66666666-2222-4333-8444-555555555555';
+
+export const OTHER_PSALM_3 = chapter({
+  ...PSALM_3,
+  reference: { ...PSALM_3.reference, id: OTHER_PSALM_3_ID, editionId: OTHER_EDITION_ID },
+  edition: {
+    id: OTHER_EDITION_ID,
+    name: OTHER_TRANSLATION.name,
+    abbreviation: OTHER_TRANSLATION.abbreviation,
+    attribution: 'Other attribution line.',
+    noticeUrl: null,
+  },
+});
+
+/** A promise the test settles by hand, to put responses out of order. */
+export function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
