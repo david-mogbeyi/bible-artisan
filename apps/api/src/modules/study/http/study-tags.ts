@@ -72,6 +72,14 @@ export async function applyTagChange(
   if (removeIds.size === 0 && add.length === 0) return null;
   if (kept.length + add.length > MAX_STUDY_TAGS) throw new TagLimitExceededError();
 
+  // Tags belong to the owner, not the study, so two studies' mutations (different study locks) can
+  // reach the same tag rows; removal locks by id and addition by name. One per-owner lock, taken
+  // after the study lock and before any tag row, serializes them so they can never deadlock.
+  await database().query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', {
+    bind: [`tag-vocabulary:${m.ownerId}`],
+    type: QueryTypes.SELECT,
+  });
+
   if (removeIds.size > 0) {
     const ids = [...removeIds].sort();
     await StudyTag.destroy({ where: { studyId: m.studyId, ownerId: m.ownerId, tagId: ids } });

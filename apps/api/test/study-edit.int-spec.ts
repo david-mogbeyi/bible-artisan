@@ -855,6 +855,44 @@ describe('study editing (BIB-20)', () => {
       expect(rows.map((row) => row.id)).toStrictEqual([added[0]?.id]);
       expect(await StudyTag.count({ where: { studyId: adder.studyId } })).toBe(1);
     });
+
+    it('never deadlocks two studies that remove and add the same tags in crossing order', async () => {
+      const keeper = await createStudy(alice, { question: 'Keeps both?' });
+      const first = await createStudy(alice, { question: 'First?' });
+      const second = await createStudy(alice, { question: 'Second?' });
+      const [nameX, nameY] = [`Cross X ${randomUUID()}`, `Cross Y ${randomUUID()}`];
+      const both = await patch(alice, keeper.studyId, {
+        expectedRevision: 1,
+        tags: { add: [nameX, nameY] },
+      });
+      const tags = (both.body as UpdateStudyResponse).tags;
+      const idOf = (name: string) => tags.find((t) => t.name === name)?.id;
+      await patch(alice, first.studyId, { expectedRevision: 1, tags: { add: [nameX] } });
+      await patch(alice, second.studyId, { expectedRevision: 1, tags: { add: [nameY] } });
+      // The gate holds both tag rows, so both edits are blocked mid-way before they are released.
+      const results = await race(
+        (transaction) =>
+          db.query('SELECT 1 FROM tag WHERE id = ANY($1::uuid[]) FOR UPDATE', {
+            bind: [[idOf(nameX), idOf(nameY)]],
+            transaction,
+          }),
+        [
+          () =>
+            patch(alice, first.studyId, {
+              expectedRevision: 2,
+              tags: { remove: [idOf(nameX)], add: [nameY] },
+            }),
+          () =>
+            patch(alice, second.studyId, {
+              expectedRevision: 2,
+              tags: { remove: [idOf(nameY)], add: [nameX] },
+            }),
+        ],
+      );
+      expect(results.map((r) => r.status)).toStrictEqual([200, 200]);
+      expect((await read(alice, first.studyId)).tags.map((t) => t.name)).toStrictEqual([nameY]);
+      expect((await read(alice, second.studyId)).tags.map((t) => t.name)).toStrictEqual([nameX]);
+    });
   });
 
   describe('database guards', () => {
