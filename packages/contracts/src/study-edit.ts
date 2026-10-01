@@ -64,11 +64,19 @@ const FORMAT_CHARACTERS = /\p{Cf}/gu;
  *    Turkish user's "ılık" and "ilik" are one tag, but "İstanbul", "Istanbul" and "istanbul"
  *    always agree, whatever locale the name was typed in.
  * 4. Case-folded with `toLowerCase().toUpperCase().toLowerCase()` (then NFKC again), which
- *    approximates full Unicode case folding: "ß" and "ẞ" become "ss", so "Straße" is "STRASSE",
- *    and final sigma "ς" becomes "σ".
- * 5. Trimmed, whitespace runs collapsed to one space.
+ *    approximates full Unicode case folding: "ß" and "ẞ" become "ss", so "Straße" is "STRASSE".
+ * 5. Final sigma "ς" (U+03C2) becomes "σ" (U+03C3), as Unicode case folding does. This step makes
+ *    the fold context-independent: `toLowerCase` picks "ς" or "σ" for "Σ" from the letters
+ *    around it, so without it "ΑΣ" alone folds to "ας" while the same letters inside "ΑΣΤΗΡ"
+ *    fold to "ασ", and a library search fragment would miss the text it is part of (BIB-21).
+ *    Every other step maps each character the same wherever it stands.
+ * 6. Trimmed, whitespace runs collapsed to one space.
  *
- * The API stores the result, so changing this function needs a data migration.
+ * The one fold for tag keys, library search text, search words and the title sort key: the API
+ * stores the result (`tag.normalized_name`, `study.search_text`, `study.title_sort_key`), so
+ * changing this function needs a data migration. Step 5 arrived with migration
+ * `add_study_library`, which rewrites stored keys with `translate(…, 'ς', 'σ')`: the steps after it
+ * never produce, remove or move a sigma, so that is exactly the new fold of each stored value.
  */
 export function tagKey(name: string): string {
   return stripForbiddenUserTextCharacters(name.normalize('NFKC'))
@@ -78,6 +86,7 @@ export function tagKey(name: string): string {
     .toUpperCase()
     .toLowerCase()
     .normalize('NFKC')
+    .replace(/\u03c2/gu, '\u03c3')
     .replace(/i\u0307/gu, 'i')
     .trim()
     .replace(/\s+/gu, ' ');

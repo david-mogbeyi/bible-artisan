@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { studySearchText, studyTitleSortKey } from '@bible-artisan/contracts';
 import { Transaction } from 'sequelize';
 import { NotFoundError } from '../../common/errors/domain-errors';
 import { isResourceId } from '../../common/validation/resource-id';
@@ -130,7 +131,17 @@ export class StudyRevisionService {
     if (!(transaction instanceof Transaction)) {
       throw new Error('StudyRevisionService.create requires a transaction');
     }
-    const study = await Study.create({ ...values, ownerId }, { transaction });
+    // A new study has no description yet; its search text is its folded title, and its title
+    // sort key the same fold (BIB-21).
+    const study = await Study.create(
+      {
+        ...values,
+        ownerId,
+        searchText: studySearchText(values.title, null),
+        titleSortKey: studyTitleSortKey(values.title),
+      },
+      { transaction },
+    );
     return new StudyLock(
       transaction,
       ownerId,
@@ -143,6 +154,12 @@ export class StudyRevisionService {
   /**
    * Persists the lock's counters in ONE statement: `content_revision` (when the mutation bumped
    * it) and `last_event_sequence` (when it appended events). No-op when neither changed.
+   *
+   * Appended events also set `last_activity_at` (BIB-21): the library's "recent" order is when
+   * anything last happened to the study, committed with the mutation that did it. This is the
+   * column's only writer after creation, so no read and no rolled-back mutation moves it. The
+   * application clock, like `created_at` and `study_event.occurred_at`, taken as the mutation
+   * ends, so it is never earlier than either.
    */
   async writeCounters(lock: StudyLock): Promise<void> {
     lock.assertHeld();
@@ -151,6 +168,7 @@ export class StudyRevisionService {
       {
         contentRevision: lock.contentRevision,
         lastEventSequence: lock.lastEventSequence.toString(),
+        ...(lock.eventsAppended > 0 ? { lastActivityAt: new Date() } : {}),
       },
       {
         where: { id: lock.studyId, ownerId: lock.ownerId },

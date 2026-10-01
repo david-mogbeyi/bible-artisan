@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deferred, EDITION_ID, TRANSLATION } from '@/test/bible-fixtures';
+import { libraryQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import {
   BLANK_RULE,
@@ -126,6 +127,36 @@ describe('NewStudyForm', () => {
         key: expect.stringMatching(UUID),
       },
     ]);
+  });
+
+  it('marks every cached library listing stale once the study is created, and only then', async () => {
+    const recent = libraryQueryKey({ sort: 'recent', pinnedFirst: false, limit: 3 });
+    const searched = libraryQueryKey({ sort: 'title', q: 'conscience' });
+    const { queryClient } = await renderForm();
+    for (const key of [recent, searched]) {
+      queryClient.setQueryData(key, { items: [], nextCursor: null });
+    }
+    const stale = () =>
+      [recent, searched].map((key) => queryClient.getQueryState(key)?.isInvalidated);
+
+    // A refused create wrote nothing: the listings stay as they are.
+    createReplies.push(
+      jsonResponse(503, {
+        code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'x',
+        retryable: true,
+        correlationId: 'x',
+      }),
+    );
+    type(/^Question/, 'What is conscience?');
+    fireEvent.click(createButton());
+    await screen.findByRole('alert');
+    expect(stale()).toStrictEqual([false, false]);
+
+    createReplies.push(jsonResponse(201, CREATED));
+    fireEvent.click(createButton());
+    await waitFor(() => expect(push).toHaveBeenCalledWith(`/studies/${STUDY_ID}`));
+    expect(stale()).toStrictEqual([true, true]);
   });
 
   it('explains the start rule inline and sends nothing when there is no question or passage', async () => {

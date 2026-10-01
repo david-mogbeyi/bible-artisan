@@ -1,5 +1,6 @@
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
+import { studySearchText, studyTitleSortKey, tagKey } from '@bible-artisan/contracts';
 import { QueryTypes } from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
@@ -14,6 +15,7 @@ import { withAllDropsAllowed, withStudyDataDropAllowed } from './support/study-d
 
 const CORPUS_MIGRATION = '20261001094438_create_bible_corpus.ts';
 const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
+const LIBRARY_MIGRATION = '20261001182657_add_study_library.ts';
 
 const DOMAIN_TABLES = [
   'auth_challenge',
@@ -215,12 +217,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-20's study editing) is the first `down`
+      // No opt-in at all: the newest migration (BIB-21's study library) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: 'study editing drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        message: 'study library drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -369,6 +371,57 @@ describe('migration reversibility', () => {
     expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
     expect(await recordedMigrations(db)).toStrictEqual(allNames);
     expect(await migrator.pending()).toStrictEqual([]);
+  });
+
+  it("BIB-21's up rewrites stored final sigmas to the new fold and backfills the title sort key; its down restores the word-final form", async () => {
+    const migrator = createMigrator(db);
+    await withStudyDataDropAllowed(() => migrator.down({ to: LIBRARY_MIGRATION }));
+    try {
+      // Rows as the BIB-20 fold left them: a word-final sigma is "ς", any other "σ".
+      const [user] = await db.query<{ id: string }>(
+        `INSERT INTO "user" (normalized_email) VALUES (gen_random_uuid() || '@example.test')
+         RETURNING id`,
+        { type: QueryTypes.SELECT },
+      );
+      if (!user) throw new Error('seed returned nothing');
+      await db.query(
+        `INSERT INTO tag (owner_id, name, normalized_name)
+         VALUES ($1, 'Λόγος ΑΣΤΗΡ', 'λόγος αστηρ'), ($1, 'Plain', 'plain')`,
+        { bind: [user.id] },
+      );
+      // Already-lowercase Greek and ASCII, so the SQL backfill's lower() is exact in any locale.
+      const title = 'Apple  λόγος';
+      await db.query(`INSERT INTO study (owner_id, title) VALUES ($1, $2)`, {
+        bind: [user.id, title],
+      });
+      const stored = async () =>
+        db.query<{ tags: string[]; titleSortKey: string; searchText: string }>(
+          `SELECT array(SELECT normalized_name FROM tag WHERE owner_id = $1 ORDER BY name COLLATE "C") AS tags,
+                  s.title_sort_key AS "titleSortKey", s.search_text AS "searchText"
+             FROM study s WHERE s.owner_id = $1`,
+          { bind: [user.id], type: QueryTypes.SELECT },
+        );
+
+      await migrator.up({ to: LIBRARY_MIGRATION });
+      expect(await stored()).toStrictEqual([
+        {
+          tags: ['plain', tagKey('Λόγος ΑΣΤΗΡ')],
+          titleSortKey: studyTitleSortKey(title),
+          searchText: studySearchText(title, null),
+        },
+      ]);
+      expect(tagKey('Λόγος ΑΣΤΗΡ')).toBe('λόγοσ αστηρ');
+
+      await withStudyDataDropAllowed(() => migrator.down({ to: LIBRARY_MIGRATION }));
+      const [tags] = await db.query<{ tags: string[] }>(
+        `SELECT array(SELECT normalized_name FROM tag WHERE owner_id = $1 ORDER BY name COLLATE "C") AS tags`,
+        { bind: [user.id], type: QueryTypes.SELECT },
+      );
+      expect(tags).toStrictEqual({ tags: ['plain', 'λόγος αστηρ'] });
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [user.id] });
+    } finally {
+      await migrator.up();
+    }
   });
 
   it('rolls a migration that fails midway back completely and does not record it', async () => {

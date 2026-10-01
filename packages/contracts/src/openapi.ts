@@ -28,6 +28,15 @@ import {
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema, livenessResponseSchema } from './health';
 import { createStudyRequestSchema, createStudyResponseSchema, studyResponseSchema } from './study';
+import {
+  DEFAULT_LIBRARY_LIMIT,
+  LIBRARY_STATES,
+  MAX_LIBRARY_CURSOR_LENGTH,
+  MAX_LIBRARY_LIMIT,
+  MAX_LIBRARY_QUERY_LENGTH,
+  STUDY_SORTS,
+  studyListResponseSchema,
+} from './study-library';
 import { updateStudyRequestSchema, updateStudyResponseSchema } from './study-edit';
 
 /** JSON-schema object as emitted by `z.toJSONSchema` (OpenAPI 3.0 target). */
@@ -271,6 +280,45 @@ function buildDocument(): OpenApiDocument {
         },
       },
       '/studies': {
+        get: {
+          description:
+            "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. Trashed studies are never listed. No totals.",
+          security: sessionCookie,
+          parameters: [
+            queryParam('q', false, {
+              type: 'string',
+              minLength: 1,
+              maxLength: MAX_LIBRARY_QUERY_LENGTH,
+            }),
+            queryParam('tag', false, { type: 'string', format: 'uuid' }),
+            queryParam('state', false, {
+              type: 'string',
+              enum: [...LIBRARY_STATES],
+              default: 'active',
+            }),
+            queryParam('sort', false, {
+              type: 'string',
+              enum: [...STUDY_SORTS],
+              default: 'recent',
+            }),
+            queryParam('pinnedFirst', false, { type: 'boolean', default: true }),
+            queryParam('cursor', false, {
+              type: 'string',
+              maxLength: MAX_LIBRARY_CURSOR_LENGTH,
+              pattern: '^[A-Za-z0-9_-]+$',
+            }),
+            queryParam('limit', false, {
+              type: 'integer',
+              minimum: 1,
+              maximum: MAX_LIBRARY_LIMIT,
+              default: DEFAULT_LIBRARY_LIMIT,
+            }),
+          ],
+          responses: {
+            200: jsonResponse("One page of the owner's studies", 'StudyListResponse'),
+            default: errorResponse,
+          },
+        },
         post: {
           description:
             'Creates a study for the signed-in user in one transaction: the study (revision 1, content revision 1), a Scripture root node for startingReferenceId, a Question node for question, the initial branch (rooted at the question, else the passage), and one study_created event (sequence 1). Needs a question or a starting reference, or blank: true for an untitled empty study. The title, when omitted, is derived from the reference label, else the question. No expectedRevision (nothing exists yet). Send an Idempotency-Key: a retry with the same key and body replays the original 201 (Idempotent-Replayed: true) and never creates a second study; the same key with a different body is 422 IDEMPOTENCY_KEY_REUSED. An unknown reference, or one whose edition is not active, is 422 REFERENCE_NOT_FOUND and nothing is written.',
@@ -374,6 +422,7 @@ function buildDocument(): OpenApiDocument {
         CreateStudyRequest: toSchema(createStudyRequestSchema),
         CreateStudyResponse: toSchema(createStudyResponseSchema),
         StudyResponse: toSchema(studyResponseSchema),
+        StudyListResponse: toSchema(studyListResponseSchema),
         UpdateStudyRequest: toInputSchema(updateStudyRequestSchema),
         UpdateStudyResponse: toSchema(updateStudyResponseSchema),
       },

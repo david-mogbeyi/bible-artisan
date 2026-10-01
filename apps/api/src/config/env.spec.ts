@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { httpAllowedOrigins, loadEnv } from './env';
+import { cursorSecret, httpAllowedOrigins, loadEnv } from './env';
 
 describe('loadEnv', () => {
   it('splits CORS origins and applies defaults', () => {
@@ -160,6 +160,57 @@ describe('loadEnv: email OTP and session settings', () => {
   it('rejects a non-boolean SESSION_COOKIE_SECURE', () => {
     expect(() => loadEnv({ ...base, SESSION_COOKIE_SECURE: 'yes' })).toThrow(
       /SESSION_COOKIE_SECURE/,
+    );
+  });
+});
+
+describe('cursorSecret (BIB-21)', () => {
+  const production = {
+    NODE_ENV: 'production',
+    DATABASE_URL: 'postgres://localhost/x',
+    OTP_PROVIDER: 'stytch',
+    STYTCH_PROJECT_ID: 'p',
+    STYTCH_SECRET: 's',
+  };
+  const secret = Buffer.alloc(32, 7).toString('base64');
+
+  it('uses CURSOR_SECRET when set, as its 32 bytes', () => {
+    expect(cursorSecret(loadEnv({ ...production, CURSOR_SECRET: secret }))).toStrictEqual(
+      Buffer.alloc(32, 7),
+    );
+  });
+
+  it('refuses to run the HTTP API in production without it, without echoing values', () => {
+    expect(() => cursorSecret(loadEnv(production))).toThrow(
+      /^Invalid environment configuration: CURSOR_SECRET: is required in production for the HTTP API$/,
+    );
+  });
+
+  it('falls back to one fixed development secret outside production', () => {
+    for (const NODE_ENV of ['development', 'test']) {
+      const fallback = cursorSecret(loadEnv({ NODE_ENV, DATABASE_URL: 'postgres://localhost/x' }));
+      expect(fallback).toHaveLength(32);
+      expect(fallback).toStrictEqual(
+        cursorSecret(loadEnv({ NODE_ENV: 'development', DATABASE_URL: 'postgres://localhost/x' })),
+      );
+    }
+  });
+
+  it.each([
+    Buffer.alloc(16, 1).toString('base64'),
+    Buffer.alloc(33, 1).toString('base64'),
+    Buffer.alloc(32, 1).toString('base64url'),
+    `${secret} `,
+    'not base64 at all, but long enough to be forty-four chars!',
+  ])('refuses a CURSOR_SECRET that is not 32 base64 bytes, without echoing it', (value) => {
+    let message = '';
+    try {
+      loadEnv({ ...production, CURSOR_SECRET: value });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(
+      'Invalid environment configuration: CURSOR_SECRET: must be 32 bytes, base64 (openssl rand -base64 32)',
     );
   });
 });

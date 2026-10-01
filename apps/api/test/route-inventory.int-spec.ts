@@ -117,6 +117,15 @@ const ROUTES: Record<string, Access> = {
       test: 'POST /v1/studies keeps Idempotency-Keys per owner: another user reusing a key gets their own study',
     },
   },
+  // The library lists only the session owner's studies; the cross-user test shows another user's
+  // studies, tag ids, search words and cursors yield nothing.
+  'GET /v1/studies': {
+    access: 'private',
+    crossUserTest: {
+      file: 'study-library.int-spec.ts',
+      test: "GET /v1/studies lists only the signed-in user's studies: another user's studies, tag ids, search hits and cursors reveal nothing",
+    },
+  },
   'GET /v1/studies/:studyId': {
     access: 'private',
     crossUserTest: {

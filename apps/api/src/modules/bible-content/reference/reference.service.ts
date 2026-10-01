@@ -115,6 +115,41 @@ export class ReferenceService {
   }
 
   /**
+   * Many stored references at once (BIB-21: one library page's starting passages), keyed by id, in
+   * one query. An unknown id, or one whose edition is not active, is simply absent from the map,
+   * as `storedReference` would 404 it. Labels come from the cached edition index.
+   */
+  async storedReferences(referenceIds: string[]): Promise<Map<string, ScriptureReferenceDto>> {
+    const found = new Map<string, ScriptureReferenceDto>();
+    const ids = [...new Set(referenceIds)];
+    if (ids.length === 0) return found;
+    const rows = await ScriptureReference.findAll({ where: { id: { [Op.in]: ids } } });
+    for (const row of rows) {
+      let edition: ActiveEdition;
+      try {
+        edition = await this.activeEdition(row.editionId);
+      } catch (error) {
+        if (error instanceof NotFoundError) continue;
+        throw error;
+      }
+      const range: ReferenceRange = {
+        bookCode: row.bookCode,
+        startChapter: row.startChapter,
+        startVerse: row.startVerse,
+        endChapter: row.endChapter,
+        endVerse: row.endVerse,
+      };
+      found.set(row.id, {
+        id: row.id,
+        editionId: row.editionId,
+        ...range,
+        label: edition.index.label(range),
+      });
+    }
+    return found;
+  }
+
+  /**
    * The shared reference for a whole chapter, or one verse of it, chosen by structure (no text
    * parsing): validated against the corpus and persisted exactly as `resolve` persists the same
    * range, so both give the same id. Unknown or inactive edition: 404. A book, chapter or verse

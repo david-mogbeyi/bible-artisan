@@ -22,7 +22,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { ApiError } from '@/lib/api-client';
-import { studyQueryKey, updateStudy } from '@/lib/studies';
+import { invalidateLibrary, studyQueryKey, updateStudy } from '@/lib/studies';
 
 export const CONFLICT =
   'This study changed somewhere else, so nothing was saved. Your edits are kept here.';
@@ -301,6 +301,9 @@ export function StudyEditor({
       queryClient.setQueryData<StudyResponse>(studyQueryKey(study.id), (old) =>
         old && state.revision >= old.revision ? { ...old, ...state } : old,
       );
+      // Every committed edit moves last activity, and may change the title, pin or tags the
+      // library lists and orders by (BIB-21).
+      void invalidateLibrary(queryClient);
       const { expectedRevision: _revision, ...sent } = attempt.body;
       const oldBase = latestBase.current;
       setDraft((current) => settleDraft(current, oldBase, state, sent));

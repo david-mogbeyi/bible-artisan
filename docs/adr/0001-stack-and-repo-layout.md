@@ -561,6 +561,97 @@ There is one event per real change. Intended visibility for BIB-55's column: ren
 
 **Not in BIB-20:** the library and tag filter (BIB-21), archive and trash with the `STUDY_ARCHIVED` guard (BIB-22), editing question text or status (BIB-25), the save coordinator and conflict-review UI (BIB-35, BIB-37), and the event visibility column (BIB-55).
 
+## Addendum (2026-10-01, BIB-21): the study library
+
+`GET /v1/studies?q=&tag=&state=active|archived&sort=recent|created|title&pinnedFirst=true|false&cursor=&limit=` (`modules/study/http/study-library.ts`) lists the signed-in user's own studies (FR-STUDY-004). The web library is `/studies`. Home shows the three most recently active studies (`sort=recent&pinnedFirst=false&limit=3`).
+
+**Owner isolation.**
+
+- Every statement filters `study.owner_id` by the session owner, and so do the tag and search subqueries (`study_tag.owner_id`).
+- Another user's tag id is not an error: it matches nothing, so the page is empty, exactly like an owned tag on no listed study. A 400 or 404 would confirm the id exists.
+- No totals or counts are returned.
+- A cursor is sealed with the owner's id inside (see below), so a cursor from another user is a 400 and lists nothing.
+- The route-inventory cross-user test runs Bob's listing, tag filter, searches for Alice's words, `state=archived` and Alice's cursor. It asserts the whole bodies.
+
+**Search: a literal substring match on folded text, not tsvector or trigram.**
+
+- `study.search_text` holds `studySearchText(title, description)`: `tagKey` (BIB-20's fold: NFKC, invisible characters removed, language-neutral case folding, whitespace collapsed) of each, one per line.
+- **Final sigma.** `toLowerCase` picks "ς" or "σ" for "Σ" from the surrounding letters, so "ΑΣ" alone folded to "ας" while the same letters inside "ΑΣΤΗΡ" folded to "ασ", and the fragment missed. `tagKey` now maps "ς" to "σ" after case folding, as Unicode case folding does, so every character folds the same wherever it stands. The same function folds tag keys, search text, search words and the title sort key. The migration rewrites stored keys with `translate(…, 'ς', 'σ')`. That is exactly the new fold of each stored value, because no later step of the fold touches a sigma. An owner's tags cannot collide: the old fold picked the sigma form from context alone, so two keys differing only in sigma form could not exist. If one did, the unique constraint would abort the migration and nothing would change. Tests: "ΑΣ" finds "ΑΣΤΗΡ"; "Λόγος", "ΛΌΓΟΣ" and "λόγοσ" are one tag; the reversibility suite checks the rewrite and its `down`. The API writes it wherever it writes the title or description (`StudyRevisionService.create`, `PATCH`).
+- The query goes through the same fold (`studySearchTokens`), split into 1–10 distinct words.
+- A study matches when every word is a substring (`strpos`) of its `search_text`, or of the `normalized_name` of one of its tags. Each word is a bind parameter. There is no `LIKE` pattern to escape, no `to_tsquery`, and no regular expression from input, so `%`, `_`, `\`, `:*`, quotes and `&|!` are ordinary characters. A test asserts each one against an independent oracle.
+- Why not `tsvector`: library search is for finding one's own studies by a remembered fragment ("consc", "Rom"). Prefix and mid-word matches matter more than relevance. BIB-16 also showed that PostgreSQL's parser and `lower()` depend on `LC_CTYPE` for non-ASCII text, which private user text cannot be blanked around. Folding in the API makes matching locale-independent.
+- Why no trigram index (`pg_trgm`): every query is first narrowed to one owner's rows by the library indexes (below). Measured locally (PostgreSQL 16, one owner with 5,000 studies and 15,000 tag pairs, plus a second owner's 5,000 studies), a two-word search that matches nothing scans all 5,000 rows, with the tag subqueries hashed once, in 1.1 ms. A personal library is far smaller, so the trigram extension is deferred until measurements justify it (AGENTS.md rule 9).
+
+- **Backfill caveat.** A migration never imports code that may change, so existing rows were backfilled with a SQL approximation (`lower(normalize(…, NFKC))`, whitespace collapsed). The API writes the exact fold on the study's next title or description change. No production data existed (hosting is undecided), so only development rows can carry the approximation.
+- Not searched: question and node text, and notes (Library/Search with BIB-23).
+
+**Order.**
+
+- With `pinnedFirst=true` (the default, the library) pinned studies come first, then the rest; with `pinnedFirst=false` (Home's recent studies, PRD section 11: the three most recent, whatever their pin) one list. Within that, the sort, ties broken by id:
+  - `recent`: `last_activity_at DESC`;
+  - `created`: `created_at DESC`;
+  - `title`: `title_sort_key COLLATE "C"` ascending.
+- **Title collation.** `study.title_sort_key` is `studyTitleSortKey(title)`: the API's fold (`tagKey`) of the title, cut to its first 200 code points. The API writes it wherever it writes the title. The column is declared `COLLATE "C"` and the query says so explicitly, so the order is the code-point order of the folded title. It is case-insensitive through the fold and identical whatever the database's default collation or its ICU/libc version. The first version ordered `title` in the database collation: case-sensitive under `C`, and locale-dependent elsewhere (`en_US` puts "éclair" before "fig", code-point order after). The 200-code-point cut keeps the cursor small; titles whose folds agree that far tie and fall to the id. A test checks the order against a code-point oracle and against an explicit `ORDER BY title_sort_key COLLATE "C", id`, using titles that differ by case, accents, punctuation and Greek.
+- The order is total, so keyset pages never repeat or skip a study that did not change in between. Tests traverse every sort, both groupings, with and without filters, at limits 1 to 23, against an oracle. The seeded timestamps tie at the minute and differ only in microseconds.
+
+**Keyset query: one index range per pin group.**
+
+- `study.is_pinned` is a stored generated `pinned_at IS NOT NULL`. There is one index per sort: `(owner_id, lifecycle, is_pinned, <sort value>, id)` in the listing's direction (`study_owner_library_recent_idx`, `…_created_idx`, `…_title_idx`). PRD section 23 asks for owner/lifecycle/last_activity/id.
+- `libraryQuery` reads each pin group as its own subquery, ordered like its index and limited to `limit + 1`: `WHERE owner_id = $1 AND lifecycle = $2 AND [NOT] is_pinned AND (<sort value>, id) </> (cursor value, cursor id)`. The subqueries are merged with `UNION ALL` and an outer `ORDER BY … LIMIT` over at most `2 × (limit + 1)` rows. Once the cursor is in the unpinned group, the pinned subquery is left out. With `pinnedFirst=false` both groups seek from the cursor and the merge interleaves them.
+- Why not one statement over both groups: the first version put `(pinned_at IS NULL)` in the index and an `OR` across groups in the predicate. PostgreSQL cannot use an `OR` as an index start condition, so page N read every earlier row. An expression column also cannot serve the pinned group: the planner rewrites `(pinned_at IS NULL) = false` to `pinned_at IS NOT NULL`, which no longer matches the index expression. The generated boolean matches as `is_pinned = true|false`.
+- `EXPLAIN (ANALYZE)` evidence, asserted by the integration test. Setup: one owner with 5,000 studies (100 pinned) among nine owners with 2,000 each (23,000 rows), PostgreSQL 16 locally. Page after row 4,000:
+  - one `Index Scan using study_owner_library_<sort>_idx` with `Index Cond: (owner_id = …) AND (lifecycle = …) AND (is_pinned = false) AND (ROW(<sort value>, id) < ROW(…))`;
+  - `Actual Rows` 51, so no earlier row is read;
+  - no read of the pinned group at all;
+  - execution 0.05–0.07 ms (`recent` 0.067–0.075, `created` 0.062–0.064, `title` 0.048–0.051).
+
+  Page after row 40 (inside the pinned group): the pinned group seeks from the cursor with the same `ROW(…)` start condition (an index or bitmap scan, as the planner prefers for 60 rows), and the unpinned group starts at its top. Execution 0.17–0.22 ms. The first page is the same index scan without the `ROW` condition.
+
+**Cursor: sealed with AES-256-GCM.**
+
+- Wire format: `base64url(version ‖ 12-byte random IV ‖ ciphertext ‖ 16-byte tag)`, with the version byte as additional authenticated data. The plaintext is `[ownerId, fingerprint, pinnedGroup, sortValue, id]`:
+  - the sort value is the timestamp as microsecond UTC text from PostgreSQL (a JavaScript `Date` would truncate it to milliseconds and skip rows), or, for `title`, a snapshot of the anchor's `title_sort_key`;
+  - the fingerprint is SHA-256 of `[state, sort, pinnedFirst, tag, words]`.
+- The next page seeks from the snapshot and never re-reads the anchor. The first version looked up the anchor's current title by id, so renaming the anchor between pages skipped or repeated rows, and deleting it made the cursor a 400. Tests rename the anchor past and before the cursor, delete it, and unpin it between pages. Every unchanged study is still listed exactly once.
+- The first version's fingerprint was an unkeyed truncated SHA-256 in readable JSON. Anyone holding a cursor and the owner's id could test guesses of the search words against it offline. Now everything is inside the ciphertext. Without the server secret a cursor cannot be read, guessed against or forged. A test checks that no title, sort key or search word appears in a cursor's bytes or text: UTF-8, UTF-16, Latin-1, hex, and base64/base64url at every alignment.
+- **Secret.** The key is derived with HKDF-SHA256 (info `bible-artisan/library-cursor/v1`) from `CURSOR_SECRET`: 32 bytes, base64, validated by `loadEnv`. Like `CORS_ALLOWED_ORIGINS` it is HTTP-only. `cursorSecret(env)` runs in `configureApp`, so the API refuses to start in production without it. The worker issues no cursors and ignores it. Outside production a fixed, public development secret is used when it is unset, so local and test cursors survive restarts. Rotating the secret only invalidates outstanding cursors.
+- Failed authentication (tampered, truncated, another key, or the old format), another owner, and other filters, sort, grouping or state all give 400 `VALIDATION` (`cursor: ["Invalid cursor"]`), a fixed message. `limit` may differ between pages. The cursor is at most 2,048 characters: the largest title snapshot (200 code points × 4 bytes) plus about 150 bytes of overhead, in base64url.
+- `limit` is 1 to 50, default 50 (PRD section 11). Each request makes at most `limit + 1` rows, one tag query and one batched reference lookup (`ReferenceService.storedReferences`).
+
+**`last_activity_at`.**
+
+- It is the time anything last happened to the study, committed. It is set at creation (the column default) and then only by `StudyRevisionService.writeCounters`, in the same UPDATE as the event counter, whenever a mutation appended events. Every pipeline mutation does, so rename, description, question, pin and tag edits all count.
+- There is no other write path. A read, or a refused or rolled-back mutation, never moves it, and tests assert both.
+- The value is the application clock as the mutation ends, like `created_at` and `study_event.occurred_at`, so it is never earlier than either. A first version used the database's `now()` (transaction start). Manual curl verification showed a new study's last activity 1 ms before its `created_at`, which the application sets.
+- BIB-55 (visits) and BIB-22 (lifecycle) may refine which events count, in the same place. Backfill: the latest event, else creation.
+
+**Data and down.** Migration `add_study_library` adds `last_activity_at`, `search_text`, `title_sort_key` and the generated `is_pinned`, plus the three library indexes. It also rewrites stored final sigmas (`tag.normalized_name`). Its `down` restores the word-final form: σ after a non-separator and before a separator or the end.
+
+- Its `down` refuses while any study exists unless `ALLOW_STUDY_DATA_DROP=1`.
+- The columns are derived, but each `down` commits on its own. An unguarded step would commit before BIB-20's guard refused, leaving a half-reverted database. The reversibility suite caught exactly that, and now expects this step's refusal first.
+
+**Web.**
+
+- The search text and tag filter live in component state only: never the page URL, history or localStorage (PRD section 9). The text appears only in the API request's query string, as PRD section 24 specifies, and the API logs only the route pattern.
+- Search is submitted (Enter or Search), not sent per keystroke. An empty search resets the filters.
+- States:
+  - loading shows skeletons;
+  - a refetch keeps the previous results (`keepPreviousData`);
+  - "No studies yet" with a New study link, as distinct from "No studies match" with Clear filters;
+  - a failed first load shows Retry;
+  - a failed refresh keeps the results and says when they were loaded;
+  - a failed Load more keeps the loaded studies and offers Retry;
+  - a refused cursor restarts the list from the start.
+- One persistent polite status region announces the results once a search, tag filter, clear or sort change has loaded ("Search results: 3 studies.", "Search results: no studies match.", "Tag filter cleared: 12 studies."). It also announces Load more ("N more studies loaded.").
+- A search refused before sending (too many words, forbidden characters) appears as an alert, with focus back on the field, which points at it (`aria-describedby`).
+- Clear tag filter and Clear filters disappear with the filters, so they move focus to the search field instead of dropping it on the page body.
+- **Freshness.** Creating a study, and every committed edit, invalidates every cached library listing (`invalidateLibrary`: the `['studies', 'library']` prefix). That covers each search, filter and sort of `/studies`, and Home's recent studies, so they refetch when shown. A refused create or edit invalidates nothing. The study's own cache is still updated in place by its editor.
+- The Archived filter UI waits for archiving (BIB-22). The API already accepts `state=archived` and never lists trashed studies.
+
+**Privacy.** No new log lines. `log-redaction.int-spec.ts` sends sentinel titles, tags, searches, tag ids and cursors on 200 and 400.
+
+**Not in BIB-21:** archive/trash and the Archived filter (BIB-22), notes search (BIB-23), Continue Studying and the resume card (BIB-34), list actions from the library, a tags endpoint, and offline caching (BIB-36).
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.

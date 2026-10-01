@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
@@ -21,6 +22,17 @@ const booleanFlag = z.enum(['true', 'false']).transform((value) => value === 'tr
 
 /** The local web app; the HTTP API's CORS/CSRF allowlist when CORS_ALLOWED_ORIGINS is unset outside production. */
 const DEV_WEB_ORIGIN = 'http://localhost:3000';
+
+/** Standard base64 of exactly 32 bytes (`openssl rand -base64 32`). */
+const SECRET_32_BYTES = /^[A-Za-z0-9+/]{43}=$/;
+
+/**
+ * The cursor secret outside production when CURSOR_SECRET is unset: fixed and public, so local
+ * and test cursors survive restarts. Never used in production (`cursorSecret` refuses).
+ */
+const DEV_CURSOR_SECRET = createHash('sha256')
+  .update('bible-artisan development-only library cursor secret')
+  .digest();
 
 const envSchema = z
   .object({
@@ -57,6 +69,17 @@ const envSchema = z
     DEV_OTP_OUTBOX_FILE: z.string().min(1).optional(),
     /** Secure flag on the session cookie. `false` is allowed only outside production. */
     SESSION_COOKIE_SECURE: booleanFlag.default(true),
+    /**
+     * Key material for the library's encrypted cursors (BIB-21): 32 random bytes, base64. Only
+     * the HTTP API reads it, through `cursorSecret` (required there in production, a fixed
+     * development secret elsewhere). Rotating it only invalidates outstanding cursors (400, and
+     * the web app restarts the list).
+     */
+    CURSOR_SECRET: z
+      .string()
+      .regex(SECRET_32_BYTES, { message: 'must be 32 bytes, base64 (openssl rand -base64 32)' })
+      .transform((value) => Buffer.from(value, 'base64'))
+      .optional(),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && env.OTP_PROVIDER === 'dev') {
@@ -107,6 +130,24 @@ export function httpAllowedOrigins(env: Env): string[] {
     );
   }
   return [DEV_WEB_ORIGIN];
+}
+
+/**
+ * The library cursor secret (BIB-21). Called by `configureApp` before the server listens, so an
+ * API process in production without CURSOR_SECRET refuses to start (fail closed) instead of
+ * sealing cursors with the public development secret. Like `httpAllowedOrigins`, kept out of
+ * `loadEnv` because the worker loads the same config and issues no cursors. The error never
+ * echoes configured values.
+ */
+export function cursorSecret(env: Env): Buffer {
+  if (env.CURSOR_SECRET !== undefined) return env.CURSOR_SECRET;
+  if (env.NODE_ENV === 'production') {
+    throw new InvalidConfigError(
+      ['CURSOR_SECRET'],
+      'CURSOR_SECRET: is required in production for the HTTP API',
+    );
+  }
+  return DEV_CURSOR_SECRET;
 }
 
 /**

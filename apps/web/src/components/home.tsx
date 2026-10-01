@@ -6,11 +6,15 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { ApiStatus } from '@/components/api-status';
 import { RequireAuth } from '@/components/require-auth';
+import { RecentStudies } from '@/components/studies/recent-studies';
 import { signOut } from '@/lib/auth';
 
 const SIGN_OUT_ERROR = "You're still signed in. Something went wrong signing out. Try again.";
 
-/** Home (authorized). New Study starts one (BIB-19); the study list and Continue Studying arrive with later tickets. */
+/**
+ * Home (authorized). New Study starts one (BIB-19); Recent studies and the library link come from
+ * BIB-21; Continue Studying arrives with BIB-34.
+ */
 export function Home() {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -44,10 +48,14 @@ export function Home() {
             <Link href="/studies/new" className="text-accent underline">
               New study
             </Link>
+            <Link href="/studies" className="text-accent underline">
+              Your studies
+            </Link>
             <Link href="/bible" className="text-accent underline">
               Read the Bible
             </Link>
           </nav>
+          <RecentStudies />
           {logout.isError ? (
             <div
               ref={errorRef}

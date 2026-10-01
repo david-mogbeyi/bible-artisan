@@ -1,9 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import {
   type CreateStudyResponse,
   createStudyRequestSchema,
+  listStudiesQuerySchema,
   type ScriptureReference,
+  type StudyListResponse,
   type StudyResponse,
+  studySearchText,
+  studyTitleSortKey,
   type UpdateStudyResponse,
   updateStudyRequestSchema,
 } from '@bible-artisan/contracts';
@@ -19,6 +23,8 @@ import { MutationResult, MutationService } from '../../../common/mutation/mutati
 import type { StudyMutation } from '../../../common/mutation/study-mutation';
 import { requireExpectedRevision } from '../../../common/revision/expected-revision';
 import { parseBody } from '../../../common/validation/parse-body';
+import { ENV } from '../../../config/config.module';
+import { cursorSecret, type Env } from '../../../config/env';
 import { StudyBranch } from '../../../database/models/study-branch.model';
 import { StudyNode } from '../../../database/models/study-node.model';
 import { Study } from '../../../database/models/study.model';
@@ -26,6 +32,8 @@ import type { AppendEventInput } from '../../thread/thread.service';
 import { ReferenceService } from '../../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study-access.service';
 import { deriveStudyTitle } from '../study-title';
+import { libraryCursorKey } from './library-cursor';
+import { listStudies } from './study-library';
 import { readStudyState } from './study-state';
 import { applyTagChange } from './study-tags';
 
@@ -56,11 +64,17 @@ export const STUDY_EDIT_EVENTS = {
  */
 @Injectable()
 export class StudiesService {
+  /** Seals and opens library cursors (BIB-21), derived once from CURSOR_SECRET. */
+  private readonly cursorKey: Buffer;
+
   constructor(
     private readonly mutations: MutationService,
     private readonly access: StudyAccessService,
     private readonly references: ReferenceService,
-  ) {}
+    @Inject(ENV) env: Env,
+  ) {
+    this.cursorKey = libraryCursorKey(cursorSecret(env));
+  }
 
   async create(ownerId: string, mutation: MutationRequestInfo): Promise<MutationResult> {
     const body = parseBody(createStudyRequestSchema, mutation.body);
@@ -129,6 +143,19 @@ export class StudiesService {
         return { status: 201, body: created };
       },
     });
+  }
+
+  /**
+   * The owner's library page (BIB-21): `GET /v1/studies` query parameters validated with the
+   * shared schema (400 before any query), then one owner-scoped listing.
+   */
+  list(ownerId: string, query: unknown): Promise<StudyListResponse> {
+    return listStudies(
+      ownerId,
+      parseBody(listStudiesQuerySchema, query),
+      (ids) => this.references.storedReferences(ids),
+      this.cursorKey,
+    );
   }
 
   async get(ownerId: string, studyId: string): Promise<StudyResponse> {
@@ -227,8 +254,19 @@ export class StudiesService {
           id: m.studyId,
           expectedRevision,
           values: {
-            ...(titleChanged && body.title !== undefined ? { title: body.title } : {}),
+            ...(titleChanged && body.title !== undefined
+              ? { title: body.title, titleSortKey: studyTitleSortKey(body.title) }
+              : {}),
             ...(descriptionChanged ? { description: body.description ?? null } : {}),
+            // The library matches the folded title and description (BIB-21); rewritten with them.
+            ...(titleChanged || descriptionChanged
+              ? {
+                  searchText: studySearchText(
+                    titleChanged && body.title !== undefined ? body.title : current.title,
+                    descriptionChanged ? (body.description ?? null) : current.description,
+                  ),
+                }
+              : {}),
             ...(pinChanged ? { pinnedAt: body.pinned ? new Date() : null } : {}),
             ...(mainChanged && newMainId !== null
               ? {

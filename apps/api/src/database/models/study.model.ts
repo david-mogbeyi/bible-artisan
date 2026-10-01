@@ -18,8 +18,9 @@ import {
  * Timestamps: `@CreatedAt`/`@UpdatedAt` on the declared columns make Sequelize manage exactly
  * these two attributes (no extra auto-added ones) and write them to created_at/updated_at.
  *
- * Starting reference and question pointers arrive with study creation (BIB-19); archive,
- * activity and summary columns with the tickets that write them.
+ * Starting reference and question pointers arrive with study creation (BIB-19), last activity
+ * and search text with the library (BIB-21); archive and summary columns with the tickets that
+ * write them.
  */
 @Table({ tableName: 'study', timestamps: true })
 export class Study extends Model {
@@ -80,6 +81,41 @@ export class Study extends Model {
   /** When the owner pinned the study (BIB-20); null when it is not pinned. */
   @Column({ field: 'pinned_at', type: DataType.DATE, allowNull: true })
   declare pinnedAt: Date | null;
+
+  /**
+   * When anything last happened to the study (BIB-21): set at creation, then written only by
+   * `StudyRevisionService.writeCounters`, in the mutation's transaction, whenever it appended
+   * events. The library's `recent` sort.
+   */
+  @Column({
+    field: 'last_activity_at',
+    type: DataType.DATE,
+    allowNull: false,
+    defaultValue: DataType.NOW,
+  })
+  declare lastActivityAt: Date;
+
+  /**
+   * The folded title and description (`studySearchText` from @bible-artisan/contracts) that the
+   * library search matches (BIB-21). Written with the title and description, never by a client.
+   */
+  @Column({ field: 'search_text', type: DataType.TEXT, allowNull: false, defaultValue: '' })
+  declare searchText: string;
+
+  /**
+   * What the library's `title` sort orders by (BIB-21): `studyTitleSortKey(title)` from
+   * @bible-artisan/contracts, `COLLATE "C"` in the migration. Written with the title, never by a
+   * client.
+   */
+  @Column({ field: 'title_sort_key', type: DataType.TEXT, allowNull: false, defaultValue: '' })
+  declare titleSortKey: string;
+
+  /**
+   * `pinned_at IS NOT NULL`, a STORED GENERATED column (BIB-21) that leads each library index's
+   * pin group. PostgreSQL refuses any written value, so never set it.
+   */
+  @Column({ field: 'is_pinned', type: DataType.BOOLEAN })
+  declare readonly isPinned: boolean;
 
   /**
    * Always 'question': a STORED GENERATED constant (BIB-19) that is the last column of both

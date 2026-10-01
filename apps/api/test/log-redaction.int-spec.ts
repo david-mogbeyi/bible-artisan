@@ -909,6 +909,58 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs the study library without the search, tag ids, cursor, titles or tags', async () => {
+    const route = { method: 'GET', route: '/v1/studies' };
+    const listFor = (params: Record<string, string>): Test =>
+      withPrivateChannels(http().get('/v1/studies').query(params), cookie);
+
+    // Two studies of this user with private titles and a private tag (the owner's own 200 returns
+    // them, so they are tracked for the log check rather than treated as echoed input).
+    const title = track(`SENTINEL-library-title-${randomUUID()}`);
+    const ids: string[] = [];
+    for (const studyTitle of [title, track(`SENTINEL-library-other-${randomUUID()}`)]) {
+      const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+        .send({ title: studyTitle, blank: true })
+        .expect(201);
+      ids.push(track((created.body as { studyId: string }).studyId));
+    }
+    const tagged = await withPrivateChannels(http().patch(`/v1/studies/${ids[0]}`), cookie)
+      .send({ expectedRevision: 1, tags: { add: [track(`SENTINEL-lt-${randomUUID()}`)] } })
+      .expect(200);
+    const tagIds = (tagged.body as { tags: { id: string }[] }).tags.map((tag) => track(tag.id));
+
+    // A search that finds the study by its private title, through its private tag filter.
+    const found = await listFor({ q: title, tag: tagIds[0] ?? '' });
+    const foundBody = found.body as { items: { id: string }[] };
+    expect(foundBody.items.map((item) => item.id)).toStrictEqual([ids[0]]);
+    await expectLogged(found, { ...route, status: 200 });
+
+    // A private search and a foreign tag id that match nothing.
+    const none = await listFor({ q: secret('library-search'), tag: track(randomUUID()) });
+    expect(none.body).toStrictEqual({ items: [], nextCursor: null });
+    await expectLogged(none, { ...route, status: 200 });
+
+    // Paging: the cursor is never logged either.
+    const first = await listFor({ limit: '1' });
+    const cursor = track((first.body as { nextCursor: string }).nextCursor);
+    await expectLogged(first, { ...route, status: 200 });
+    await expectLogged(await listFor({ limit: '1', cursor }), { ...route, status: 200 });
+
+    const refused = await listFor({ q: secret('library-search'), cursor: secret('cursor') });
+    await expectLogged(
+      refused,
+      { ...route, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { cursor: ['Invalid cursor'] },
+        }),
+      },
+    );
+  });
+
   it('logs a request the client aborted with no status, never a default 200', async () => {
     const correlationId = randomUUID();
     // The probe holds its transaction for 1 s; the client gives up after 200 ms.

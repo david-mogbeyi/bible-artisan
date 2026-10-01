@@ -10,7 +10,7 @@ import {
   type ScriptureReference,
   USER_TEXT_INVALID_CHARACTERS,
 } from '@bible-artisan/contracts';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
@@ -19,7 +19,7 @@ import { RequireAuth } from '@/components/require-auth';
 import { ApiError } from '@/lib/api-client';
 import { classifyError, REFERENCE_ERROR_COPY } from '@/lib/api-errors';
 import { fetchTranslations, resolveReference, TRANSLATIONS_QUERY_KEY } from '@/lib/bible';
-import { createStudy, studyHref } from '@/lib/studies';
+import { createStudy, invalidateLibrary, studyHref } from '@/lib/studies';
 
 export const START_RULE = 'Add a question or a starting passage, or start a blank study.';
 export const BLANK_RULE =
@@ -123,6 +123,7 @@ export function NewStudyForm() {
     passage: useRef<HTMLInputElement>(null),
   };
 
+  const queryClient = useQueryClient();
   const translations = useQuery({ queryKey: TRANSLATIONS_QUERY_KEY, queryFn: fetchTranslations });
   const editions = translations.data?.translations ?? [];
   const editionId = chosenEdition ?? editions[0]?.id ?? null;
@@ -132,6 +133,8 @@ export function NewStudyForm() {
       createStudy(body, key),
     onSuccess: ({ studyId }) => {
       attempt.current = null;
+      // The new study belongs in every library listing (Home's recent studies, /studies).
+      void invalidateLibrary(queryClient);
       router.push(studyHref(studyId));
     },
     onError: (error) => {

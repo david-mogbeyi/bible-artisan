@@ -93,10 +93,36 @@ describe('Sequelize models against the real schema', () => {
       originalQuestionNodeId: null,
       mainQuestionNodeId: null,
       pinnedAt: null,
+      lastActivityAt: expect.any(Date),
+      searchText: '',
+      titleSortKey: '',
+      isPinned: false,
       questionNodeType: 'question',
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
+  });
+
+  it("writes and reads a Study's last activity, search text and title sort key through the model, and reads the generated pin flag (BIB-21)", async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const lastActivityAt = new Date('2026-10-01T12:34:56.789Z');
+    const pinnedAt = new Date('2026-10-01T12:00:00.000Z');
+    await study.update({
+      lastActivityAt,
+      searchText: 'conscience in romans',
+      titleSortKey: 'conscience in romans',
+      pinnedAt,
+    });
+    const found = await Study.findByPk(study.id, { rejectOnEmpty: true });
+    expect([
+      found.lastActivityAt,
+      found.searchText,
+      found.titleSortKey,
+      found.isPinned,
+    ]).toStrictEqual([lastActivityAt, 'conscience in romans', 'conscience in romans', true]);
+    await found.update({ pinnedAt: null });
+    expect((await Study.findByPk(study.id, { rejectOnEmpty: true })).isPinned).toBe(false);
   });
 
   it('pins a Study and creates a Tag and StudyTag through the models (BIB-20)', async () => {
