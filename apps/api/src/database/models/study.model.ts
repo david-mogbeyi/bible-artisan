@@ -103,6 +103,21 @@ export class Study extends Model {
   declare searchText: string;
 
   /**
+   * What the library's `title` sort orders by (BIB-21): `studyTitleSortKey(title)` from
+   * @bible-artisan/contracts, `COLLATE "C"` in the migration. Written with the title, never by a
+   * client.
+   */
+  @Column({ field: 'title_sort_key', type: DataType.TEXT, allowNull: false, defaultValue: '' })
+  declare titleSortKey: string;
+
+  /**
+   * `pinned_at IS NOT NULL`, a STORED GENERATED column (BIB-21) that leads each library index's
+   * pin group. PostgreSQL refuses any written value, so never set it.
+   */
+  @Column({ field: 'is_pinned', type: DataType.BOOLEAN })
+  declare readonly isPinned: boolean;
+
+  /**
    * Always 'question': a STORED GENERATED constant (BIB-19) that is the last column of both
    * question-pointer FKs into study_node (owner_id, study_id, id, type), so a pointer can only
    * name a Question node. PostgreSQL refuses any written value, so never set it.

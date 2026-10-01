@@ -244,7 +244,7 @@ describe('buildOpenApiDocument', () => {
         '/studies': {
           get: {
             description:
-              "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z), ties broken by id. q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor works only for the same user, filters and sort, and anything else is 400. Trashed studies are never listed. No totals.",
+              "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. Trashed studies are never listed. No totals.",
             security: [{ sessionCookie: [] }],
             parameters: [
               {
@@ -272,10 +272,16 @@ describe('buildOpenApiDocument', () => {
                 schema: { type: 'string', enum: ['recent', 'created', 'title'], default: 'recent' },
               },
               {
+                name: 'pinnedFirst',
+                in: 'query',
+                required: false,
+                schema: { type: 'boolean', default: true },
+              },
+              {
                 name: 'cursor',
                 in: 'query',
                 required: false,
-                schema: { type: 'string', maxLength: 512, pattern: '^[A-Za-z0-9_-]+$' },
+                schema: { type: 'string', maxLength: 2048, pattern: '^[A-Za-z0-9_-]+$' },
               },
               {
                 name: 'limit',

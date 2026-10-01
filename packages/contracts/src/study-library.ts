@@ -17,8 +17,18 @@ export const MAX_LIBRARY_QUERY_TOKENS = 10;
 /** PRD section 11: "Default lists the latest 50 with cursor pagination". */
 export const DEFAULT_LIBRARY_LIMIT = 50;
 export const MAX_LIBRARY_LIMIT = 50;
-/** Longest opaque cursor accepted. */
-export const MAX_LIBRARY_CURSOR_LENGTH = 512;
+/**
+ * Code points of the folded title that `sort=title` orders by (`studyTitleSortKey`). Titles whose
+ * folded forms agree this far tie, and their order falls to the study id.
+ */
+export const TITLE_SORT_KEY_LENGTH = 200;
+/**
+ * Longest opaque cursor accepted. A `title` cursor carries, encrypted, the sort key of the
+ * previous page's last study (at most `TITLE_SORT_KEY_LENGTH` code points, 4 UTF-8 bytes each)
+ * plus about 150 bytes of position, binding and encryption overhead; base64url makes 4
+ * characters of every 3 bytes. 2,048 covers the largest with room to spare.
+ */
+export const MAX_LIBRARY_CURSOR_LENGTH = 2048;
 
 /** PRD section 11: "recent/title/created sorting". `recent` is by last activity. */
 export const STUDY_SORTS = ['recent', 'created', 'title'] as const;
@@ -56,6 +66,19 @@ export function studySearchText(title: string, description: string | null): stri
   return description === null ? tagKey(title) : `${tagKey(title)}\n${tagKey(description)}`;
 }
 
+/**
+ * `study.title_sort_key`, what `sort=title` orders by (in `COLLATE "C"`, then id): the folded
+ * title (`tagKey`, so case, compatibility forms and final sigma never decide the order), cut to
+ * its first `TITLE_SORT_KEY_LENGTH` code points so a cursor that carries it stays small. Written
+ * by the API wherever the title is written; the order never depends on the database collation.
+ */
+export function studyTitleSortKey(title: string): string {
+  return Array.from(tagKey(title)).slice(0, TITLE_SORT_KEY_LENGTH).join('');
+}
+
+/** Query-string booleans. */
+const flagSchema = z.enum(['true', 'false']).transform((value) => value === 'true');
+
 export const listStudiesQuerySchema = z.strictObject({
   q: userTextSchema({ max: MAX_LIBRARY_QUERY_LENGTH })
     .superRefine((q, ctx) => {
@@ -72,6 +95,11 @@ export const listStudiesQuerySchema = z.strictObject({
   tag: z.uuid().optional(),
   state: z.enum(LIBRARY_STATES).default('active'),
   sort: z.enum(STUDY_SORTS).default('recent'),
+  /**
+   * `true` (the library): pinned studies first, then the rest, each group in `sort` order.
+   * `false` (Home's "Recent studies", PRD section 11): one list in `sort` order, pins ignored.
+   */
+  pinnedFirst: flagSchema.default(true),
   cursor: z
     .string()
     .max(MAX_LIBRARY_CURSOR_LENGTH)
@@ -104,8 +132,8 @@ export const studyListItemSchema = z.object({
 export type StudyListItem = z.infer<typeof studyListItemSchema>;
 
 /**
- * One page. Pinned studies come first (`pinned: true`), then the rest, each group in the chosen
- * sort. `nextCursor` is non-null exactly when more studies follow. No totals: a count is not
+ * One page. With `pinnedFirst` (the default) pinned studies come first (`pinned: true`), then the
+ * rest, each group in the chosen sort; without it, every study in the chosen sort. `nextCursor` is non-null exactly when more studies follow. No totals: a count is not
  * needed by the UI and is one more thing that could leak.
  */
 export const studyListResponseSchema = z.object({

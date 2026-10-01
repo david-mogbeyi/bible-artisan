@@ -6,8 +6,10 @@ import {
   listStudiesQuerySchema,
   studySearchText,
   studySearchTokens,
+  studyTitleSortKey,
+  TITLE_SORT_KEY_LENGTH,
 } from './study-library';
-import { tagKey } from './study-edit';
+import { TAG_DUPLICATE, tagChangeSchema, tagKey } from './study-edit';
 import { USER_TEXT_INVALID_CHARACTERS } from './user-text';
 
 const issuesOf = (query: unknown) => {
@@ -40,6 +42,38 @@ describe('studySearchTokens / studySearchText', () => {
     ]);
   });
 
+  it('folds Greek sigma the same wherever it stands, so a fragment finds the word it is part of', () => {
+    // "ΑΣ" alone lowercases to "ας" (final sigma) but to "ασ" inside "ΑΣΤΗΡ": the fold must not.
+    const [fragment] = studySearchTokens('ΑΣ');
+    expect(fragment).toBe('ασ');
+    expect(studySearchText('ΑΣΤΗΡ', null).includes(fragment ?? '~')).toBe(true);
+    expect(studySearchTokens('ἸΗΣΟΥΣ Ἰησοῦς ἸΗΣΟΥ')).toStrictEqual(['ἰησουσ', 'ἰησοῦσ', 'ἰησου']);
+    for (const text of ['ς', 'σ', 'Σ', 'λόγος', 'ΛΌΓΟΣ', 'λόγοσ', 'ΣΑΣ', 'Σ.Σ']) {
+      expect(tagKey(text)).not.toContain('\u03c2');
+    }
+    expect(tagKey('λόγος')).toBe(tagKey('ΛΌΓΟΣ'));
+    expect(tagKey('λόγος')).toBe(tagKey('λόγοσ'));
+  });
+
+  it('treats Greek tag names that differ only in sigma form or case as one tag', () => {
+    expect(tagChangeSchema.safeParse({ add: ['Λόγος', 'λόγοσ'] }).error?.issues).toStrictEqual([
+      expect.objectContaining({ path: ['add'], message: TAG_DUPLICATE }),
+    ]);
+    expect(tagChangeSchema.safeParse({ add: ['ΑΣ', 'ας'] }).success).toBe(false);
+    expect(tagChangeSchema.safeParse({ add: ['ας', 'αστηρ'] }).success).toBe(true);
+  });
+
+  it('sorts titles by their fold, cut to the sort key length in code points', () => {
+    expect(studyTitleSortKey('Grace ALONE')).toBe('grace alone');
+    expect(studyTitleSortKey('ΛΌΓΟΣ')).toBe(studyTitleSortKey('λόγος'));
+    // Astral characters count as one code point and are never split.
+    const long = '\u{1D400}'.repeat(TITLE_SORT_KEY_LENGTH + 5);
+    expect(Array.from(studyTitleSortKey(long))).toHaveLength(TITLE_SORT_KEY_LENGTH);
+    expect(studyTitleSortKey(long)).toBe('a'.repeat(TITLE_SORT_KEY_LENGTH));
+    const emoji = '\u{1F600}'.repeat(TITLE_SORT_KEY_LENGTH + 1);
+    expect(studyTitleSortKey(emoji)).toBe('\u{1F600}'.repeat(TITLE_SORT_KEY_LENGTH));
+  });
+
   it('stores the folded title and description on separate lines', () => {
     expect(studySearchText('Grace ALONE', null)).toBe('grace alone');
     expect(studySearchText('Grace', 'Romans\n\n5')).toBe('grace\nromans 5');
@@ -52,6 +86,7 @@ describe('listStudiesQuerySchema', () => {
     expect(listStudiesQuerySchema.parse({})).toStrictEqual({
       state: 'active',
       sort: 'recent',
+      pinnedFirst: true,
       limit: 50,
     });
     expect(
@@ -60,6 +95,7 @@ describe('listStudiesQuerySchema', () => {
         tag: '00000000-0000-4000-8000-00000000000a',
         state: 'archived',
         sort: 'title',
+        pinnedFirst: 'false',
         cursor: 'abc_-1',
         limit: '7',
       }),
@@ -68,6 +104,7 @@ describe('listStudiesQuerySchema', () => {
       tag: '00000000-0000-4000-8000-00000000000a',
       state: 'archived',
       sort: 'title',
+      pinnedFirst: false,
       cursor: 'abc_-1',
       limit: 7,
     });
@@ -81,6 +118,9 @@ describe('listStudiesQuerySchema', () => {
       expect(issuesOf({ limit }).map((i) => i.path)).toStrictEqual([['limit']]);
     }
     expect(issuesOf({ tag: 'not-a-uuid' }).map((i) => i.path)).toStrictEqual([['tag']]);
+    for (const pinnedFirst of ['1', 'yes', 'TRUE', '']) {
+      expect(issuesOf({ pinnedFirst }).map((i) => i.path)).toStrictEqual([['pinnedFirst']]);
+    }
     // Repeated parameters arrive as arrays.
     expect(issuesOf({ q: ['a', 'b'] }).map((i) => i.path)).toStrictEqual([['q']]);
   });
@@ -100,10 +140,11 @@ describe('listStudiesQuerySchema', () => {
     ]);
   });
 
-  it('accepts only base64url cursors up to 512 characters', () => {
+  it('accepts only base64url cursors up to 2,048 characters', () => {
     expect(issuesOf({ cursor: 'a+b' })).toStrictEqual([
       { path: ['cursor'], message: LIBRARY_CURSOR_INVALID },
     ]);
-    expect(issuesOf({ cursor: 'a'.repeat(513) }).map((i) => i.path)).toStrictEqual([['cursor']]);
+    expect(issuesOf({ cursor: 'a'.repeat(2048) })).toStrictEqual([]);
+    expect(issuesOf({ cursor: 'a'.repeat(2049) }).map((i) => i.path)).toStrictEqual([['cursor']]);
   });
 });

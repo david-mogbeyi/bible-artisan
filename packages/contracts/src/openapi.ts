@@ -282,7 +282,7 @@ function buildDocument(): OpenApiDocument {
       '/studies': {
         get: {
           description:
-            "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z), ties broken by id. q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor works only for the same user, filters and sort, and anything else is 400. Trashed studies are never listed. No totals.",
+            "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. Trashed studies are never listed. No totals.",
           security: sessionCookie,
           parameters: [
             queryParam('q', false, {
@@ -301,6 +301,7 @@ function buildDocument(): OpenApiDocument {
               enum: [...STUDY_SORTS],
               default: 'recent',
             }),
+            queryParam('pinnedFirst', false, { type: 'boolean', default: true }),
             queryParam('cursor', false, {
               type: 'string',
               maxLength: MAX_LIBRARY_CURSOR_LENGTH,

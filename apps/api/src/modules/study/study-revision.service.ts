@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { studySearchText } from '@bible-artisan/contracts';
+import { studySearchText, studyTitleSortKey } from '@bible-artisan/contracts';
 import { Transaction } from 'sequelize';
 import { NotFoundError } from '../../common/errors/domain-errors';
 import { isResourceId } from '../../common/validation/resource-id';
@@ -131,9 +131,15 @@ export class StudyRevisionService {
     if (!(transaction instanceof Transaction)) {
       throw new Error('StudyRevisionService.create requires a transaction');
     }
-    // A new study has no description yet; its search text is its folded title (BIB-21).
+    // A new study has no description yet; its search text is its folded title, and its title
+    // sort key the same fold (BIB-21).
     const study = await Study.create(
-      { ...values, ownerId, searchText: studySearchText(values.title, null) },
+      {
+        ...values,
+        ownerId,
+        searchText: studySearchText(values.title, null),
+        titleSortKey: studyTitleSortKey(values.title),
+      },
       { transaction },
     );
     return new StudyLock(

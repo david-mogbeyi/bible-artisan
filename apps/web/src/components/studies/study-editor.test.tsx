@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { studyQueryKey } from '@/lib/studies';
+import { libraryQueryKey, studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { CONFLICT, RELOADED, TAG_ALREADY_ADDED } from './study-editor';
 import { StudyPage } from './study-page';
@@ -139,6 +139,51 @@ describe('StudyEditor', () => {
       screen.getByRole('heading', { level: 1, name: 'Conscience and the Spirit' }),
     ).toBeTruthy();
     expect(screen.getByText('Grace, holy spirit')).toBeTruthy();
+  });
+
+  it('leaves the cached library listings alone when an edit is refused', async () => {
+    const view = await openStudy();
+    const recent = libraryQueryKey({ sort: 'recent', pinnedFirst: false, limit: 3 });
+    const tagged = libraryQueryKey({ sort: 'recent', tagId: GRACE.id });
+    const stale = () =>
+      [recent, tagged].map((key) => view.queryClient.getQueryState(key)?.isInvalidated);
+    for (const key of [recent, tagged]) {
+      view.queryClient.setQueryData(key, { items: [], nextCursor: null });
+    }
+
+    // A conflict wrote nothing.
+    patchReplies.push(
+      jsonResponse(409, {
+        code: 'REVISION_CONFLICT',
+        message: 'x',
+        retryable: false,
+        correlationId: 'x',
+        currentRevision: 2,
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Pin study' }));
+    await screen.findByText(CONFLICT);
+    expect(stale()).toStrictEqual([false, false]);
+  });
+
+  it('marks the library stale when an edit commits', async () => {
+    const view = await openStudy();
+    const recent = libraryQueryKey({ sort: 'recent', pinnedFirst: false, limit: 3 });
+    const titled = libraryQueryKey({ sort: 'title' });
+    for (const key of [recent, titled]) {
+      view.queryClient.setQueryData(key, { items: [], nextCursor: null });
+    }
+    fireEvent.change(field('Title'), { target: { value: 'Conscience renamed' } });
+    patchReplies.push(
+      jsonResponse(200, edited({ title: 'Conscience renamed', revision: 2, contentRevision: 2 })),
+    );
+    fireEvent.click(save());
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    expect(
+      [recent, titled].map((key) => view.queryClient.getQueryState(key)?.isInvalidated),
+    ).toStrictEqual([true, true]);
+    // The study's own cache is updated in place, never thrown away.
+    expect(view.queryClient.getQueryState(studyQueryKey(STUDY_ID))?.isInvalidated).toBe(false);
   });
 
   it('keeps the save button focused and aria-disabled while saving, sending one request', async () => {

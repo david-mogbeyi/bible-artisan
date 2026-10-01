@@ -12,6 +12,7 @@ import {
   type UpdateStudyResponse,
   updateStudyResponseSchema,
 } from '@bible-artisan/contracts';
+import type { QueryClient } from '@tanstack/react-query';
 import { apiFetch } from './api-client';
 
 /**
@@ -69,12 +70,27 @@ export interface LibraryRequest {
   q?: string;
   tagId?: string;
   sort: StudySort;
+  /** `false`: one list in `sort` order, pins ignored (Home's recent studies). Default `true`. */
+  pinnedFirst?: boolean;
   limit?: number;
 }
 
+/** The prefix of every library listing (`/studies` and Home's recent studies). */
+const LIBRARY_QUERY_PREFIX = ['studies', 'library'] as const;
+
 /** Under `['studies']`, so anything that refreshes studies refreshes the library too. */
 export function libraryQueryKey(request: LibraryRequest) {
-  return ['studies', 'library', request] as const;
+  return [...LIBRARY_QUERY_PREFIX, request] as const;
+}
+
+/**
+ * After a study is created or an edit commits (BIB-21): every cached library listing (each
+ * search, filter and sort of `/studies`, and Home's recent studies) is stale, since titles, pins,
+ * tags and last activity order and fill them. Marks them all stale and refetches the ones on
+ * screen; the rest refetch when next shown. A single study's own cache is left to its editor.
+ */
+export function invalidateLibrary(queryClient: QueryClient): Promise<void> {
+  return queryClient.invalidateQueries({ queryKey: LIBRARY_QUERY_PREFIX });
 }
 
 /**
@@ -89,6 +105,7 @@ export function listStudies(
   const params = new URLSearchParams({ sort: request.sort });
   if (request.q !== undefined) params.set('q', request.q);
   if (request.tagId !== undefined) params.set('tag', request.tagId);
+  if (request.pinnedFirst === false) params.set('pinnedFirst', 'false');
   if (request.limit !== undefined) params.set('limit', String(request.limit));
   if (cursor !== null) params.set('cursor', cursor);
   return apiFetch(`/studies?${params.toString()}`, studyListResponseSchema);

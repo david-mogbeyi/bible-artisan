@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import {
   type CreateStudyResponse,
@@ -12,11 +12,14 @@ import {
   type StudySort,
   studySearchText,
   studySearchTokens,
+  studyTitleSortKey,
   tagKey,
 } from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import request, { type Response } from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { ENV } from '../src/config/config.module';
+import { cursorSecret, type Env } from '../src/config/env';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
@@ -24,6 +27,11 @@ import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 import { SessionService } from '../src/modules/identity/session.service';
+import {
+  encodeLibraryCursor,
+  type LibraryListing,
+  libraryCursorKey,
+} from '../src/modules/study/http/library-cursor';
 import { libraryQuery } from '../src/modules/study/http/study-library';
 import { createTestApp } from './app';
 import { envelope, UNAUTHENTICATED } from './support/envelopes';
@@ -43,6 +51,8 @@ interface Seeded {
   lastActivityAt: string;
   createdAt: string;
   tags: string[];
+  /** The tags as a list item shows them. */
+  tagItems: { id: string; name: string }[];
 }
 
 interface SeedSpec {
@@ -57,7 +67,6 @@ interface SeedSpec {
 }
 
 const LIBRARY = '/v1/studies';
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const anyCursor: unknown = expect.stringMatching(/^[A-Za-z0-9_-]+$/);
 
 const invalid = (fieldErrors: Record<string, string[]>) =>
@@ -71,20 +80,40 @@ const at = (minutes: number, micros = 0): string => {
   return `${new Date(base).toISOString().slice(0, 19)}.${String(micros).padStart(6, '0')}Z`;
 };
 
-/** The listing order: pinned first, then the sort within each group, ties by id. */
-function oracle(rows: Seeded[], sort: StudySort): Seeded[] {
-  const key = (row: Seeded): string =>
-    sort === 'recent' ? row.lastActivityAt : sort === 'created' ? row.createdAt : row.title;
+/** Code-point order, as PostgreSQL's `COLLATE "C"` compares UTF-8 bytes. */
+const byCodePoint = (a: string, b: string): number =>
+  Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+
+/**
+ * The listing order: pinned first (unless `pinnedFirst` is false), then the sort within each
+ * group, ties by id. Titles order by their fold in code-point order, never a database collation.
+ */
+function oracle(rows: Seeded[], sort: StudySort, pinnedFirst = true): Seeded[] {
   return [...rows].sort((a, b) => {
-    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-    const ka = key(a);
-    const kb = key(b);
-    const byKey = ka < kb ? -1 : ka > kb ? 1 : 0;
-    const byId = a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-    const order = byKey !== 0 ? byKey : byId;
+    if (pinnedFirst && a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    const byKey =
+      sort === 'title'
+        ? byCodePoint(studyTitleSortKey(a.title), studyTitleSortKey(b.title))
+        : byCodePoint(
+            sort === 'recent' ? a.lastActivityAt : a.createdAt,
+            sort === 'recent' ? b.lastActivityAt : b.createdAt,
+          );
+    const order = byKey !== 0 ? byKey : byCodePoint(a.id, b.id);
     return sort === 'title' ? order : -order;
   });
 }
+
+/** A seeded study as a list item (no starting passage: seeds carry none). */
+const itemOf = (row: Seeded): StudyListItem => ({
+  id: row.id,
+  title: row.title,
+  pinned: row.pinned,
+  lifecycle: row.lifecycle,
+  startingReference: null,
+  tags: row.tagItems,
+  lastActivityAt: new Date(row.lastActivityAt).toISOString(),
+  createdAt: new Date(row.createdAt).toISOString(),
+});
 
 /** Independent search oracle: every folded word occurs in the title, description or a tag. */
 function matches(row: Seeded, q: string): boolean {
@@ -100,6 +129,8 @@ function matches(row: Seeded, q: string): boolean {
 describe('study library (BIB-21)', () => {
   let app: INestApplication<Server>;
   let db: Database;
+  /** The running app's cursor key (the fixed development secret in tests). */
+  let cursorKey: Buffer;
   const userIds: string[] = [];
 
   async function signedInUser(): Promise<Owner> {
@@ -122,9 +153,9 @@ describe('study library (BIB-21)', () => {
       const lastActivityAt = spec.lastActivityAt ?? createdAt;
       const description = spec.description ?? null;
       const [row] = await db.query<{ id: string }>(
-        `INSERT INTO study (owner_id, title, description, search_text, lifecycle, pinned_at,
-                            created_at, updated_at, last_activity_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $7::timestamptz, $8::timestamptz)
+        `INSERT INTO study (owner_id, title, description, search_text, title_sort_key, lifecycle,
+                            pinned_at, created_at, updated_at, last_activity_at)
+         VALUES ($1, $2, $3, $4, $9, $5, $6, $7::timestamptz, $7::timestamptz, $8::timestamptz)
          RETURNING id`,
         {
           bind: [
@@ -136,21 +167,28 @@ describe('study library (BIB-21)', () => {
             spec.pinned ? createdAt : null,
             createdAt,
             lastActivityAt,
+            studyTitleSortKey(spec.title),
           ],
           type: QueryTypes.SELECT,
         },
       );
       if (!row) throw new Error('seed insert returned nothing');
+      const tagItems: { id: string; name: string }[] = [];
       for (const name of spec.tags ?? []) {
-        await db.query(
+        const [tag] = await db.query<{ id: string; name: string }>(
           `WITH t AS (
              INSERT INTO tag (owner_id, name, normalized_name) VALUES ($1, $2, $3)
              ON CONFLICT (owner_id, normalized_name) DO UPDATE SET name = tag.name
-             RETURNING id)
-           INSERT INTO study_tag (study_id, owner_id, tag_id) SELECT $4, $1, id FROM t`,
-          { bind: [owner.user.id, name, tagKey(name), row.id] },
+             RETURNING id, name)
+           , st AS (INSERT INTO study_tag (study_id, owner_id, tag_id) SELECT $4, $1, id FROM t)
+           SELECT id, name FROM t`,
+          { bind: [owner.user.id, name, tagKey(name), row.id], type: QueryTypes.SELECT },
         );
+        if (!tag) throw new Error('seed tag returned nothing');
+        tagItems.push(tag);
       }
+      // Seeds give a study at most one tag, or tags whose keys order the same in any collation.
+      tagItems.sort((a, b) => byCodePoint(tagKey(a.name), tagKey(b.name)));
       seeded.push({
         id: row.id,
         title: spec.title,
@@ -160,6 +198,7 @@ describe('study library (BIB-21)', () => {
         lastActivityAt,
         createdAt,
         tags: spec.tags ?? [],
+        tagItems,
       });
     }
     return seeded;
@@ -215,6 +254,7 @@ describe('study library (BIB-21)', () => {
   beforeAll(async () => {
     app = await createTestApp();
     db = app.get<Database>(DATABASE);
+    cursorKey = libraryCursorKey(cursorSecret(app.get<Env>(ENV)));
   });
 
   afterAll(async () => {
@@ -238,21 +278,7 @@ describe('study library (BIB-21)', () => {
 
       const own = await request(app.getHttpServer()).get('/v1/studies').set('Cookie', bob.cookie);
       expect(own.status).toBe(200);
-      expect(own.body).toStrictEqual({
-        items: [
-          {
-            id: bobStudy.id,
-            title: 'Psalms of ascent',
-            pinned: false,
-            lifecycle: 'active',
-            startingReference: null,
-            tags: [],
-            lastActivityAt: new Date(bobStudy.lastActivityAt).toISOString(),
-            createdAt: new Date(bobStudy.createdAt).toISOString(),
-          },
-        ],
-        nextCursor: null,
-      });
+      expect(own.body).toStrictEqual({ items: [itemOf(bobStudy)], nextCursor: null });
 
       // Alice's tag id, words from her titles and tags, and her archived state: nothing.
       for (const query of [
@@ -332,6 +358,8 @@ describe('study library (BIB-21)', () => {
         .expect(200);
       const study = read.body as StudyResponse;
 
+      const stored = await Study.findByPk(studyId, { rejectOnEmpty: true });
+
       const body = await page(owner);
       expect(body).toStrictEqual({
         items: [
@@ -342,7 +370,7 @@ describe('study library (BIB-21)', () => {
             lifecycle: 'active',
             startingReference: romans,
             tags: study.tags,
-            lastActivityAt: expect.any(String) as unknown,
+            lastActivityAt: stored.lastActivityAt.toISOString(),
             createdAt: study.createdAt,
           },
         ],
@@ -423,18 +451,80 @@ describe('study library (BIB-21)', () => {
       expect((await list(owner, { state: 'trashed' })).status).toBe(400);
     });
 
-    it('refuses a tampered cursor, or one issued for other filters, sort or state', async () => {
+    it('pinnedFirst=false lists every study in the sort, pins ignored, across pages', async () => {
+      for (const sort of ['recent', 'created', 'title'] as const) {
+        const expected = oracle(active(), sort, false);
+        // Pins really are interleaved, so this differs from the library's order.
+        expect(expected.map((row) => row.id)).not.toStrictEqual(
+          oracle(active(), sort).map((row) => row.id),
+        );
+        expect(await page(owner, { sort, pinnedFirst: 'false' })).toStrictEqual({
+          items: expected.map(itemOf),
+          nextCursor: null,
+        });
+        for (const limit of ['1', '3', '22']) {
+          expect(await traverse(owner, { sort, pinnedFirst: 'false', limit })).toStrictEqual(
+            expected.map((row) => row.id),
+          );
+        }
+      }
+      // Home's request: the three most recently active studies, whatever their pin.
+      expect(await page(owner, { sort: 'recent', pinnedFirst: 'false', limit: '3' })).toStrictEqual(
+        {
+          items: oracle(active(), 'recent', false).slice(0, 3).map(itemOf),
+          nextCursor: anyCursor,
+        },
+      );
+    });
+
+    it('refuses a tampered, truncated, foreign-key or legacy cursor, or one issued for other filters, sort, grouping or state', async () => {
       const first = await page(owner, { sort: 'recent', limit: '2' });
       const cursor = first.nextCursor ?? '';
-      const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[];
-      const forged = (value: unknown[]) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      const bytes = Buffer.from(cursor, 'base64url');
+      const flipped = (index: number): string => {
+        const copy = Buffer.from(bytes);
+        copy[index] = (copy[index] ?? 0) ^ 0x01;
+        return copy.toString('base64url');
+      };
+      const second = first.items[1];
+      if (!second) throw new Error('expected two studies');
+      const listing: LibraryListing = {
+        ownerId: owner.user.id,
+        state: 'active',
+        sort: 'recent',
+        pinnedFirst: true,
+        tag: null,
+        tokens: [],
+      };
+      const position = {
+        pinned: second.pinned,
+        key: (await storedActivity(second.id)) + 'Z',
+        id: second.id,
+      };
+      // The same position, sealed by this server, is accepted: the refusals below are the tamper.
+      expect(
+        (
+          await list(owner, {
+            sort: 'recent',
+            limit: '2',
+            cursor: encodeLibraryCursor(cursorKey, listing, position),
+          })
+        ).status,
+      ).toBe(200);
       const tampered = [
         'not-a-cursor',
-        forged([...decoded.slice(0, 4), randomUUID().toUpperCase().replace(/-/g, '')]),
-        forged([decoded[0], 'x'.repeat(22), ...decoded.slice(2)]),
-        forged([2, ...decoded.slice(1)]),
-        forged([...decoded.slice(0, 3), '2026-01-01T00:00:00Z', decoded[4]]),
-        forged([...decoded.slice(0, 2), 2, ...decoded.slice(3)]),
+        flipped(0), // version
+        flipped(5), // IV
+        flipped(20), // ciphertext
+        flipped(bytes.length - 1), // authentication tag
+        bytes.subarray(0, bytes.length - 1).toString('base64url'),
+        bytes.subarray(0, 20).toString('base64url'),
+        // Sealed with another server's secret.
+        encodeLibraryCursor(libraryCursorKey(randomBytes(32)), listing, position),
+        // The pre-encryption format: readable JSON with a fingerprint.
+        Buffer.from(JSON.stringify([1, 'x'.repeat(22), 0, position.key, position.id])).toString(
+          'base64url',
+        ),
       ];
       for (const bad of tampered) {
         const res = await list(owner, { sort: 'recent', limit: '2', cursor: bad });
@@ -444,6 +534,7 @@ describe('study library (BIB-21)', () => {
       const others: Record<string, string>[] = [
         { sort: 'created', limit: '2' },
         { sort: 'title', limit: '2' },
+        { sort: 'recent', limit: '2', pinnedFirst: 'false' },
         { sort: 'recent', limit: '2', state: 'archived' },
         { sort: 'recent', limit: '2', q: 'cherry' },
         { sort: 'recent', limit: '2', tag: randomUUID() },
@@ -457,19 +548,188 @@ describe('study library (BIB-21)', () => {
       expect((await list(owner, { sort: 'recent', limit: '3', cursor })).status).toBe(200);
     });
 
-    it('carries no title in a title cursor, and refuses one whose anchor study is gone', async () => {
+    it('seals the cursor: no title, sort key or search word appears in it in any encoding', async () => {
       const temp = await signedInUser();
-      await seed(temp, [{ title: 'alpha secret' }, { title: 'beta secret' }, { title: 'gamma' }]);
-      const first = await page(temp, { sort: 'title', limit: '1' });
+      await seed(temp, [
+        { title: 'Zerubbabel Hiddenword one', description: 'Melchizedek priesthood' },
+        { title: 'Zerubbabel Hiddenword two', description: 'Melchizedek priesthood' },
+        { title: 'Zerubbabel Hiddenword three', description: 'Melchizedek priesthood' },
+      ]);
+      const first = await page(temp, { sort: 'title', limit: '1', q: 'melchizedek hiddenword' });
       const cursor = first.nextCursor ?? '';
-      expect(Buffer.from(cursor, 'base64url').toString('utf8')).not.toContain('secret');
-      expect((await page(temp, { sort: 'title', limit: '1', cursor })).items[0]?.title).toBe(
-        'beta secret',
+      expect(cursor).toMatch(/^[A-Za-z0-9_-]+$/);
+      const raw = Buffer.from(cursor, 'base64url');
+      const needles = [
+        'Zerubbabel',
+        'zerubbabel hiddenword one',
+        studyTitleSortKey('Zerubbabel Hiddenword one'),
+        'melchizedek',
+        'hiddenword',
+      ];
+      for (const needle of needles) {
+        for (const encoding of ['utf8', 'utf16le', 'latin1'] as const) {
+          expect(raw.includes(Buffer.from(needle, encoding))).toBe(false);
+          expect(raw.includes(Buffer.from(needle.toUpperCase(), encoding))).toBe(false);
+        }
+        const text = cursor.toLowerCase();
+        expect(text.includes(needle.toLowerCase())).toBe(false);
+        expect(text.includes(Buffer.from(needle).toString('hex'))).toBe(false);
+        // Base64 at each of the three byte alignments (the stable middle of each encoding).
+        for (const shift of [0, 1, 2]) {
+          const padded = Buffer.concat([Buffer.alloc(shift), Buffer.from(needle)]);
+          for (const form of ['base64', 'base64url'] as const) {
+            const encoded = padded.toString(form).slice(4, -4);
+            expect(cursor.includes(encoded)).toBe(false);
+          }
+        }
+      }
+      // Each issued cursor is freshly sealed: the same page twice gives different bytes.
+      const again = await page(temp, { sort: 'title', limit: '1', q: 'melchizedek hiddenword' });
+      expect(again.nextCursor).not.toBe(cursor);
+      expect(
+        await page(temp, { sort: 'title', limit: '1', q: 'melchizedek hiddenword', cursor }),
+      ).toStrictEqual({
+        items: [expect.objectContaining({ title: 'Zerubbabel Hiddenword three' })],
+        nextCursor: anyCursor,
+      });
+    });
+
+    it('keeps its place when the anchor study is renamed, unpinned or deleted between pages: no unchanged study is skipped or repeated', async () => {
+      const temp = await signedInUser();
+      const names = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf'];
+      const rows = await seed(
+        temp,
+        names.map((title, i) => ({ title, pinned: i === 1 })),
       );
-      await Study.destroy({ where: { id: first.items[0]?.id ?? '' } });
-      const res = await list(temp, { sort: 'title', limit: '1', cursor });
-      expect(res.status).toBe(400);
-      expect(res.body).toStrictEqual(INVALID_CURSOR);
+      const byTitle = new Map(rows.map((row) => [row.title, row]));
+      const rename = async (title: string, to: string) => {
+        const study = byTitle.get(title);
+        if (!study) throw new Error('no such study');
+        const read = await request(app.getHttpServer())
+          .get(`${LIBRARY}/${study.id}`)
+          .set('Cookie', temp.cookie)
+          .expect(200);
+        await request(app.getHttpServer())
+          .patch(`${LIBRARY}/${study.id}`)
+          .set('Cookie', temp.cookie)
+          .send({ expectedRevision: (read.body as StudyResponse).revision, title: to })
+          .expect(200);
+      };
+      const rest = async (query: Record<string, string>, cursor: string): Promise<string[]> => {
+        const ids: string[] = [];
+        let next: string | null = cursor;
+        while (next !== null) {
+          const body = await page(temp, { ...query, cursor: next });
+          ids.push(...body.items.map((item) => item.title));
+          next = body.nextCursor;
+        }
+        return ids;
+      };
+      const query = { sort: 'title', pinnedFirst: 'false', limit: '2' };
+
+      // Renamed past the cursor: the rest still starts at charlie, and the anchor shows up once
+      // more at its new place (it changed; nothing that did not change repeats or goes missing).
+      const one = await page(temp, query);
+      expect(one.items.map((item) => item.title)).toStrictEqual(['alpha', 'bravo']);
+      await rename('bravo', 'zulu');
+      expect(await rest(query, one.nextCursor ?? '')).toStrictEqual([
+        'charlie',
+        'delta',
+        'echo',
+        'foxtrot',
+        'golf',
+        'zulu',
+      ]);
+
+      // Renamed before the cursor, then deleted: the next pages are unaffected.
+      const two = await page(temp, { ...query, limit: '3' });
+      expect(two.items.map((item) => item.title)).toStrictEqual(['alpha', 'charlie', 'delta']);
+      await rename('delta', 'aardvark');
+      expect(await rest({ ...query, limit: '3' }, two.nextCursor ?? '')).toStrictEqual([
+        'echo',
+        'foxtrot',
+        'golf',
+        'zulu',
+      ]);
+      const three = await page(temp, { ...query, limit: '3' });
+      expect(three.items.map((item) => item.title)).toStrictEqual(['aardvark', 'alpha', 'charlie']);
+      await Study.destroy({ where: { id: byTitle.get('charlie')?.id ?? '' } });
+      expect(await rest({ ...query, limit: '3' }, three.nextCursor ?? '')).toStrictEqual([
+        'echo',
+        'foxtrot',
+        'golf',
+        'zulu',
+      ]);
+
+      // Pinned first: the anchor (the pinned "zulu", once "bravo") is unpinned between pages.
+      const pinnedFirst = { sort: 'title', limit: '1' };
+      const four = await page(temp, pinnedFirst);
+      expect(four.items.map((item) => [item.title, item.pinned])).toStrictEqual([['zulu', true]]);
+      const zulu = byTitle.get('bravo');
+      const read = await request(app.getHttpServer())
+        .get(`${LIBRARY}/${zulu?.id ?? ''}`)
+        .set('Cookie', temp.cookie)
+        .expect(200);
+      await request(app.getHttpServer())
+        .patch(`${LIBRARY}/${zulu?.id ?? ''}`)
+        .set('Cookie', temp.cookie)
+        .send({ expectedRevision: (read.body as StudyResponse).revision, pinned: false })
+        .expect(200);
+      expect(await rest(pinnedFirst, four.nextCursor ?? '')).toStrictEqual([
+        'aardvark',
+        'alpha',
+        'echo',
+        'foxtrot',
+        'golf',
+        'zulu',
+      ]);
+    });
+
+    it('orders titles by their case fold in code-point order, whatever the database collation', async () => {
+      const temp = await signedInUser();
+      const titles = [
+        'Banana',
+        'éclair',
+        'apple',
+        'Zeal',
+        'ΑΣΤΗΡ',
+        'ας',
+        'Apple pie',
+        'ab',
+        'a-c',
+        'fig',
+      ];
+      const rows = await seed(
+        temp,
+        titles.map((title) => ({ title })),
+      );
+      const expected = [
+        'a-c',
+        'ab',
+        'apple',
+        'Apple pie',
+        'Banana',
+        'fig',
+        'Zeal',
+        'éclair',
+        'ας',
+        'ΑΣΤΗΡ',
+      ];
+      expect(oracle(rows, 'title').map((row) => row.title)).toStrictEqual(expected);
+      const body = await page(temp, { sort: 'title' });
+      expect(body).toStrictEqual({ items: oracle(rows, 'title').map(itemOf), nextCursor: null });
+      expect(await traverse(temp, { sort: 'title', limit: '3' })).toStrictEqual(
+        oracle(rows, 'title').map((row) => row.id),
+      );
+      // The same order as an explicit COLLATE "C" over the stored fold, which no database
+      // default collation can change; and the stored fold is the API's.
+      const sql = await db.query<{ id: string; key: string }>(
+        `SELECT id, title_sort_key AS key FROM study WHERE owner_id = $1
+          ORDER BY title_sort_key COLLATE "C", id`,
+        { bind: [temp.user.id], type: QueryTypes.SELECT },
+      );
+      expect(sql.map((row) => row.id)).toStrictEqual(body.items.map((item) => item.id));
+      expect(sql.map((row) => row.key)).toStrictEqual(expected.map(studyTitleSortKey));
     });
 
     it('bounds limit to 1..50 and refuses unknown or malformed parameters', async () => {
@@ -515,11 +775,26 @@ describe('study library (BIB-21)', () => {
         { title: 'Straße to Damascus' },
         { title: 'Plain study', description: 'Nothing special' },
         { title: 'Tagged only', tags: ['Grace alone'] },
+        { title: 'ΑΣΤΗΡ in Matthew' },
+        { title: 'The name', tags: ['Ἰησοῦς'] },
       ]);
     });
 
-    const titlesFor = async (q: string): Promise<string[]> =>
-      (await page(owner, { q, sort: 'title' })).items.map((item) => item.title).sort();
+    /**
+     * Searches, asserts the whole response against the oracle (every matching study, as a list
+     * item, in title order, one page), and returns the matched titles for readable spot checks.
+     */
+    const titlesFor = async (q: string): Promise<string[]> => {
+      const body = await page(owner, { q, sort: 'title' });
+      expect(body).toStrictEqual({
+        items: oracle(
+          rows.filter((row) => matches(row, q)),
+          'title',
+        ).map(itemOf),
+        nextCursor: null,
+      });
+      return body.items.map((item) => item.title).sort();
+    };
     const expectedFor = (q: string): string[] =>
       rows
         .filter((row) => matches(row, q))
@@ -534,6 +809,16 @@ describe('study library (BIB-21)', () => {
       expect(await titlesFor('conscience special')).toStrictEqual([]);
       expect(await titlesFor('strasse')).toStrictEqual(['Straße to Damascus']);
       expect(await titlesFor(fullWidth('GRACE'))).toStrictEqual(expectedFor('grace'));
+    });
+
+    it('folds Greek sigma the same in a fragment as in the word it is part of', async () => {
+      expect(await titlesFor('ΑΣ')).toStrictEqual(['ΑΣΤΗΡ in Matthew']);
+      expect(await titlesFor('ας')).toStrictEqual(['ΑΣΤΗΡ in Matthew']);
+      expect(await titlesFor('αστηρ')).toStrictEqual(['ΑΣΤΗΡ in Matthew']);
+      // A tag's final sigma, matched by a fragment ending mid-word and by the capitalized word.
+      expect(await titlesFor('ΗΣΟῦΣ')).toStrictEqual(['The name']);
+      expect(await titlesFor('ἸΗΣ')).toStrictEqual(['The name']);
+      expect(await titlesFor('οῦς')).toStrictEqual(['The name']);
     });
 
     it('treats wildcards, operators, quotes and backslashes as literal characters', async () => {
@@ -638,56 +923,216 @@ describe('study library (BIB-21)', () => {
         .expect(200);
       expect(await ids('philemon')).toStrictEqual([]);
       const stored = await Study.findByPk(studyId, { rejectOnEmpty: true });
-      expect(stored.searchText).toBe(studySearchText('Renamed Study', null));
+      expect([stored.searchText, stored.titleSortKey]).toStrictEqual([
+        studySearchText('Renamed Study', null),
+        studyTitleSortKey('Renamed Study'),
+      ]);
+      // Creation writes the title sort key too.
+      const fresh = await request(app.getHttpServer())
+        .post(LIBRARY)
+        .set('Cookie', owner.cookie)
+        .send({ title: 'ΛΌΓΟΣ First', blank: true })
+        .expect(201);
+      const freshStudy = await Study.findByPk((fresh.body as CreateStudyResponse).studyId, {
+        rejectOnEmpty: true,
+      });
+      expect(freshStudy.titleSortKey).toBe('λόγοσ first');
+    });
+
+    it('one Greek tag, whatever its sigma form or case, across studies', async () => {
+      const owner = await signedInUser();
+      const tagged: string[] = [];
+      for (const [title, tag] of [
+        ['First', 'Λόγος'],
+        ['Second', 'ΛΌΓΟΣ'],
+        ['Third', 'λόγοσ'],
+      ] as const) {
+        const created = await request(app.getHttpServer())
+          .post(LIBRARY)
+          .set('Cookie', owner.cookie)
+          .send({ title, blank: true })
+          .expect(201);
+        const { studyId } = created.body as CreateStudyResponse;
+        await request(app.getHttpServer())
+          .patch(`${LIBRARY}/${studyId}`)
+          .set('Cookie', owner.cookie)
+          .send({ expectedRevision: 1, tags: { add: [tag] } })
+          .expect(200);
+        tagged.push(studyId);
+      }
+      const tags = await db.query<{ name: string; key: string }>(
+        `SELECT name, normalized_name AS key FROM tag WHERE owner_id = $1`,
+        { bind: [owner.user.id], type: QueryTypes.SELECT },
+      );
+      // The first spelling names the one tag; its key holds no final sigma.
+      expect(tags).toStrictEqual([{ name: 'Λόγος', key: 'λόγοσ' }]);
+      const tagIdRow = await tagId(owner, 'λόγος');
+      expect(
+        (await page(owner, { tag: tagIdRow, sort: 'title' })).items.map((item) => item.id),
+      ).toStrictEqual(tagged);
     });
   });
 
   describe('performance', () => {
-    it("uses the owner's library index for the default listing among 20,000 studies", async () => {
-      // Ten owners with 2,000 studies each: the target owner holds about a tenth of the table, as
-      // in a real deployment. (With only two owners, half the table matches the owner, and the
-      // planner rightly prefers a sequential scan and sort.)
-      const big = await signedInUser();
+    interface PlanNode {
+      'Node Type': string;
+      'Relation Name'?: string;
+      'Index Name'?: string;
+      'Index Cond'?: string;
+      'Actual Rows'?: number;
+      Plans?: PlanNode[];
+    }
+    /** Every plan node, depth first. */
+    const nodesOf = (node: PlanNode): PlanNode[] => [node, ...(node.Plans ?? []).flatMap(nodesOf)];
+    const SORT_SQL: Record<StudySort, { value: string; order: string }> = {
+      recent: {
+        value: `to_char(last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+        order: 'last_activity_at DESC, id DESC',
+      },
+      created: {
+        value: `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+        order: 'created_at DESC, id DESC',
+      },
+      title: { value: 'title_sort_key', order: 'title_sort_key COLLATE "C", id' },
+    };
+
+    let big: Owner;
+    beforeAll(async () => {
+      // One owner with 5,000 studies (every 50th pinned: 100 pinned) among nine others with 2,000
+      // each, so deep pages exist and the target owner is a realistic share of the table.
+      big = await signedInUser();
       const others = await Promise.all(Array.from({ length: 9 }, () => signedInUser()));
-      for (const owner of [big, ...others]) {
+      for (const [owner, count] of [
+        [big, 5000],
+        ...others.map((other) => [other, 2000] as const),
+      ] as const) {
         await db.query(
-          `INSERT INTO study (owner_id, title, search_text, pinned_at, created_at, updated_at,
-                              last_activity_at)
-           SELECT $1, 'Study ' || g, 'study ' || g,
+          `INSERT INTO study (owner_id, title, search_text, title_sort_key, pinned_at, created_at,
+                              updated_at, last_activity_at)
+           SELECT $1, 'Study ' || g, 'study ' || g, 'study ' || g,
                   CASE WHEN g % 50 = 0 THEN now() END,
                   now() - g * interval '1 minute', now(), now() - g * interval '1 second'
-             FROM generate_series(1, 2000) g`,
-          { bind: [owner.user.id] },
+             FROM generate_series(1, $2::int) g`,
+          { bind: [owner.user.id, count] },
         );
       }
       await db.query('ANALYZE study');
-      const listing = {
-        ownerId: big.user.id,
-        state: 'active' as const,
-        sort: 'recent' as const,
-        tag: null,
-        tokens: [],
-      };
-      const explain = async (query: { sql: string; bind: unknown[] }) =>
-        JSON.stringify(
-          await db.query(`EXPLAIN (FORMAT JSON) ${query.sql}`, {
-            bind: query.bind,
-            type: QueryTypes.SELECT,
-          }),
-        );
-      expect(await explain(libraryQuery(listing, null, 51))).toContain(
-        'study_owner_library_recent_idx',
+    }, 60_000);
+
+    /** The owner's listing from `offset` on, by an independent OFFSET query over stored rows. */
+    async function stored(sort: StudySort, offset: number, limit: number) {
+      return db.query<{
+        id: string;
+        title: string;
+        pinned: boolean;
+        key: string;
+        lastActivityAt: Date;
+        createdAt: Date;
+      }>(
+        `SELECT id, title, is_pinned AS pinned, ${SORT_SQL[sort].value} AS key,
+                last_activity_at AS "lastActivityAt", created_at AS "createdAt"
+           FROM study WHERE owner_id = $1 AND lifecycle = 'active'
+          ORDER BY is_pinned DESC, ${SORT_SQL[sort].order}
+         OFFSET $2 LIMIT $3`,
+        { bind: [big.user.id, offset, limit], type: QueryTypes.SELECT },
       );
-      const first = await page(big, {});
-      expect(first.items.length).toBe(50);
-      // Every 50th study is pinned: 40 pinned first, then the most recent unpinned.
-      expect(first.items.map((item) => item.pinned)).toStrictEqual([
-        ...Array<boolean>(40).fill(true),
-        ...Array<boolean>(10).fill(false),
-      ]);
-      const second = await page(big, { cursor: first.nextCursor ?? '' });
-      expect(second.items.length).toBe(50);
-      expect(UUID.test(second.items[0]?.id ?? '')).toBe(true);
+    }
+
+    it.each([
+      ['recent', 4000],
+      ['created', 4000],
+      ['title', 4000],
+      ['recent', 40],
+      ['title', 40],
+    ] as const)(
+      'sort=%s seeks a deep page (after row %i) with an index range per pin group, reading only that page',
+      async (sort, offset) => {
+        const listing: LibraryListing = {
+          ownerId: big.user.id,
+          state: 'active',
+          sort,
+          pinnedFirst: true,
+          tag: null,
+          tokens: [],
+        };
+        const [anchor] = await stored(sort, offset - 1, 1);
+        if (!anchor) throw new Error('no anchor row');
+        const position = { pinned: anchor.pinned, key: anchor.key, id: anchor.id };
+        // Row 40 is in the pinned group (100 pinned studies), row 4,000 deep in the unpinned one.
+        expect(anchor.pinned).toBe(offset < 100);
+
+        const query = libraryQuery(listing, position, 51);
+        const [result] = await db.query<{
+          'QUERY PLAN': [{ Plan: PlanNode; 'Execution Time': number }];
+        }>(`EXPLAIN (ANALYZE, FORMAT JSON) ${query.sql}`, {
+          bind: query.bind,
+          type: QueryTypes.SELECT,
+        });
+        const plan = result?.['QUERY PLAN'][0];
+        if (!plan) throw new Error('no plan');
+        const nodes = nodesOf(plan.Plan);
+        const indexed = nodes.filter((node) => node['Index Name'] !== undefined);
+        expect(nodes.filter((node) => node['Node Type'] === 'Seq Scan')).toStrictEqual([]);
+        // Every read of the table goes through this sort's index...
+        expect(new Set(indexed.map((node) => node['Index Name']))).toStrictEqual(
+          new Set([`study_owner_library_${sort}_idx`]),
+        );
+        // ...and the cursor is the index range's start condition, not a filter over earlier rows.
+        expect(indexed[0]?.['Index Cond']).toMatch(/is_pinned = (true|false)\) AND \(ROW\(/);
+        if (anchor.pinned) {
+          // Pinned cursor: the pinned group seeks from the cursor (an index or bitmap scan, as
+          // the planner likes for a few dozen rows), the unpinned group starts at its top.
+          expect(indexed).toHaveLength(2);
+        } else {
+          // Deep unpinned cursor: the finished pinned group is not read at all, and the one
+          // ordered index scan stops after the page (plus one): no earlier row is read.
+          expect(indexed.map((node) => [node['Node Type'], node['Actual Rows']])).toStrictEqual([
+            ['Index Scan', 51],
+          ]);
+        }
+        process.stdout.write(
+          `[BIB-21] library sort=${sort} page after row ${offset}: ${plan['Execution Time'].toFixed(3)} ms\n`,
+        );
+
+        // Through the API, the same position gives exactly the next stored rows.
+        const expected = await stored(sort, offset, 51);
+        const body = await page(big, {
+          sort,
+          cursor: encodeLibraryCursor(cursorKey, listing, position),
+        });
+        expect(body).toStrictEqual({
+          items: expected.slice(0, 50).map((row) => ({
+            id: row.id,
+            title: row.title,
+            pinned: row.pinned,
+            lifecycle: 'active',
+            startingReference: null,
+            tags: [],
+            lastActivityAt: row.lastActivityAt.toISOString(),
+            createdAt: row.createdAt.toISOString(),
+          })),
+          nextCursor: anyCursor,
+        });
+      },
+    );
+
+    it('lists the first page pinned first, as stored', async () => {
+      const expected = await stored('recent', 0, 50);
+      // Every 50th study is pinned: the 100 pinned fill the first page.
+      expect(expected.every((row) => row.pinned)).toBe(true);
+      expect(await page(big, {})).toStrictEqual({
+        items: expected.map((row) => ({
+          id: row.id,
+          title: row.title,
+          pinned: true,
+          lifecycle: 'active',
+          startingReference: null,
+          tags: [],
+          lastActivityAt: row.lastActivityAt.toISOString(),
+          createdAt: row.createdAt.toISOString(),
+        })),
+        nextCursor: anyCursor,
+      });
     });
   });
 });

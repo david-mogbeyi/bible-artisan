@@ -3,13 +3,16 @@ import { CORRELATION_ID_HEADER, IDEMPOTENT_REPLAYED_HEADER } from '@bible-artisa
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { requireJsonBody } from './common/http/require-json-body';
 import { requireTrustedOrigin } from './common/http/require-trusted-origin';
-import { httpAllowedOrigins, type Env } from './config/env';
+import { cursorSecret, httpAllowedOrigins, type Env } from './config/env';
 import { requestLogging } from './modules/observability/request-logging';
 
 /** Shared HTTP setup so the running server and integration tests behave identically. */
 export function configureApp(app: INestApplication, env: Env): INestApplication {
   // Throws in production when CORS_ALLOWED_ORIGINS is unset, so the API never listens without it.
   const allowedOrigins = httpAllowedOrigins(env);
+  // Throws in production when CURSOR_SECRET is unset: library cursors are never sealed with the
+  // public development secret (BIB-21).
+  cursorSecret(env);
   app.setGlobalPrefix('v1');
   // Observability (BIB-13) goes FIRST: every request gets its correlation ID (and the
   // X-Correlation-Id response header) and exactly one allowlisted access log line, including

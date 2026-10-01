@@ -125,6 +125,12 @@ describe('Study library', () => {
       expect(screen.queryByRole('link', { name: 'Conscience in Romans' })).toBeNull(),
     );
     expect(params(1)).toStrictEqual({ sort: 'recent', q: 'grace' });
+    // The results are announced through the page's one polite status region.
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('Search results: 1 study.'),
+    );
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('status').getAttribute('aria-live') ?? 'polite').toBe('polite');
     expect(window.location.href).toBe(before);
     expect(JSON.stringify({ ...localStorage })).not.toContain('grace');
   });
@@ -139,10 +145,22 @@ describe('Study library', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     expect(await screen.findByText('No studies match.')).toBeTruthy();
     expect(screen.queryByText('No studies yet.')).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('Search results: no studies match.'),
+    );
 
+    // The empty state's Clear filters goes away with the filters: focus moves to the search
+    // field, never to the page body, and the restored list is announced.
     replies.push(pageOf([PINNED, OTHER]));
-    fireEvent.click(screen.getAllByRole('button', { name: 'Clear filters' })[0] as HTMLElement);
+    const results = screen.getByRole('region', { name: 'Studies' });
+    fireEvent.click(within(results).getByRole('button', { name: 'Clear filters' }));
     await screen.findByRole('link', { name: 'Grace alone' });
+    expect(document.activeElement).toBe(
+      screen.getByLabelText('Search titles, descriptions and tags'),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('Filters cleared: 2 studies.'),
+    );
     expect(params(2)).toStrictEqual({ sort: 'recent' });
     expect(
       screen.getByLabelText<HTMLInputElement>('Search titles, descriptions and tags').value,
@@ -180,10 +198,22 @@ describe('Study library', () => {
     expect(await screen.findByText('Tag: Witness')).toBeTruthy();
     await waitFor(() => expect(params(1)).toStrictEqual({ sort: 'recent', tag: WITNESS.id }));
     await waitFor(() => expect(screen.queryByRole('link', { name: 'Grace alone' })).toBeNull());
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('Studies tagged Witness: 1 study.'),
+    );
 
+    // The button disappears with the filter, so focus moves to the search field.
+    replies.push(pageOf([PINNED, OTHER]));
     fireEvent.click(screen.getByRole('button', { name: 'Clear tag filter' }));
     await screen.findByRole('link', { name: 'Grace alone' });
     expect(screen.queryByText('Tag: Witness')).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByLabelText('Search titles, descriptions and tags'),
+    );
+    expect(document.activeElement).not.toBe(document.body);
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('Tag filter cleared: 2 studies.'),
+    );
   });
 
   it('changes the sort through a labelled select', async () => {
@@ -192,6 +222,9 @@ describe('Study library', () => {
     replies.push(pageOf([OTHER, PINNED]));
     fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'title' } });
     await waitFor(() => expect(params(1)).toStrictEqual({ sort: 'title' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('Sorted by Title: 2 studies.'),
+    );
   });
 
   it('refuses an over-wordy search inline without asking the API', async () => {
@@ -200,7 +233,11 @@ describe('Study library', () => {
     const box = screen.getByLabelText('Search titles, descriptions and tags');
     fireEvent.change(box, { target: { value: 'a b c d e f g h i j k' } });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
-    expect(await screen.findByText('Search for at most 10 words')).toBeTruthy();
+    // Announced as an alert, with focus back on the field, which points at the message.
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Search for at most 10 words');
+    expect(document.activeElement).toBe(box);
+    expect(box.getAttribute('aria-describedby')).toBe(alert.id);
     expect(box.getAttribute('aria-invalid')).toBe('true');
     expect(requests).toHaveLength(1);
   });

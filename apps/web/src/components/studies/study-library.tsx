@@ -41,6 +41,12 @@ interface Filters {
   sort: StudySort;
 }
 
+/** What the status region says once a new listing has loaded: "<what changed>: <results>". */
+function resultsSummary(count: number, more: boolean, filtered: boolean): string {
+  if (count === 0) return filtered ? 'no studies match.' : 'no studies yet.';
+  return `${count} ${count === 1 ? 'study' : 'studies'}${more ? ', more available' : ''}.`;
+}
+
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
@@ -64,7 +70,17 @@ function StudyLibrary() {
   const [input, setInput] = useState('');
   const [inputError, setInputError] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({ q: null, tag: null, sort: 'recent' });
+  // The page's one polite status region: results after a search, filter or sort change, and
+  // Load more. Search errors go to their own alert region next to the field.
   const [announcement, setAnnouncement] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+  // Set when the listing changes on request; announced (with the results) once it has loaded.
+  const pendingResults = useRef<string | null>(null);
+  const [listingChanges, setListingChanges] = useState(0);
+  const announceResults = (what: string) => {
+    pendingResults.current = what;
+    setListingChanges((n) => n + 1);
+  };
   // When the last page arrives, Load more disappears; focus moves to the first study it added,
   // so a keyboard user is not left on the page body.
   const focusStudyId = useRef<string | null>(null);
@@ -96,11 +112,22 @@ function StudyLibrary() {
   });
 
   const filtered = filters.q !== null || filters.tag !== null;
+  /**
+   * Clears the search and tag filter. The buttons that call this disappear with the filters, so
+   * focus moves to the search field rather than falling to the page body.
+   */
   const clearFilters = () => {
     setInput('');
     setInputError(null);
     setFilters((current) => ({ ...current, q: null, tag: null }));
-    setAnnouncement('Filters cleared.');
+    announceResults('Filters cleared');
+    searchRef.current?.focus();
+  };
+
+  /** A search the API would refuse: said at once (alert region) with focus on the field. */
+  const refuseSearch = (message: string) => {
+    setInputError(message);
+    searchRef.current?.focus();
   };
 
   const submit = (event: FormEvent) => {
@@ -113,14 +140,15 @@ function StudyLibrary() {
       return;
     }
     if (hasForbiddenUserTextCharacter(text)) {
-      setInputError(USER_TEXT_INVALID_CHARACTERS);
+      refuseSearch(USER_TEXT_INVALID_CHARACTERS);
       return;
     }
     if (studySearchTokens(text).length > MAX_LIBRARY_QUERY_TOKENS) {
-      setInputError(LIBRARY_QUERY_TOO_MANY_WORDS);
+      refuseSearch(LIBRARY_QUERY_TOO_MANY_WORDS);
       return;
     }
     setFilters((current) => ({ ...current, q: text }));
+    announceResults('Search results');
   };
 
   const loadMore = async () => {
@@ -145,11 +173,32 @@ function StudyLibrary() {
   useEffect(focusPendingStudy, [list.data]);
 
   const items = list.data?.pages.flatMap((page) => page.items) ?? [];
+
+  // Once the requested listing is on screen (its own results, cached or fresh, not the previous
+  // ones kept while it loads), say what it holds. A failed load is reported by its own alert.
+  useEffect(() => {
+    const what = pendingResults.current;
+    if (what === null) return;
+    if (list.data && !list.isPlaceholderData) {
+      pendingResults.current = null;
+      setAnnouncement(`${what}: ${resultsSummary(items.length, list.hasNextPage, filtered)}`);
+    } else if (list.isError) {
+      pendingResults.current = null;
+    }
+  }, [
+    list.data,
+    list.isPlaceholderData,
+    list.isError,
+    list.hasNextPage,
+    items.length,
+    filtered,
+    listingChanges,
+  ]);
   const pinned = items.filter((item) => item.pinned);
   const others = items.filter((item) => !item.pinned);
   const filterByTag = (tag: { id: string; name: string }) => {
     setFilters((current) => ({ ...current, tag }));
-    setAnnouncement(`Showing studies tagged ${tag.name}.`);
+    announceResults(`Studies tagged ${tag.name}`);
   };
 
   return (
@@ -171,6 +220,7 @@ function StudyLibrary() {
           <label htmlFor={inputId}>Search titles, descriptions and tags</label>
           <div className="flex flex-wrap gap-2">
             <input
+              ref={searchRef}
               id={inputId}
               type="search"
               value={input}
@@ -185,8 +235,9 @@ function StudyLibrary() {
               Search
             </button>
           </div>
+          {/* An alert, announced as it appears; the field (focused) points to it as well. */}
           {inputError ? (
-            <p id={errorId} className="text-ink">
+            <p id={errorId} role="alert" className="text-ink">
               {inputError}
             </p>
           ) : null}
@@ -196,9 +247,11 @@ function StudyLibrary() {
           <select
             id={sortId}
             value={filters.sort}
-            onChange={(event) =>
-              setFilters((current) => ({ ...current, sort: event.target.value as StudySort }))
-            }
+            onChange={(event) => {
+              const sort = event.target.value as StudySort;
+              setFilters((current) => ({ ...current, sort }));
+              announceResults(`Sorted by ${SORT_LABELS[sort]}`);
+            }}
             className="rounded border border-muted bg-canvas px-2 py-1"
           >
             {(Object.keys(SORT_LABELS) as StudySort[]).map((sort) => (
@@ -214,7 +267,9 @@ function StudyLibrary() {
                 type="button"
                 onClick={() => {
                   setFilters((current) => ({ ...current, tag: null }));
-                  setAnnouncement('Tag filter cleared.');
+                  announceResults('Tag filter cleared');
+                  // The button goes away with the filter: keep focus in the search controls.
+                  searchRef.current?.focus();
                 }}
                 className="rounded border border-accent px-2 py-0.5 text-accent"
               >

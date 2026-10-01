@@ -1,5 +1,6 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { invalidateLibrary } from '@/lib/studies';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { Home } from './home';
 
@@ -141,9 +142,10 @@ describe('Home recent studies', () => {
     createdAt: '2026-09-30T12:00:00.000Z',
   });
 
-  it('shows the three most recent studies (pinned first) and links to the library', async () => {
+  it('asks for the three most recently active studies whatever their pin, shows them in that order, and links to the library', async () => {
+    // A pinned study is recent only by its activity: here it is second, not first.
     recentResponses.push(
-      jsonResponse(200, { items: [study(1, true), study(2), study(3)], nextCursor: 'more' }),
+      jsonResponse(200, { items: [study(1), study(2, true), study(3)], nextCursor: 'more' }),
     );
     await renderSignedIn();
     const section = screen.getByRole('region', { name: 'Recent studies' });
@@ -159,7 +161,23 @@ describe('Home recent studies', () => {
       .map(([input]) => String(input))
       .find((input) => input.includes('/studies?'));
     expect(new URL(request ?? '', 'http://api.test').searchParams.toString()).toBe(
-      'sort=recent&limit=3',
+      'sort=recent&pinnedFirst=false&limit=3',
+    );
+  });
+
+  it('refetches when the library is invalidated after a study is created or edited', async () => {
+    recentResponses.push(jsonResponse(200, { items: [study(1)], nextCursor: null }));
+    const { queryClient } = await renderSignedIn();
+    const section = screen.getByRole('region', { name: 'Recent studies' });
+    await within(section).findByRole('link', { name: 'Study 1' });
+    recentResponses.push(jsonResponse(200, { items: [study(9), study(1)], nextCursor: null }));
+    await act(() => invalidateLibrary(queryClient));
+    await waitFor(() =>
+      expect(
+        within(section)
+          .getAllByRole('link')
+          .map((link) => link.textContent),
+      ).toStrictEqual(['Study 9', 'Study 1', 'All studies']),
     );
   });
 

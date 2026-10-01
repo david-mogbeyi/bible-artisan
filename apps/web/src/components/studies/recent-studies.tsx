@@ -12,11 +12,14 @@ const COPY: ProblemCopy = {
   unavailable: "Couldn't load your recent studies.",
 };
 
-/** PRD section 11 (Home): three recent studies. Pinned studies come first, as in the library. */
-const RECENT: LibraryRequest = { sort: 'recent', limit: 3 };
+/**
+ * PRD section 11 (Home): the three most recently active studies, whatever their pin. Pinning
+ * orders the library; it does not make an old study recent.
+ */
+const RECENT: LibraryRequest = { sort: 'recent', pinnedFirst: false, limit: 3 };
 
 /**
- * Home's "Recent studies" (BIB-21): the first three of the library's default order, each a link,
+ * Home's "Recent studies" (BIB-21): the three studies with the latest activity, each a link,
  * plus a link to the whole library. Its errors stay inside this section (PRD section 11: errors
  * are scoped to the failed component). Continue Studying and the resume card are BIB-34's.
  */
