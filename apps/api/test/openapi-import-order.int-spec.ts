@@ -27,6 +27,13 @@ describe('GET /v1/openapi.json when the contracts barrel was loaded before AppMo
     const res = await request(app.getHttpServer()).get('/v1/openapi.json').expect(200);
     const body = res.body as { openapi: string; components: { schemas: Record<string, unknown> } };
     expect(body.openapi).toBe('3.0.0');
-    expect(Object.keys(body.components.schemas)).toStrictEqual(['HealthResponse', 'ErrorEnvelope']);
+    expect(Object.keys(body.components.schemas)).toStrictEqual([
+      'HealthResponse',
+      'ErrorEnvelope',
+      'OtpStartRequest',
+      'OtpStartResponse',
+      'OtpVerifyRequest',
+      'MeResponse',
+    ]);
   });
 });

@@ -6,9 +6,17 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly body: unknown,
+    /** From the `Retry-After` header on 429/503 responses, when present. */
+    readonly retryAfterSeconds?: number,
   ) {
     super(`API request failed with ${status}`);
     this.name = 'ApiError';
+  }
+
+  /** The shared error envelope's `code`, when the body is an envelope. */
+  get code(): string | undefined {
+    const body = this.body as { code?: unknown } | null | undefined;
+    return typeof body?.code === 'string' ? body.code : undefined;
   }
 }
 
@@ -27,6 +35,13 @@ export async function apiFetch<T>(
     headers: { 'content-type': 'application/json', ...init?.headers },
   });
   const body: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-  if (!res.ok) throw new ApiError(res.status, body);
+  if (!res.ok) {
+    const retryAfter = Number(res.headers.get('retry-after'));
+    throw new ApiError(
+      res.status,
+      body,
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+    );
+  }
   return schema.parse(body);
 }

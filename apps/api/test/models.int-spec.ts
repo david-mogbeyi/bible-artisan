@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { ForeignKeyConstraintError } from 'sequelize';
+import { DatabaseError, ForeignKeyConstraintError, UniqueConstraintError } from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
+import { AuthChallenge } from '../src/database/models/auth-challenge.model';
+import { AuthSession } from '../src/database/models/auth-session.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
@@ -17,7 +19,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  */
 describe('Sequelize models against the real schema', () => {
   let db: Database;
-  const created = { users: [] as string[], studies: [] as string[] };
+  const created = { users: [] as string[], studies: [] as string[], challenges: [] as string[] };
 
   async function createUser(): Promise<User> {
     const user = await User.create({ normalizedEmail: `${randomUUID()}@example.test` });
@@ -40,6 +42,8 @@ describe('Sequelize models against the real schema', () => {
     await StudyEvent.destroy({ where: { studyId } });
     await StudyNode.destroy({ where: { studyId } });
     await Study.destroy({ where: { id: studyId } });
+    await AuthChallenge.destroy({ where: { id: created.challenges } });
+    await AuthSession.destroy({ where: { userId: created.users } });
     await User.destroy({ where: { id: created.users } });
     await db.close();
   });
@@ -139,5 +143,66 @@ describe('Sequelize models against the real schema', () => {
       }),
     ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
     expect(await StudyEvent.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('creates an AuthChallenge with only required fields and reads it back with defaults', async () => {
+    const expiresAt = new Date(Date.now() + 600_000);
+    const challenge = await AuthChallenge.create({
+      normalizedEmail: `${randomUUID()}@example.test`,
+      expiresAt,
+    });
+    created.challenges.push(challenge.id);
+    const found = await AuthChallenge.findByPk(challenge.id, { rejectOnEmpty: true });
+    expect(found.get({ plain: true })).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      normalizedEmail: challenge.normalizedEmail,
+      providerRef: null,
+      attemptCount: 0,
+      expiresAt,
+      consumedAt: null,
+      createdAt: expect.any(Date),
+    });
+  });
+
+  it('rejects an AuthChallenge attempt count above five (CHECK)', async () => {
+    const challenge = await AuthChallenge.create({
+      normalizedEmail: `${randomUUID()}@example.test`,
+      expiresAt: new Date(),
+    });
+    created.challenges.push(challenge.id);
+    await expect(challenge.update({ attemptCount: 6 })).rejects.toBeInstanceOf(DatabaseError);
+  });
+
+  it('creates an AuthSession with only required fields and reads it back with defaults', async () => {
+    const user = await createUser();
+    const expiresAt = new Date(Date.now() + 30 * 24 * 3600_000);
+    const session = await AuthSession.create({
+      userId: user.id,
+      tokenHash: 'a'.repeat(64),
+      expiresAt,
+    });
+    const found = await AuthSession.findByPk(session.id, { rejectOnEmpty: true });
+    expect(found.get({ plain: true })).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      userId: user.id,
+      tokenHash: 'a'.repeat(64),
+      createdAt: expect.any(Date),
+      lastSeenAt: expect.any(Date),
+      expiresAt,
+      revokedAt: null,
+    });
+    await expect(
+      AuthSession.create({ userId: user.id, tokenHash: 'a'.repeat(64), expiresAt }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+  });
+
+  it('rejects an AuthSession for a user that does not exist', async () => {
+    await expect(
+      AuthSession.create({
+        userId: randomUUID(),
+        tokenHash: 'b'.repeat(64),
+        expiresAt: new Date(),
+      }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
   });
 });

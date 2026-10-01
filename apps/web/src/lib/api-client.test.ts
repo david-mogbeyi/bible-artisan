@@ -31,4 +31,19 @@ describe('apiFetch', () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 404, body: envelope });
   });
+
+  it('exposes the envelope code and Retry-After seconds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ code: 'RATE_LIMITED' }), {
+          status: 429,
+          headers: { 'retry-after': '17' },
+        }),
+      ),
+    );
+    const error = await apiFetch('/x', z.unknown()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 429, code: 'RATE_LIMITED', retryAfterSeconds: 17 });
+  });
 });

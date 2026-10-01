@@ -2,7 +2,9 @@ import { Controller, Get, Inject } from '@nestjs/common';
 import type { HealthResponse } from '@bible-artisan/contracts';
 import { DATABASE } from '../database/database.module';
 import type { Database } from '../database/database';
+import { Public } from '../modules/identity/public.decorator';
 
+@Public()
 @Controller('health')
 export class HealthController {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
