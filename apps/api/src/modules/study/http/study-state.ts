@@ -4,6 +4,7 @@ import { activeTransaction } from '../../../database/transaction-context';
 import { StudyBranch } from '../../../database/models/study-branch.model';
 import { StudyNode } from '../../../database/models/study-node.model';
 import type { Study } from '../../../database/models/study.model';
+import { studyPurgeAt } from '../study-lifecycle';
 import { studyTagRows } from './study-tags';
 
 /** Everything about a study that `GET` and `PATCH /v1/studies/:studyId` both answer with. */
@@ -60,5 +61,6 @@ export async function readStudyState(study: Study): Promise<StudyState> {
     originalQuestion: question(study.originalQuestionNodeId),
     tags: tags.map((tag) => ({ id: tag.id, name: tag.name })),
     branchId: branch?.id ?? null,
+    purgeAt: study.deletedAt === null ? null : studyPurgeAt(study.deletedAt).toISOString(),
   };
 }

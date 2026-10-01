@@ -1,11 +1,15 @@
 import {
   type AnchorProblemCode,
+  LIFECYCLE_TRANSITION_INVALID,
   MAX_STUDY_TAGS,
   QUESTION_NOT_FOUND,
   REFERENCE_NOT_FOUND,
   type ReferenceErrorCode,
   SEARCH_QUERY_IS_REFERENCE,
+  STUDY_ARCHIVED,
+  STUDY_TRASHED,
   STUDY_UNCHANGED,
+  type StudyLifecycleErrorCode,
   TAG_LIMIT_EXCEEDED,
 } from '@bible-artisan/contracts';
 
@@ -232,5 +236,25 @@ export class TagLimitExceededError extends Error {
   constructor() {
     super(`A study can have at most ${MAX_STUDY_TAGS} tags`);
     this.name = 'TagLimitExceededError';
+  }
+}
+
+const STUDY_LIFECYCLE_MESSAGES: Record<StudyLifecycleErrorCode, string> = {
+  [STUDY_ARCHIVED]: 'This study is archived. Unarchive it to make changes',
+  [STUDY_TRASHED]: 'This study is in the trash. Restore it to make changes',
+  [LIFECYCLE_TRANSITION_INVALID]: 'This study is not in a state that allows this change',
+};
+
+/**
+ * A study change the study's lifecycle state does not allow (BIB-22; PRD section 24: 422 for an
+ * invalid state transition): any edit of an archived (`STUDY_ARCHIVED`) or trashed
+ * (`STUDY_TRASHED`) study, or a lifecycle route from a state it does not start from
+ * (`LIFECYCLE_TRANSITION_INVALID`). Raised by the mutation pipeline's guard under the study lock,
+ * so nothing is written. Fixed messages.
+ */
+export class StudyLifecycleError extends Error {
+  constructor(readonly code: StudyLifecycleErrorCode) {
+    super(STUDY_LIFECYCLE_MESSAGES[code]);
+    this.name = 'StudyLifecycleError';
   }
 }

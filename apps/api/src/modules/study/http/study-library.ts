@@ -10,6 +10,7 @@ import {
 import { QueryTypes, type Sequelize } from 'sequelize';
 import { ValidationError } from '../../../common/errors/domain-errors';
 import { Study } from '../../../database/models/study.model';
+import { studyPurgeAt, withinRecoveryWindowSql } from '../study-lifecycle';
 import {
   decodeLibraryCursor,
   encodeLibraryCursor,
@@ -28,6 +29,7 @@ interface StudyRow {
   startingReferenceId: string | null;
   lastActivityAt: Date;
   createdAt: Date;
+  deletedAt: Date | null;
   /** The sort value as the cursor carries it: microsecond UTC text, or the title sort key. */
   sortKey: string;
 }
@@ -155,6 +157,7 @@ export async function listStudies(
       tags: tags.filter((tag) => tag.studyId === row.id).map(({ id, name }) => ({ id, name })),
       lastActivityAt: row.lastActivityAt.toISOString(),
       createdAt: row.createdAt.toISOString(),
+      purgeAt: row.deletedAt === null ? null : studyPurgeAt(row.deletedAt).toISOString(),
     })),
     nextCursor,
   };
@@ -176,6 +179,10 @@ export async function listStudies(
  *
  * User input reaches the SQL only as bind parameters; the interpolated pieces are fixed column
  * names, fixed expressions and `$n` placeholders.
+ *
+ * `state=trashed` (the Trash view, BIB-22) lists only studies inside their recovery window by
+ * the database clock (`withinRecoveryWindowSql`); one trashed 30 or more days ago reads as absent
+ * everywhere, here too.
  */
 export function libraryQuery(
   listing: LibraryListing,
@@ -188,6 +195,9 @@ export function libraryQuery(
     return `$${bind.length}`;
   };
   const filters: string[] = [];
+  if (listing.state === 'trashed') {
+    filters.push(withinRecoveryWindowSql('s'));
+  }
   if (listing.tag !== null) {
     filters.push(
       `EXISTS (SELECT 1 FROM study_tag st
@@ -230,7 +240,7 @@ export function libraryQuery(
     groups.push(`(SELECT s.id, s.title, s.lifecycle, s.is_pinned AS pinned,
                 s.starting_reference_id AS "startingReferenceId",
                 s.last_activity_at AS "lastActivityAt", s.created_at AS "createdAt",
-                ${order} AS "sortValue", ${text} AS "sortKey"
+                s.deleted_at AS "deletedAt", ${order} AS "sortValue", ${text} AS "sortKey"
            FROM study s
           WHERE ${where.join('\n            AND ')}
           ORDER BY ${order} ${direction}, s.id ${direction}
@@ -238,7 +248,7 @@ export function libraryQuery(
   }
 
   const sql = `SELECT page.id, page.title, page.lifecycle, page.pinned, page."startingReferenceId",
-            page."lastActivityAt", page."createdAt", page."sortKey"
+            page."lastActivityAt", page."createdAt", page."deletedAt", page."sortKey"
        FROM (${groups.join('\n         UNION ALL\n         ')}) page
       ORDER BY ${listing.pinnedFirst ? 'page.pinned DESC, ' : ''}page."sortValue"${listing.sort === 'title' ? ' COLLATE "C"' : ''} ${direction}, page.id ${direction}
       LIMIT ${limit}`;

@@ -1,4 +1,4 @@
-import { Controller, Get, Header, Param, Patch, Post, Query } from '@nestjs/common';
+import { Controller, Delete, Get, Header, Param, Patch, Post, Query } from '@nestjs/common';
 import type { StudyListResponse, StudyResponse } from '@bible-artisan/contracts';
 import {
   MutationRequest,
@@ -42,6 +42,56 @@ export class StudiesController {
     @MutationRequest() mutation: MutationRequestInfo,
   ): Promise<MutationResult> {
     return this.studies.update(ownerId, studyId, mutation);
+  }
+
+  /**
+   * Moves the study to the trash (BIB-22). Recoverable with `POST :studyId/restore` for 30 days;
+   * nothing is deleted now. Same contract as the other lifecycle routes below.
+   */
+  @Delete(':studyId')
+  trash(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.studies.changeLifecycle(ownerId, studyId, mutation, 'trash');
+  }
+
+  /**
+   * Archives an active study (BIB-22): read-only, out of the active library. Body
+   * `{ expectedRevision }` (428 / 409); an `Idempotency-Key` makes a retry replay the original
+   * 200. A starting state the change does not allow is 422.
+   */
+  @Post(':studyId/archive')
+  archive(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.studies.changeLifecycle(ownerId, studyId, mutation, 'archive');
+  }
+
+  /** Makes an archived study active again (BIB-22). Same contract as archive. */
+  @Post(':studyId/unarchive')
+  unarchive(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.studies.changeLifecycle(ownerId, studyId, mutation, 'unarchive');
+  }
+
+  /**
+   * Restores a trashed study inside its recovery window to the state it was trashed from
+   * (BIB-22). Same contract as archive.
+   */
+  @Post(':studyId/restore')
+  restore(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.studies.changeLifecycle(ownerId, studyId, mutation, 'restore');
   }
 
   /**

@@ -13,6 +13,14 @@ Rules (see /AGENTS.md for the full list):
   (owner from `@CurrentUserId()`, IDs through `ParseResourceIdPipe`); absent and foreign IDs
   are the same 404. Children are queried by `id` + `study_id` + `owner_id`, never by ID alone.
   Every new route goes into `test/route-inventory.int-spec.ts` with its cross-user test.
+- All child access goes through `StudyAccessService` (or, inside a mutation, the study the
+  pipeline already locked). Never query a study-scoped table by `study_id` alone to resolve a
+  study: that skips the owner check and the 30-day trash rule (BIB-22). That rule lives in one
+  place, `withinRecoveryWindowSql` in `study/study-lifecycle.ts` (`withinRecoveryWindow()` for a
+  `Study` model query): a study trashed 30 or more days ago is the same 404 as an absent one.
+  Every study resolution uses it (`requireOwnedStudy`, `requireOwnedNode` in the same single
+  statement as the child, the study lock, the library). Window decisions use the database clock
+  (`now()` in SQL), never `new Date()`, and `archived_at` / `deleted_at` are written with it too.
 - Every study mutation follows the mutation contract below. See ADR 0001's BIB-12 addendum.
 - Controllers speak DTOs from `@bible-artisan/contracts`. Never return Sequelize model instances directly.
 - Logging (BIB-13): every request already gets a correlation ID and one access line
@@ -68,6 +76,10 @@ What the pipeline guarantees, so a route must not re-implement any of it:
    a replay, and `Cache-Control: no-store`.
 7. Deadlocks and serialization failures (40P01/40001) answer 503 `TRANSIENT_CONFLICT`,
    `retryable: true`; the client retries with the same Idempotency-Key.
+8. The lifecycle guard (BIB-22) runs under the study lock, before `work`: a study past its 30-day
+   trash window is 404, an archived one 422 `STUDY_ARCHIVED`, a trashed one 422 `STUDY_TRASHED`.
+   Never check lifecycle in a route. Only the lifecycle routes set `lifecycleTransition` on the
+   spec, which allows exactly that transition's starting states.
 
 ### Creating a study (BIB-19): `MutationService.create`
 

@@ -53,6 +53,8 @@ interface Seeded {
   tags: string[];
   /** The tags as a list item shows them. */
   tagItems: { id: string; name: string }[];
+  /** When a trashed seed is purged (its `deleted_at` + 30 days), else null (BIB-22). */
+  purgeAt: string | null;
 }
 
 interface SeedSpec {
@@ -64,6 +66,8 @@ interface SeedSpec {
   lastActivityAt?: string;
   createdAt?: string;
   tags?: string[];
+  /** A trashed seed's `deleted_at` (BIB-22); defaults to now, inside the recovery window. */
+  deletedAt?: string;
 }
 
 const LIBRARY = '/v1/studies';
@@ -113,6 +117,7 @@ const itemOf = (row: Seeded): StudyListItem => ({
   tags: row.tagItems,
   lastActivityAt: new Date(row.lastActivityAt).toISOString(),
   createdAt: new Date(row.createdAt).toISOString(),
+  purgeAt: row.purgeAt,
 });
 
 /** Independent search oracle: every folded word occurs in the title, description or a tag. */
@@ -152,10 +157,16 @@ describe('study library (BIB-21)', () => {
       const createdAt = spec.createdAt ?? at(index);
       const lastActivityAt = spec.lastActivityAt ?? createdAt;
       const description = spec.description ?? null;
+      const lifecycle = spec.lifecycle ?? 'active';
+      // Lifecycle dates agree with the state (BIB-22's CHECK).
+      const deletedAt =
+        lifecycle === 'trashed' ? (spec.deletedAt ?? new Date().toISOString()) : null;
       const [row] = await db.query<{ id: string }>(
         `INSERT INTO study (owner_id, title, description, search_text, title_sort_key, lifecycle,
-                            pinned_at, created_at, updated_at, last_activity_at)
-         VALUES ($1, $2, $3, $4, $9, $5, $6, $7::timestamptz, $7::timestamptz, $8::timestamptz)
+                            pinned_at, created_at, updated_at, last_activity_at, archived_at,
+                            deleted_at)
+         VALUES ($1, $2, $3, $4, $9, $5, $6, $7::timestamptz, $7::timestamptz, $8::timestamptz,
+                 $10::timestamptz, $11::timestamptz)
          RETURNING id`,
         {
           bind: [
@@ -163,11 +174,13 @@ describe('study library (BIB-21)', () => {
             spec.title,
             description,
             studySearchText(spec.title, description),
-            spec.lifecycle ?? 'active',
+            lifecycle,
             spec.pinned ? createdAt : null,
             createdAt,
             lastActivityAt,
             studyTitleSortKey(spec.title),
+            lifecycle === 'archived' ? createdAt : null,
+            deletedAt,
           ],
           type: QueryTypes.SELECT,
         },
@@ -194,11 +207,15 @@ describe('study library (BIB-21)', () => {
         title: spec.title,
         description,
         pinned: spec.pinned ?? false,
-        lifecycle: spec.lifecycle ?? 'active',
+        lifecycle,
         lastActivityAt,
         createdAt,
         tags: spec.tags ?? [],
         tagItems,
+        purgeAt:
+          deletedAt === null
+            ? null
+            : new Date(Date.parse(deletedAt) + 30 * 24 * 60 * 60 * 1000).toISOString(),
       });
     }
     return seeded;
@@ -372,6 +389,7 @@ describe('study library (BIB-21)', () => {
             tags: study.tags,
             lastActivityAt: stored.lastActivityAt.toISOString(),
             createdAt: study.createdAt,
+            purgeAt: null,
           },
         ],
         nextCursor: null,
@@ -401,6 +419,12 @@ describe('study library (BIB-21)', () => {
       }
       specs.push({ title: 'archived one', lifecycle: 'archived' });
       specs.push({ title: 'trashed one', lifecycle: 'trashed' });
+      // Trashed 30 days and one second ago: past its recovery window, so absent (BIB-22).
+      specs.push({
+        title: 'expired one',
+        lifecycle: 'trashed',
+        deletedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000 - 1000).toISOString(),
+      });
       rows = await seed(owner, specs);
     });
 
@@ -440,15 +464,25 @@ describe('study library (BIB-21)', () => {
       }
     });
 
-    it('lists archived studies only under state=archived, and trashed studies never', async () => {
-      const archived = rows.filter((row) => row.lifecycle === 'archived').map((row) => row.id);
-      expect((await page(owner, { state: 'archived' })).items.map((i) => i.id)).toStrictEqual(
-        archived,
-      );
+    it('lists archived studies only under state=archived, and trashed ones inside their recovery window only under state=trashed (BIB-22)', async () => {
+      const byTitle = (title: string): Seeded => {
+        const row = rows.find((r) => r.title === title);
+        if (!row) throw new Error('no such seed');
+        return row;
+      };
+      expect(await page(owner, { state: 'archived' })).toStrictEqual({
+        items: [itemOf(byTitle('archived one'))],
+        nextCursor: null,
+      });
+      expect(await page(owner, { state: 'trashed', pinnedFirst: 'false' })).toStrictEqual({
+        items: [itemOf(byTitle('trashed one'))],
+        nextCursor: null,
+      });
+      expect(byTitle('trashed one').purgeAt).not.toBeNull();
       const listed = (await page(owner)).items.map((item) => item.title);
       expect(listed).not.toContain('archived one');
       expect(listed).not.toContain('trashed one');
-      expect((await list(owner, { state: 'trashed' })).status).toBe(400);
+      expect(listed).not.toContain('expired one');
     });
 
     it('pinnedFirst=false lists every study in the sort, pins ignored, across pages', async () => {
@@ -1110,6 +1144,7 @@ describe('study library (BIB-21)', () => {
             tags: [],
             lastActivityAt: row.lastActivityAt.toISOString(),
             createdAt: row.createdAt.toISOString(),
+            purgeAt: null,
           })),
           nextCursor: anyCursor,
         });
@@ -1130,6 +1165,7 @@ describe('study library (BIB-21)', () => {
           tags: [],
           lastActivityAt: row.lastActivityAt.toISOString(),
           createdAt: row.createdAt.toISOString(),
+          purgeAt: null,
         })),
         nextCursor: anyCursor,
       });

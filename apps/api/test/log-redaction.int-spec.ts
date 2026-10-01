@@ -909,6 +909,72 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs archive, trash and restore (BIB-22) without the title, question, ids, or keys', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ title: track(`SENTINEL-lifecycle-title-${randomUUID()}`), blank: true })
+      .expect(201);
+    const studyId = track((created.body as { studyId: string }).studyId);
+    const send = (method: 'post' | 'delete', path: string, revision: number, id = studyId): Test =>
+      withPrivateChannels(http()[method](`/v1/studies/${id}${path}${query()}`), cookie)
+        .set('Idempotency-Key', track(randomUUID()))
+        .send({ expectedRevision: revision });
+
+    const archived = await send('post', '/archive', 1);
+    expect(archived.status).toBe(200);
+    await expectLogged(archived, {
+      method: 'POST',
+      route: '/v1/studies/:studyId/archive',
+      status: 200,
+    });
+    const edit = await withPrivateChannels(
+      http().patch(`/v1/studies/${studyId}${query()}`),
+      cookie,
+    ).send({ expectedRevision: 2, title: secret('archived-edit') });
+    await expectLogged(
+      edit,
+      { method: 'PATCH', route: '/v1/studies/:studyId', status: 422 },
+      {
+        errorType: 'StudyLifecycleError',
+        body: envelope({
+          code: 'STUDY_ARCHIVED',
+          message: 'This study is archived. Unarchive it to make changes',
+        }),
+      },
+    );
+    const trashed = await send('delete', '', 2);
+    await expectLogged(trashed, { method: 'DELETE', route: '/v1/studies/:studyId', status: 200 });
+    const restored = await send('post', '/restore', 3);
+    await expectLogged(restored, {
+      method: 'POST',
+      route: '/v1/studies/:studyId/restore',
+      status: 200,
+    });
+    const unarchived = await send('post', '/unarchive', 4);
+    await expectLogged(unarchived, {
+      method: 'POST',
+      route: '/v1/studies/:studyId/unarchive',
+      status: 200,
+    });
+    const invalid = await send('post', '/unarchive', 5);
+    await expectLogged(
+      invalid,
+      { method: 'POST', route: '/v1/studies/:studyId/unarchive', status: 422 },
+      {
+        errorType: 'StudyLifecycleError',
+        body: envelope({
+          code: 'LIFECYCLE_TRANSITION_INVALID',
+          message: 'This study is not in a state that allows this change',
+        }),
+      },
+    );
+    const absent = await send('post', '/archive', 1, track(randomUUID()));
+    await expectLogged(
+      absent,
+      { method: 'POST', route: '/v1/studies/:studyId/archive', status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+  });
+
   it('logs the study library without the search, tag ids, cursor, titles or tags', async () => {
     const route = { method: 'GET', route: '/v1/studies' };
     const listFor = (params: Record<string, string>): Test =>

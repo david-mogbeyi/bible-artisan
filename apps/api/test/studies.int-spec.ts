@@ -752,6 +752,7 @@ describe('study creation and read (BIB-19)', () => {
         },
         tags: [],
         branchId: body.branchId,
+        purgeAt: null,
         createdAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
       });
       const reloaded = await read(alice, body.studyId);
@@ -777,6 +778,7 @@ describe('study creation and read (BIB-19)', () => {
           originalQuestion: null,
           tags: [],
           branchId: null,
+          purgeAt: null,
           createdAt: expect.any(String),
         },
       ]);

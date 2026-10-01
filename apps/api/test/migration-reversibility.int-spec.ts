@@ -16,6 +16,8 @@ import { withAllDropsAllowed, withStudyDataDropAllowed } from './support/study-d
 const CORPUS_MIGRATION = '20261001094438_create_bible_corpus.ts';
 const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
 const LIBRARY_MIGRATION = '20261001182657_add_study_library.ts';
+/** BIB-22's lifecycle migration; `down({ to })` reverts down to and including it. */
+const LIFECYCLE_MIGRATION = '20261001194710_add_study_lifecycle.ts';
 
 const DOMAIN_TABLES = [
   'auth_challenge',
@@ -217,12 +219,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-21's study library) is the first `down`
+      // No opt-in at all: the newest migration (BIB-22's study lifecycle) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: 'study library drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        message: 'study lifecycle drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -231,6 +233,73 @@ describe('migration reversibility', () => {
         await columns(['study', 'study_node', 'study_branch', 'tag', 'study_tag']),
       ).toStrictEqual(columnsBefore);
       expect(await studyData()).toStrictEqual(dataBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies the study lifecycle (BIB-22): states survive, dates are backfilled, and the constraint, trigger and purge index come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const lifecycles = async () =>
+      db.query<{ lifecycle: string; archived: boolean; deleted: boolean }>(
+        `SELECT lifecycle, archived_at = updated_at AS archived, deleted_at = updated_at AS deleted
+           FROM study WHERE owner_id = $1 ORDER BY lifecycle`,
+        { bind: [userId], type: QueryTypes.SELECT },
+      );
+    try {
+      // One archived and one trashed study (the seed has an active one).
+      await db.query(
+        `INSERT INTO study (owner_id, title, lifecycle, archived_at)
+         VALUES ($1, 'Archived', 'archived', now())`,
+        { bind: [userId] },
+      );
+      await db.query(
+        `INSERT INTO study (owner_id, title, lifecycle, deleted_at)
+         VALUES ($1, 'Trashed', 'trashed', now())`,
+        { bind: [userId] },
+      );
+      const purgeIndex = async () =>
+        db.query<{ indexdef: string }>(
+          `SELECT indexdef FROM pg_indexes WHERE indexname = 'study_trash_purge_idx'`,
+          { type: QueryTypes.SELECT },
+        );
+      await withStudyDataDropAllowed(() => migrator.down({ to: LIFECYCLE_MIGRATION }));
+      expect(await columns(['study'])).not.toContain('study.archived_at');
+      expect(await purgeIndex()).toStrictEqual([]);
+      await migrator.up();
+      expect(await purgeIndex()).toStrictEqual([
+        {
+          indexdef:
+            "CREATE INDEX study_trash_purge_idx ON public.study USING btree (deleted_at, id) WHERE (lifecycle = 'trashed'::text)",
+        },
+      ]);
+      expect(await lifecycles()).toStrictEqual([
+        { lifecycle: 'active', archived: null, deleted: null },
+        { lifecycle: 'archived', archived: true, deleted: null },
+        { lifecycle: 'trashed', archived: null, deleted: true },
+      ]);
+      const refused = await db
+        .query(
+          `UPDATE study SET lifecycle = 'active', deleted_at = NULL WHERE owner_id = $1 AND lifecycle = 'archived'`,
+          {
+            bind: [userId],
+          },
+        )
+        .catch((e: unknown) => e);
+      expect(refused).toMatchObject({ parent: expect.objectContaining({ code: '23514' }) });
+      const transition = await db
+        .query(
+          `UPDATE study SET lifecycle = 'archived', archived_at = now(), deleted_at = NULL
+            WHERE owner_id = $1 AND lifecycle = 'trashed'`,
+          { bind: [userId] },
+        )
+        .catch((e: unknown) => e);
+      expect(transition).toMatchObject({
+        message: 'study lifecycle transition refused',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();

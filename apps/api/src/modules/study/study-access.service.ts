@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { type FindOptions, Transaction } from 'sequelize';
+import { type FindOptions, literal, Op, Transaction } from 'sequelize';
 import { NotFoundError } from '../../common/errors/domain-errors';
 import { isResourceId } from '../../common/validation/resource-id';
 import { StudyNode } from '../../database/models/study-node.model';
 import { Study } from '../../database/models/study.model';
+import { withinRecoveryWindow, withinRecoveryWindowSql } from './study-lifecycle';
 
 export interface StudyAccessOptions {
   /** Run the lookup inside this transaction (required with `lock`). */
@@ -23,11 +24,13 @@ export interface StudyAccessOptions {
  *   `ParseResourceIdPipe` still fails closed (404, not a PostgreSQL cast error).
  *
  * Children follow `requireOwnedNode`'s pattern: filter by the child's own `id`, `study_id`, and
- * `owner_id`. The composite FK `(owner_id, study_id) -> study(owner_id, id)` guarantees a child's
- * owner is its study's owner, so this needs no join and never compares owners in application code.
+ * `owner_id`, plus its study's recovery window, in the same statement. The composite FK
+ * `(owner_id, study_id) -> study(owner_id, id)` guarantees a child's owner is its study's owner,
+ * so owners are never compared in application code.
  *
- * Lifecycle (archived/trashed) is not filtered here; the tickets that own those rules (BIB-22)
- * decide what each route allows.
+ * Lifecycle (BIB-22): archived and trashed studies stay readable by their owner (the mutation
+ * pipeline, not this service, refuses writes to them), but a study trashed 30 or more days ago is
+ * past its recovery window and is the same 404 as an absent one, even before the purge removes it.
  */
 @Injectable()
 export class StudyAccessService {
@@ -38,14 +41,19 @@ export class StudyAccessService {
   ): Promise<Study> {
     if (!isResourceId(studyId)) throw new NotFoundError();
     const study = await Study.findOne({
-      where: { id: studyId, ownerId },
+      where: { id: studyId, ownerId, ...withinRecoveryWindow() },
       ...queryOptions(options),
     });
     if (!study) throw new NotFoundError();
     return study;
   }
 
-  /** A live (not soft-deleted) node of `studyId`, owned by `ownerId`. */
+  /**
+   * A live (not soft-deleted) node of `studyId`, owned by `ownerId`, in ONE statement: the node's
+   * own `id`, `study_id` and `owner_id`, and its study (same owner, by the composite FK) inside
+   * its recovery window (`withinRecoveryWindowSql`). So a node of an absent, foreign or expired
+   * study is the same 404 as an absent node (BIB-22). With `lock`, only the node row is locked.
+   */
   async requireOwnedNode(
     ownerId: string,
     studyId: string,
@@ -54,7 +62,18 @@ export class StudyAccessService {
   ): Promise<StudyNode> {
     if (!isResourceId(studyId) || !isResourceId(nodeId)) throw new NotFoundError();
     const node = await StudyNode.findOne({
-      where: { id: nodeId, studyId, ownerId, deletedAt: null },
+      where: {
+        id: nodeId,
+        studyId,
+        ownerId,
+        deletedAt: null,
+        [Op.and]: [
+          literal(`EXISTS (SELECT 1 FROM study s
+                            WHERE s.owner_id = "StudyNode".owner_id
+                              AND s.id = "StudyNode".study_id
+                              AND ${withinRecoveryWindowSql('s')})`),
+        ],
+      },
       ...queryOptions(options),
     });
     if (!node) throw new NotFoundError();

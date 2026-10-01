@@ -1,10 +1,13 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { fn } from 'sequelize';
 import {
   type CreateStudyResponse,
   createStudyRequestSchema,
   listStudiesQuerySchema,
   type ScriptureReference,
   type StudyListResponse,
+  type StudyLifecycleResponse,
+  studyLifecycleRequestSchema,
   type StudyResponse,
   studySearchText,
   studyTitleSortKey,
@@ -31,6 +34,7 @@ import { Study } from '../../../database/models/study.model';
 import type { AppendEventInput } from '../../thread/thread.service';
 import { ReferenceService } from '../../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study-access.service';
+import type { StudyLifecycleTransition } from '../study-lifecycle';
 import { deriveStudyTitle } from '../study-title';
 import { libraryCursorKey } from './library-cursor';
 import { listStudies } from './study-library';
@@ -56,6 +60,18 @@ export const STUDY_EDIT_EVENTS = {
   unpinned: 'study_unpinned',
   tagsChanged: 'study_tags_changed',
 } as const;
+
+/**
+ * One event per lifecycle change (BIB-22), committed with it; no payload but the restored state.
+ * Intended visibility, for BIB-55's column: `study_archived` and `study_unarchived` are
+ * thread-visible (PRD section 13 lists them); `study_trashed` and `study_restored` are internal.
+ */
+export const STUDY_LIFECYCLE_EVENTS: Record<StudyLifecycleTransition, string> = {
+  archive: 'study_archived',
+  unarchive: 'study_unarchived',
+  trash: 'study_trashed',
+  restore: 'study_restored',
+};
 
 /**
  * Creates and reads studies (BIB-19). Creation goes through `MutationService.create`, so the
@@ -331,6 +347,70 @@ export class StudiesService {
           lastEventSequence,
         };
         return { status: 200, body: edited };
+      },
+    });
+  }
+
+  /**
+   * Archives, unarchives, trashes or restores a study (BIB-22, FR-STUDY-005/006) through
+   * `MutationService.execute`: 428 without `expectedRevision` and 400 for any other body field
+   * (both before any transaction); then under the study lock the pipeline's lifecycle guard
+   * refuses a starting state the transition does not allow (422), and the work writes the new
+   * state with one revision check (404 / 409) and one event. `content_revision` does not move:
+   * the lifecycle is organizational, not study content. Nothing else about the study changes, so
+   * restore returns its nodes, events, branches, pin and tags exactly as they were.
+   *
+   * The new state's dates follow `study_lifecycle_timestamps_check`, written with the database
+   * clock (`now()`) so the recovery window is decided on one clock:
+   * - archive: `archived_at` = now;
+   * - unarchive: `archived_at` = null;
+   * - trash: `deleted_at` = now, `archived_at` kept (it records that the study was archived);
+   * - restore: `deleted_at` = null, back to archived when `archived_at` is set, else active.
+   */
+  async changeLifecycle(
+    ownerId: string,
+    studyId: string,
+    mutation: MutationRequestInfo,
+    transition: StudyLifecycleTransition,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    parseBody(studyLifecycleRequestSchema, mutation.body);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: false,
+      lifecycleTransition: transition,
+      work: async (m) => {
+        // The database clock (`now()`, the transaction's start), the one clock every recovery
+        // window decision compares these dates with (`RECOVERY_CUTOFF_SQL`). Typed as a Date for
+        // the column; Sequelize writes the fn as SQL, and RETURNING reads back the stored instant.
+        const now = fn('now') as unknown as Date;
+        const values: Partial<Pick<Study, 'lifecycle' | 'archivedAt' | 'deletedAt'>> =
+          transition === 'archive'
+            ? { lifecycle: 'archived', archivedAt: now }
+            : transition === 'unarchive'
+              ? { lifecycle: 'active', archivedAt: null }
+              : transition === 'trash'
+                ? { lifecycle: 'trashed', deletedAt: now }
+                : {
+                    // `archived_at` as the pipeline locked it: no second read of the study.
+                    lifecycle: m.lockedArchivedAt === null ? 'active' : 'archived',
+                    deletedAt: null,
+                  };
+        const updated = await m.updateWithExpectedRevision(Study, {
+          id: m.studyId,
+          expectedRevision,
+          values,
+        });
+        const event = await m.appendEvent({
+          eventType: STUDY_LIFECYCLE_EVENTS[transition],
+          ...(transition === 'restore' ? { payload: { restoredTo: updated.lifecycle } } : {}),
+        });
+        const changed: StudyLifecycleResponse = {
+          id: m.studyId,
+          ...(await readStudyState(updated)),
+          lastEventSequence: event.sequence,
+        };
+        return { status: 200, body: changed };
       },
     });
   }

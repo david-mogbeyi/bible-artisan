@@ -9,6 +9,31 @@ describe('buildOpenApiDocument', () => {
       description: 'Error (shared error envelope, PRD section 24)',
       content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
     };
+    // BIB-22: the four lifecycle routes share everything but the first sentences.
+    const lifecycle = (description: string): Record<string, unknown> => ({
+      description: `${description} expectedRevision is the study's revision: missing is 428, stale is 409 with currentRevision. The change bumps the revision (never contentRevision) and appends one StudyEvent in the same transaction. Archive, unarchive and trash of a trashed study are 422 STUDY_TRASHED; any other transition not allowed from the current state is 422 LIFECYCLE_TRANSITION_INVALID. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, a malformed id, and a study trashed 30 or more days ago are the same 404.`,
+      security: [{ sessionCookie: [] }],
+      parameters: [
+        {
+          name: 'Idempotency-Key',
+          in: 'header',
+          required: false,
+          schema: { type: 'string', format: 'uuid' },
+        },
+        { name: 'studyId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/json': { schema: ref('StudyLifecycleRequest') } },
+      },
+      responses: {
+        200: {
+          description: 'The study in its new state',
+          content: { 'application/json': { schema: ref('UpdateStudyResponse') } },
+        },
+        default: errorResponse,
+      },
+    });
     const doc = buildOpenApiDocument();
     expect({ openapi: doc.openapi, servers: doc.servers, paths: doc.paths }).toStrictEqual({
       openapi: '3.0.0',
@@ -244,7 +269,7 @@ describe('buildOpenApiDocument', () => {
         '/studies': {
           get: {
             description:
-              "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. Trashed studies are never listed. No totals.",
+              "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. state=trashed is the Trash view: trashed studies still inside their 30-day recovery window, each with its purgeAt. No totals.",
             security: [{ sessionCookie: [] }],
             parameters: [
               {
@@ -263,7 +288,11 @@ describe('buildOpenApiDocument', () => {
                 name: 'state',
                 in: 'query',
                 required: false,
-                schema: { type: 'string', enum: ['active', 'archived'], default: 'active' },
+                schema: {
+                  type: 'string',
+                  enum: ['active', 'archived', 'trashed'],
+                  default: 'active',
+                },
               },
               {
                 name: 'sort',
@@ -326,7 +355,7 @@ describe('buildOpenApiDocument', () => {
         '/studies/{studyId}': {
           get: {
             description:
-              "Returns one of the signed-in user's studies: title, description, lifecycle, pin, revisions, starting reference, main and original questions, tags and initial branch. Another user's, an absent, and a malformed id are the same 404.",
+              "Returns one of the signed-in user's studies: title, description, lifecycle, pin, revisions, starting reference, main and original questions, tags, initial branch, and purgeAt for a trashed study. Archived and trashed studies stay readable by their owner. Another user's, an absent, a malformed id, and a study trashed 30 or more days ago are the same 404.",
             security: [{ sessionCookie: [] }],
             parameters: [
               {
@@ -346,7 +375,7 @@ describe('buildOpenApiDocument', () => {
           },
           patch: {
             description:
-              "Edits one of the signed-in user's studies (FR-STUDY-003): title, description (null clears it), main question ({text} creates a new open Question node and makes it main; {nodeId} makes an existing live Question node of the study main), pin, and tags as deltas (tags.add: names, reusing the owner's tag with the same normalized key; tags.remove: ids of the study's tags; an item that is already applied is a no-op, and a tag no study uses any more is deleted). The original question is never rewritten; a study that had none gets the first main question as its original. expectedRevision is the study's revision and covers every field: missing is 428, stale is 409 with currentRevision. One StudyEvent per real change (study_renamed, study_description_changed, question_created, main_question_changed, study_pinned/study_unpinned, study_tags_changed; ids only) commits with the edit; contentRevision moves only for title, description or main question changes. An edit that changes nothing is 422 STUDY_UNCHANGED; more than 20 tags after applying the change is 422 TAG_LIMIT_EXCEEDED; a nodeId that is not a live question of this study is 422 QUESTION_NOT_FOUND. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, and a malformed id are the same 404.",
+              "Edits one of the signed-in user's studies (FR-STUDY-003): title, description (null clears it), main question ({text} creates a new open Question node and makes it main; {nodeId} makes an existing live Question node of the study main), pin, and tags as deltas (tags.add: names, reusing the owner's tag with the same normalized key; tags.remove: ids of the study's tags; an item that is already applied is a no-op, and a tag no study uses any more is deleted). The original question is never rewritten; a study that had none gets the first main question as its original. expectedRevision is the study's revision and covers every field: missing is 428, stale is 409 with currentRevision. One StudyEvent per real change (study_renamed, study_description_changed, question_created, main_question_changed, study_pinned/study_unpinned, study_tags_changed; ids only) commits with the edit; contentRevision moves only for title, description or main question changes. An edit that changes nothing is 422 STUDY_UNCHANGED; more than 20 tags after applying the change is 422 TAG_LIMIT_EXCEEDED; a nodeId that is not a live question of this study is 422 QUESTION_NOT_FOUND. An archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, a malformed id, and a study trashed 30 or more days ago are the same 404.",
             security: [{ sessionCookie: [] }],
             parameters: [
               {
@@ -374,6 +403,22 @@ describe('buildOpenApiDocument', () => {
               default: errorResponse,
             },
           },
+          delete: lifecycle(
+            'Moves an active or archived study to the trash (FR-STUDY-006) with everything in it; nothing is deleted yet. It stays readable and restorable for 30 days (purgeAt), then reads as absent and is permanently deleted. study_trashed.',
+          ),
+        },
+        '/studies/{studyId}/archive': {
+          post: lifecycle(
+            'Archives an active study (FR-STUDY-005): it leaves the active library, stays readable and listed under state=archived, and every other change is 422 STUDY_ARCHIVED until it is unarchived. study_archived.',
+          ),
+        },
+        '/studies/{studyId}/unarchive': {
+          post: lifecycle('Makes an archived study active and editable again. study_unarchived.'),
+        },
+        '/studies/{studyId}/restore': {
+          post: lifecycle(
+            'Restores a trashed study inside its recovery window to the state it was trashed from (archived if it was archived, else active), with its nodes, events and branches intact. study_restored.',
+          ),
         },
         '/bible/translations': {
           get: {
@@ -507,6 +552,7 @@ describe('buildOpenApiDocument', () => {
       'StudyListResponse',
       'UpdateStudyRequest',
       'UpdateStudyResponse',
+      'StudyLifecycleRequest',
     ]);
   });
 });

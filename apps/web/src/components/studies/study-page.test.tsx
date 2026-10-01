@@ -47,6 +47,7 @@ const STUDY = {
   },
   tags: [],
   branchId: 'eeeeeeee-2222-4333-8444-555555555555',
+  purgeAt: null,
   createdAt: '2026-10-01T12:00:00.000Z',
 };
 

@@ -230,6 +230,7 @@ describe('study editing (BIB-20)', () => {
         originalQuestion: question,
         tags,
         branchId,
+        purgeAt: null,
         lastEventSequence: '5',
       });
       const body = res.body as UpdateStudyResponse;
@@ -285,6 +286,7 @@ describe('study editing (BIB-20)', () => {
         originalQuestion: original,
         tags: [],
         branchId,
+        purgeAt: null,
         lastEventSequence: '3',
       });
       expect(newNodeId).not.toBe(questionNodeId);

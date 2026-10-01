@@ -140,6 +140,34 @@ const ROUTES: Record<string, Access> = {
       test: 'PATCH /v1/studies/:studyId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  'DELETE /v1/studies/:studyId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'study-lifecycle.int-spec.ts',
+      test: 'DELETE /v1/studies/:studyId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'POST /v1/studies/:studyId/archive': {
+    access: 'private',
+    crossUserTest: {
+      file: 'study-lifecycle.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/archive gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'POST /v1/studies/:studyId/unarchive': {
+    access: 'private',
+    crossUserTest: {
+      file: 'study-lifecycle.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/unarchive gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'POST /v1/studies/:studyId/restore': {
+    access: 'private',
+    crossUserTest: {
+      file: 'study-lifecycle.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/restore gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

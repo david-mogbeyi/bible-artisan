@@ -104,6 +104,11 @@ export const studyResponseSchema = z.object({
   originalQuestion: studyQuestionSchema.nullable(),
   tags: z.array(studyTagSchema),
   branchId: z.uuid().nullable(),
+  /**
+   * When a trashed study is permanently deleted (BIB-22): 30 days after it was trashed. Null
+   * unless `lifecycle` is `trashed`. From then on it reads as absent (404) everywhere.
+   */
+  purgeAt: z.iso.datetime().nullable(),
   createdAt: z.iso.datetime(),
 });
 

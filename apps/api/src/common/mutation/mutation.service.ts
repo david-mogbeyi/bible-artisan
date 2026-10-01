@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { QueryTypes, Transaction } from 'sequelize';
+import { fn, Op, QueryTypes, Transaction } from 'sequelize';
 import { DATABASE } from '../../database/database.module';
 import type { Database } from '../../database/database';
 import { MutationReceipt } from '../../database/models/mutation-receipt.model';
@@ -9,6 +9,10 @@ import {
   type StudyLock,
   StudyRevisionService,
 } from '../../modules/study/study-revision.service';
+import {
+  assertLifecycleAllows,
+  type StudyLifecycleTransition,
+} from '../../modules/study/study-lifecycle';
 import { ThreadService } from '../../modules/thread/thread.service';
 import { IdempotencyKeyReusedError } from '../errors/domain-errors';
 import { requestFingerprint } from './fingerprint';
@@ -53,6 +57,13 @@ export interface StudyMutationSpec {
    */
   bumpsContentRevision: boolean;
   /**
+   * Only for the lifecycle routes (BIB-22): the lifecycle change this mutation makes. Every other
+   * mutation leaves it out and so needs an active study: the pipeline refuses an archived study
+   * with 422 STUDY_ARCHIVED and a trashed one with 422 STUDY_TRASHED before `work` runs. A
+   * transition is allowed only from its starting states (`STUDY_LIFECYCLE_TRANSITIONS`).
+   */
+  lifecycleTransition?: StudyLifecycleTransition;
+  /**
    * The domain work. Must revision-check at least one row with `m.updateWithExpectedRevision`
    * and append at least one event with `m.appendEvent`. Every query joins the mutation
    * transaction automatically. Call no external provider.
@@ -85,9 +96,11 @@ export interface StudyCreationSpec {
  *    request's uncommitted unique-index entry: when it commits, the claim fails and we replay its
  *    response (same fingerprint) or 422 `IdempotencyKeyReusedError` (different one); when it rolls
  *    back, the claim succeeds and we run. No duplicate execution, no "in progress" state.
- * 2. Lock the study row (`SELECT … FOR UPDATE`, owner-scoped: absent/foreign → 404). Every
- *    mutation of one study queues here before touching any child row, so mutations of one study
- *    cannot deadlock on each other's child rows.
+ * 2. Lock the study row (`SELECT … FOR UPDATE`, owner-scoped: absent/foreign, or trashed past its
+ *    recovery window → 404). Every mutation of one study queues here before touching any child
+ *    row, so mutations of one study cannot deadlock on each other's child rows. Then the
+ *    lifecycle guard: an archived or trashed study is 422 unless the spec names a lifecycle
+ *    transition that starts from its state (BIB-22).
  * 3. Run `work` with a `StudyMutation`. It must make ≥1 revision check and append ≥1 event;
  *    otherwise `execute` throws (a programming error, 500) and rolls everything back.
  * 4. Write the study counters (content_revision, last_event_sequence) in one UPDATE, store the
@@ -114,6 +127,9 @@ export class MutationService {
   ): Promise<MutationResult> {
     return this.transact(ownerId, request, async (transaction) => {
       const lock = await this.studyRevisions.lock(transaction, ownerId, spec.studyId);
+      // The lifecycle guard (BIB-22), once for every study mutation: under the lock, before any
+      // work, so a refusal writes nothing and rolls the receipt back.
+      assertLifecycleAllows(lock.lifecycle, spec.lifecycleTransition);
       if (spec.bumpsContentRevision) lock.bumpContentRevision();
       return this.run(lock, spec.work, false);
     });
@@ -215,6 +231,30 @@ export class MutationService {
     await this.studyRevisions.writeCounters(lock);
     lock.release();
     return response;
+  }
+
+  /**
+   * Deletes the expired receipts of these owners (BIB-22), inside the caller's transaction (it
+   * joins through the transaction context). The trash purge calls it for the owners whose studies
+   * it purged: a receipt's stored response can hold the study's title, questions and tags, and
+   * every receipt about a study purged 30 days after its last mutation (the trash) has expired
+   * (7-day TTL), so this removes them all. An expired receipt replays nothing (a new claim takes
+   * it over), so deleting one changes no behavior; a claim that is taking one over at the same
+   * moment has already moved its `expires_at`, and PostgreSQL re-checks the condition after the
+   * row lock, so it is kept. Owner-scoped; the general receipt purge belongs to the job runner
+   * (BIB-39).
+   */
+  async deleteExpiredReceipts(ownerIds: readonly string[]): Promise<number> {
+    if (activeTransaction() === undefined) {
+      throw new Error('MutationService.deleteExpiredReceipts must run inside a transaction');
+    }
+    if (ownerIds.length === 0) return 0;
+    return MutationReceipt.destroy({
+      // The database clock, as the claim's own `expires_at <= now()` takeover test: a receipt
+      // the database still holds live (it would replay) is never deleted, whatever the clock of
+      // the process running the purge says.
+      where: { ownerId: [...ownerIds], expiresAt: { [Op.lte]: fn('now') } },
+    });
   }
 
   /** True when this transaction now owns the receipt row (new, or taken over from an expired one). */
