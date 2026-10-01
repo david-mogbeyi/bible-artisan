@@ -4,15 +4,17 @@ import {
   MAX_SEARCH_TOKENS,
   type SearchBibleQuery,
   type SearchBibleResponse,
+  type SearchReferenceSuggestion,
   type SearchResult,
 } from '@bible-artisan/contracts';
 import { QueryTypes } from 'sequelize';
 import { SearchQueryIsReferenceError, ValidationError } from '../../../common/errors/domain-errors';
 import { DATABASE } from '../../../database/database.module';
 import type { Database } from '../../../database/database';
-import { ReferenceService } from '../reference/reference.service';
+import { ReferenceService, type SearchPrecedence } from '../reference/reference.service';
 import { type CursorPosition, decodeCursor, encodeCursor, queryFingerprint } from './search-cursor';
 import { matchVerse, parseSearchQuery, toCodePointRanges } from './search-text';
+import { searchVectorInputSql } from './search-vector';
 
 /** Most candidate verses one request examines; a page may end early with a cursor to continue. */
 export const MAX_SCANNED_CANDIDATES = 1000;
@@ -26,8 +28,10 @@ interface CandidateRow extends CursorPosition {
  * Candidates in result order: `ts_rank` descending, then canonical order (book sequence, chapter,
  * verse), strictly after the cursor position when one is given. The query string reaches SQL only
  * as already-normalized word tokens, as a bind parameter, through `plainto_tsquery`, which reads
- * plain text and never operator syntax. `search_vector` is the generated `simple` vector; its GIN
- * index serves `@@`. The rank (a float4) is computed once per row (inner query) and returned as
+ * plain text and never operator syntax, after the same locale-independent `translate` the
+ * generated column applies (`search-vector.ts`; the tokens never contain those characters, so
+ * this is defense in depth). `search_vector` is the generated `simple` vector; its GIN index
+ * serves `@@`. The rank (a float4) is computed once per row (inner query) and returned as
  * float8 text, which keeps 15 + `extra_float_digits` significant digits (17 at the default); a
  * float4 needs 9, so `$4::real` reads back the same float4 unless that setting is below -6, and
  * the keyset never skips or repeats a row. (Float4 text would round at `extra_float_digits` 0.)
@@ -39,7 +43,7 @@ export const CANDIDATES_SQL = `
              ts_rank(v.search_vector, q.query) AS rank
         FROM bible_verse v
         JOIN bible_book b ON b.edition_id = v.edition_id AND b.code = v.book_code
-       CROSS JOIN plainto_tsquery('simple'::regconfig, $2) AS q(query)
+       CROSS JOIN plainto_tsquery('simple'::regconfig, ${searchVectorInputSql('$2')}) AS q(query)
        WHERE v.edition_id = $1
          AND v.search_vector @@ q.query
          AND ($3::text IS NULL OR v.book_code = $3::text)
@@ -52,8 +56,9 @@ export const CANDIDATES_SQL = `
 /**
  * Keyword search over the active edition's verse text (BIB-16, FR-BIBLE-004/005). PostgreSQL
  * narrows the candidates; `matchVerse` decides every result against the stored text, so a
- * candidate the index admits but the text does not support is dropped, never shown. Read-only:
- * no transaction, no events, nothing persisted, nothing logged.
+ * candidate the index admits but the text does not support is dropped, never shown. No
+ * transaction, no events, nothing logged. The only write: a book-only terms query's suggestion
+ * upserts its shared `scripture_reference` row, exactly as `POST /bible/resolve` would.
  */
 @Injectable()
 export class SearchService {
@@ -72,9 +77,11 @@ export class SearchService {
         book: ['No book in this translation has that code'],
       });
     }
-    if (mode === 'terms' && (await this.references.isReference(editionId, q))) {
-      throw new SearchQueryIsReferenceError();
-    }
+    const precedence: SearchPrecedence =
+      mode === 'terms'
+        ? await this.references.searchPrecedence(editionId, q)
+        : { kind: 'keywords' }; // phrase mode is literal text
+    if (precedence.kind === 'reference') throw new SearchQueryIsReferenceError();
     const query = parseSearchQuery(q, mode);
     if (query === 'no_words') {
       throw new ValidationError('Invalid request', { q: ['Enter at least one word'] });
@@ -133,9 +140,15 @@ export class SearchService {
       after = last;
     }
 
+    // Only once the page is ready, so a rejected request (bad cursor, 404) persists nothing.
+    const referenceSuggestion: SearchReferenceSuggestion | null =
+      precedence.kind === 'book'
+        ? await this.references.suggestion(editionId, precedence.resolution)
+        : null;
     return {
       results,
       nextCursor: remaining && last ? encodeCursor(fingerprint, last) : null,
+      referenceSuggestion,
     };
   }
 

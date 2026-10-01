@@ -9,6 +9,7 @@ import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
+import { BibleBook } from '../src/database/models/bible-book.model';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
@@ -381,7 +382,7 @@ describe('content-redacted operational logs', () => {
 
     // A private query that matches nothing: 200 with an empty page.
     const empty = await searchFor({ q: `${secret('search')} faith`, editionId: edition.id });
-    expect(empty.body).toStrictEqual({ results: [], nextCursor: null });
+    expect(empty.body).toStrictEqual({ results: [], nextCursor: null, referenceSuggestion: null });
     await expectLogged(empty, { ...route, status: 200 });
 
     // A query with results: the returned verse text, labels and cursor are never logged either.
@@ -429,6 +430,23 @@ describe('content-redacted operational logs', () => {
       { ...route, status: 404 },
       { errorType: 'NotFoundError', body: NOT_FOUND },
     );
+
+    // A book-only query: searched, with the book suggested. Neither the book name, the
+    // suggestion's label and id, nor the results reach a log line.
+    const book = await BibleBook.findOne({
+      where: { editionId: edition.id, code: 'HAB' },
+      rejectOnEmpty: true,
+    });
+    const bookOnly = await searchFor({ q: track(book.name), editionId: edition.id });
+    const suggested = bookOnly.body as {
+      results: { text: string; reference: { label: string } }[];
+      referenceSuggestion: { outcome: string; reference: { id: string; label: string } };
+    };
+    expect(suggested.referenceSuggestion.outcome).toBe('resolved');
+    track(suggested.referenceSuggestion.reference.label);
+    track(suggested.referenceSuggestion.reference.id);
+    for (const result of suggested.results) track(result.text);
+    await expectLogged(bookOnly, { ...route, status: 200 });
 
     const reference = await searchFor({ q: track('Romans 8:28'), editionId: edition.id });
     await expectLogged(

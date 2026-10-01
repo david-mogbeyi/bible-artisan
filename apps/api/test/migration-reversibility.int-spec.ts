@@ -115,17 +115,21 @@ describe('migration reversibility', () => {
     const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
     const REFERENCE_MIGRATION = '20261001104810_create_scripture_reference.ts';
     await withCorpusDropAllowed(() => migrator.down({ to: SEARCH_MIGRATION }));
-    const before = await recordedMigrations(db);
-    expect(before.at(-1)).toBe(REFERENCE_MIGRATION);
+    // Restore latest even when an assertion fails, so later tests and files see the full schema.
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(REFERENCE_MIGRATION);
 
-    const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
-    expect((error as { cause?: unknown }).cause).toMatchObject({
-      message:
-        'scripture_reference drop refused: shared reference ids exist (set ALLOW_CORPUS_DROP=1)',
-      parent: expect.objectContaining({ code: '23000' }),
-    });
-    expect(await recordedMigrations(db)).toStrictEqual(before);
-    await migrator.up();
+      const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
+      expect((error as { cause?: unknown }).cause).toMatchObject({
+        message:
+          'scripture_reference drop refused: shared reference ids exist (set ALLOW_CORPUS_DROP=1)',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+    } finally {
+      await migrator.up();
+    }
   });
 
   it("refuses the corpus migration's own down while an edition is active, changing nothing", async () => {
@@ -137,20 +141,24 @@ describe('migration reversibility', () => {
       const first = later[0];
       await withCorpusDropAllowed(() => migrator.down({ to: first }));
     }
-    const before = await recordedMigrations(db);
-    expect(before.at(-1)).toBe(CORPUS_MIGRATION);
-    const tablesBefore = await publicTables(db, DOMAIN_TABLES);
-    expect(tablesBefore).toEqual(expect.arrayContaining(['bible_edition', 'bible_verse']));
+    // Restore latest even when an assertion fails, so later tests and files see the full schema.
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(CORPUS_MIGRATION);
+      const tablesBefore = await publicTables(db, DOMAIN_TABLES);
+      expect(tablesBefore).toEqual(expect.arrayContaining(['bible_edition', 'bible_verse']));
 
-    const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as { cause?: unknown }).cause).toMatchObject({
-      message: 'bible corpus drop refused: an active edition exists (set ALLOW_CORPUS_DROP=1)',
-      parent: expect.objectContaining({ code: '23000' }),
-    });
-    expect(await recordedMigrations(db)).toStrictEqual(before);
-    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(tablesBefore);
-    await migrator.up();
+      const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as { cause?: unknown }).cause).toMatchObject({
+        message: 'bible corpus drop refused: an active edition exists (set ALLOW_CORPUS_DROP=1)',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(tablesBefore);
+    } finally {
+      await migrator.up();
+    }
   });
 
   it('reverts every migration to zero, then reapplies them all to latest', async () => {
@@ -165,12 +173,16 @@ describe('migration reversibility', () => {
 
     // Dropping the active corpus needs the explicit opt-in (ADR 0001, BIB-14 addendum).
     const reverted = await withCorpusDropAllowed(() => migrator.down({ to: 0 }));
-    expect(reverted.map((m) => m.name)).toStrictEqual([...allNames].reverse());
-    expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual([]);
-    expect(await recordedMigrations(db)).toStrictEqual([]);
-    expect(await migrator.pending()).toHaveLength(allNames.length);
-
-    const reapplied = await migrator.up();
+    let reapplied: Awaited<ReturnType<typeof migrator.up>> | undefined;
+    // Restore latest even when an assertion fails, so later tests see the full schema.
+    try {
+      expect(reverted.map((m) => m.name)).toStrictEqual([...allNames].reverse());
+      expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual([]);
+      expect(await recordedMigrations(db)).toStrictEqual([]);
+      expect(await migrator.pending()).toHaveLength(allNames.length);
+    } finally {
+      reapplied = await migrator.up();
+    }
     expect(reapplied.map((m) => m.name)).toStrictEqual(allNames);
     expect(await publicTables(db, DOMAIN_TABLES)).toStrictEqual(DOMAIN_TABLES);
     expect(await recordedMigrations(db)).toStrictEqual(allNames);

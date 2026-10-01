@@ -1,4 +1,5 @@
 import { MAX_SEARCH_TOKENS, type SearchMode } from '@bible-artisan/contracts';
+import { foldTypedInput } from '../typed-input';
 
 /**
  * The one definition of what a search matches (BIB-16, PRD §14, FR-BIBLE-004/005). PostgreSQL
@@ -18,11 +19,6 @@ import { MAX_SEARCH_TOKENS, type SearchMode } from '@bible-artisan/contracts';
  * counts selection offsets in code points); the text itself is never rebuilt.
  */
 
-/** Soft hyphen, zero-width space/joiners, word joiner and BOM: invisible in typed input. */
-const INVISIBLE = /[\u00AD\u200B-\u200D\u2060\uFEFF]/g;
-/** Full-width ASCII (U+FF01..U+FF5E), as typed with an IME. */
-const FULL_WIDTH_ASCII = /[\uFF01-\uFF5E]/g;
-const FULL_WIDTH_OFFSET = 0xfee0;
 const TOKEN = /[\p{L}\p{M}\p{N}]+/gu;
 /** Neutral in a separator: whitespace (JavaScript `\s` includes U+00A0) and invisible marks. */
 const NEUTRAL_SPACE = /[\s\u00AD\u200B-\u200D\u2060\uFEFF]/gu;
@@ -63,14 +59,6 @@ export interface Range {
   end: number;
 }
 
-/** NFC, invisible characters removed, full-width ASCII folded to ASCII. Queries only. */
-export function foldQuery(input: string): string {
-  return input
-    .normalize('NFC')
-    .replace(INVISIBLE, '')
-    .replace(FULL_WIDTH_ASCII, (ch) => String.fromCharCode(ch.charCodeAt(0) - FULL_WIDTH_OFFSET));
-}
-
 /** What must match between two consecutive phrase tokens. */
 export function canonicalSeparator(raw: string): string {
   if (raw === ' ') return ''; // by far the commonest separator
@@ -102,9 +90,12 @@ export function tokenize(text: string): Tokenized {
   return { tokens, separators };
 }
 
-/** Parses typed input into a query, or names why it cannot be searched. */
+/**
+ * Parses typed input into a query, or names why it cannot be searched. The input is first folded
+ * by `foldTypedInput`, the same fold the reference parser applies.
+ */
 export function parseSearchQuery(input: string, mode: SearchMode): SearchQuery | QueryProblem {
-  const { tokens, separators } = tokenize(foldQuery(input));
+  const { tokens, separators } = tokenize(foldTypedInput(input));
   if (tokens.length === 0) return 'no_words';
   if (tokens.length > MAX_SEARCH_TOKENS) return 'too_many_words';
   const norms = tokens.map((token) => token.norm);

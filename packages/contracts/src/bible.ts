@@ -46,10 +46,19 @@ export const referenceCandidateSchema = z.object({
 
 export type ReferenceCandidate = z.infer<typeof referenceCandidateSchema>;
 
+const resolvedReferenceOutcomeSchema = z.object({
+  outcome: z.literal('resolved'),
+  reference: scriptureReferenceSchema,
+});
+/** The book name matched more than one book: the user picks one (FR-BIBLE-003). */
+const ambiguousReferenceOutcomeSchema = z.object({
+  outcome: z.literal('ambiguous'),
+  candidates: z.array(referenceCandidateSchema),
+});
+
 export const resolveReferenceResponseSchema = z.discriminatedUnion('outcome', [
-  z.object({ outcome: z.literal('resolved'), reference: scriptureReferenceSchema }),
-  /** The book name matched more than one book: the user picks one (FR-BIBLE-003). */
-  z.object({ outcome: z.literal('ambiguous'), candidates: z.array(referenceCandidateSchema) }),
+  resolvedReferenceOutcomeSchema,
+  ambiguousReferenceOutcomeSchema,
   /** Not a complete reference shape: the caller treats the input as keywords (PRD section 14). */
   z.object({ outcome: z.literal('not_reference') }),
 ]);
@@ -133,14 +142,33 @@ export const searchResultSchema = z.object({
 
 export type SearchResult = z.infer<typeof searchResultSchema>;
 
+/**
+ * A terms query that is only a book name, abbreviation or code (`Job`, `Acts`, `Dan`) is searched
+ * as keywords, and also offered as a reference: the book resolved exactly as
+ * `POST /bible/resolve` resolves it (its first chapter), or the books it could mean. The client
+ * may show "Open <Book>". Same shapes as the resolve response's `resolved` and `ambiguous`.
+ */
+export const searchReferenceSuggestionSchema = z.discriminatedUnion('outcome', [
+  resolvedReferenceOutcomeSchema,
+  ambiguousReferenceOutcomeSchema,
+]);
+
+export type SearchReferenceSuggestion = z.infer<typeof searchReferenceSuggestionSchema>;
+
 export const searchBibleResponseSchema = z.object({
   /** Relevance order, then canonical Bible order. May hold fewer than `limit` results. */
   results: z.array(searchResultSchema),
   /** Pass back as `cursor` with the same query for the next page; null when nothing remains. */
   nextCursor: z.string().nullable(),
+  /** Terms mode, book-only input: the book as a reference (on every page). Otherwise null. */
+  referenceSuggestion: searchReferenceSuggestionSchema.nullable(),
 });
 
 export type SearchBibleResponse = z.infer<typeof searchBibleResponseSchema>;
 
-/** 422: the terms-mode input is a Bible reference; resolve it instead (PRD section 14). */
+/**
+ * 422: the terms-mode input is a Bible reference with a chapter or verse (`Dan 3`, `Rom 9:1`), or
+ * an invalid one; resolve it instead (PRD section 14). Book-only input is searched instead, with
+ * a `referenceSuggestion`.
+ */
 export const SEARCH_QUERY_IS_REFERENCE = 'SEARCH_QUERY_IS_REFERENCE';

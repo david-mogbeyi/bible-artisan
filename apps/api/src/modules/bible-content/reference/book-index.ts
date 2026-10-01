@@ -81,17 +81,17 @@ export class BookIndex {
     this.nameKeys = this.books.map((book) => [normalizeBookKey(book.name), book]);
   }
 
+  /** The book with this USFM code, if the edition has it. */
+  book(code: string): IndexBook | undefined {
+    return this.books.find((book) => book.code === code);
+  }
+
   /**
    * Every book the token could mean, in canon order: exact key matches plus (for a token of at
    * least two letters) books whose normalized name starts with it. Book-only input never matches
    * by prefix alone, so keywords like "so" or "am" are not taken for Song of Solomon or Amos; but
    * an exact match there still reports every book it is a prefix of (`Jud` -> Judges and Jude).
    */
-  /** The book with this USFM code, if the edition has it. */
-  book(code: string): IndexBook | undefined {
-    return this.books.find((book) => book.code === code);
-  }
-
   candidates(key: string, letters: number, allowPrefixOnly: boolean): IndexBook[] {
     const found = new Set(this.exact.get(key) ?? []);
     if (letters >= MIN_PREFIX_LETTERS && (allowPrefixOnly || found.size > 0)) {

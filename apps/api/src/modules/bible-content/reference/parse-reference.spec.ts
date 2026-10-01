@@ -109,6 +109,8 @@ describe('parseReference', () => {
     ['no-break spaces', 'Rom\u00A09:1\u00A0-\u00A05'],
     ['full-width digits and colon', 'Rom \uFF19\uFF1A\uFF11-\uFF15'],
     ['zero-width characters', 'Ro\u200Bm 9\uFEFF:1-\u200D5'],
+    ['a word joiner and soft hyphens', 'Rom\u2060 9:1\u00AD-\u00AD5'],
+    ['a word joiner as the only separator', 'Rom\u2060\u00A09\u2060:1-5'],
     ['an ideographic space', 'Rom\u30009:1-5'],
   ])('reads a range typed with %s exactly like its ASCII form', (_label, input) => {
     expect(parseReference(input)).toStrictEqual(parseReference('Rom 9:1-5'));
@@ -200,10 +202,16 @@ describe('normalizeReferenceInput', () => {
     ).toBe('rom 9:1-5');
   });
 
-  it('keeps every other compatibility character as typed (no NFKC)', () => {
+  it('keeps every compatibility character as typed (no NFKC)', () => {
     expect(normalizeReferenceInput('Gen 1:1\u00B2')).toBe('gen 1:1\u00B2');
     expect(normalizeReferenceInput('\u2161 Kings')).toBe('\u2161 kings');
-    expect(normalizeReferenceInput('1 \u212Aings')).toBe('1 \u212Aings');
+  });
+
+  it('applies NFC, the fold search uses: canonical equivalents are the same text', () => {
+    // The Kelvin sign is canonically (not just compatibly) `K`.
+    expect(normalizeReferenceInput('1 \u212Aings')).toBe('1 kings');
+    expect(normalizeReferenceInput('Rom\u2060 9:1')).toBe('rom 9:1');
+    expect(normalizeReferenceInput('Ro\u00ADm 9:1')).toBe('rom 9:1');
   });
 });
 

@@ -138,7 +138,7 @@ describe('buildOpenApiDocument', () => {
         '/bible/search': {
           get: {
             description:
-              'Searches verse text of an active edition. terms: every word must occur (whole words, case-insensitive, no stemming). phrase: the words occur consecutively with matching punctuation. Every result is verified against the stored verse text, which is returned unchanged with code-point highlight ranges. Relevance order, then canonical order; bounded, cursor-paged. A terms query that is a Bible reference is 422 SEARCH_QUERY_IS_REFERENCE.',
+              'Searches verse text of an active edition. terms: every word must occur (whole words, case-insensitive, no stemming). phrase: the words occur consecutively with matching punctuation. Every result is verified against the stored verse text, which is returned unchanged with code-point highlight ranges. Relevance order, then canonical order; bounded, cursor-paged. A terms query that is a Bible reference with a chapter or verse (or an invalid one) is 422 SEARCH_QUERY_IS_REFERENCE; a terms query that is only a book name, abbreviation or code is searched as keywords and also returns that book as referenceSuggestion.',
             security: [{ sessionCookie: [] }],
             parameters: [
               {

@@ -49,6 +49,7 @@ describe('canonicalSeparator', () => {
 describe('parseSearchQuery', () => {
   it('folds full-width ASCII and invisible characters before tokenizing', () => {
     expect(query('ＡＢＣ de\u200Bf', 'terms').tokens).toStrictEqual(['abc', 'def']);
+    expect(query('gh\u00ADi jk\u2060l', 'terms').tokens).toStrictEqual(['ghi', 'jkl']);
   });
 
   it('keeps distinct terms in first-seen order, and the full sequence for a phrase', () => {
