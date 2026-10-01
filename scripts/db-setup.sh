@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Creates the dev and test databases on a native PostgreSQL (idempotent), then migrates both.
+# Creates the dev and test databases on a native PostgreSQL (idempotent), migrates both, and
+# imports the Bible corpus into both.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -f .env ] || cp .env.example .env
@@ -17,3 +18,7 @@ done
 
 pnpm --filter @bible-artisan/api db:migrate
 DATABASE_URL="$DATABASE_URL_TEST" pnpm --filter @bible-artisan/api db:migrate
+
+# Import the pinned WEB corpus (idempotent: a no-op when the release is already active).
+pnpm --filter @bible-artisan/api corpus:import
+DATABASE_URL="$DATABASE_URL_TEST" pnpm --filter @bible-artisan/api corpus:import

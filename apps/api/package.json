@@ -15,7 +15,8 @@
     "test:watch": "vitest --project unit",
     "db:migrate": "tsx src/database/migrate.ts latest",
     "db:migrate:down": "tsx src/database/migrate.ts down",
-    "db:migrate:make": "tsx src/database/migrate.ts make"
+    "db:migrate:make": "tsx src/database/migrate.ts make",
+    "corpus:import": "tsx src/modules/bible-content/corpus/import-corpus.ts"
   },
   "dependencies": {
     "@bible-artisan/contracts": "workspace:*",

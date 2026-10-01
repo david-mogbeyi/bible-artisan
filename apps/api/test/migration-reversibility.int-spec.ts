@@ -5,10 +5,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
 import { createMigrator, MIGRATIONS_DIR } from '../src/database/migrator';
+import {
+  importCorpus,
+  readCorpusArtifact,
+} from '../src/modules/bible-content/corpus/corpus-importer';
+import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 
 const DOMAIN_TABLES = [
   'auth_challenge',
   'auth_session',
+  'bible_book',
+  'bible_edition',
+  'bible_verse',
   'mutation_receipt',
   'study',
   'study_event',
@@ -37,8 +45,9 @@ async function recordedMigrations(db: Database): Promise<string[]> {
  * Automated migration-reversibility check (AGENTS.md: "Migrations must be reversible"). Runs every
  * migration's `down` back to zero, checks the schema and SequelizeMeta are really empty, then
  * `up` back to latest and checks everything is back and recorded. Restores "latest" afterward so
- * later test files in this run still see the tables. Note: dropping to zero also clears any rows
- * earlier runs left behind in the test database.
+ * later test files in this run still see the tables, and re-imports the Bible corpus the drop
+ * removed (readiness needs it). Note: dropping to zero also clears any rows earlier runs left
+ * behind in the test database.
  */
 describe('migration reversibility', () => {
   let db: Database;
@@ -50,6 +59,7 @@ describe('migration reversibility', () => {
   afterAll(async () => {
     // Guarantee latest is restored even if an assertion above throws mid-test.
     await createMigrator(db).up();
+    await importCorpus(db, readCorpusArtifact(ENGWEBP_RELEASE), ENGWEBP_RELEASE);
     await db.close();
   });
 

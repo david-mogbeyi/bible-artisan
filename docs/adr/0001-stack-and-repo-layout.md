@@ -29,6 +29,7 @@ PRD section 26 fixes the architecture: a TypeScript modular monolith (NestJS) wi
 - Managed email OTP provider and session cookies: **BIB-10** (decided, see "Addendum: email OTP provider" below)
 - Content-redacted structured logging and correlation IDs: **BIB-13**
 - The job runner in the worker: **BIB-39**
+- Bible corpus source, import, and immutability: **BIB-14** (decided, see its addendum below)
 - Playwright E2E (the Romans conscience journey): added with the first end-to-end user flow and required by **BIB-54**
 - Hosting (the PRD suggests Vercel for web and Railway for API/worker/DB): decide before the first deploy
 
@@ -139,6 +140,82 @@ return mutations.execute(ownerId, mutation, {
 **Pool timeouts.** `createDatabase` sets pg's `connectionTimeoutMillis` (5 s) and the session settings `statement_timeout` (30 s) and `idle_in_transaction_session_timeout` (60 s), sent as startup parameters (`DATABASE_TIMEOUTS`). Without a connect timeout, connects to a server that accepts TCP but never answers stay counted against the pool forever, and the pool stays locked up after the database recovers. 5 s is well under the 10 s acquire timeout; 30 s is far above any interactive mutation; 60 s idle-in-transaction ends sessions that hold locks for a stuck request. Each migration runs `SET LOCAL statement_timeout = 0` in its own transaction, so long DDL or backfills are not cut off; a future long-running job does the same.
 
 **Process failures.** The API, the worker, and the migrate CLI run through `runEntrypoint`: a startup error (invalid config, a failed migration) and any later unhandled rejection or uncaught exception become ONE JSON `process_failed` line (entry point, error class, cause class, SQLSTATE/errno code, migration name, the NAMES of invalid env variables) and exit 1. Never the error itself: its message and properties carry SQL, bound parameters, and PostgreSQL `detail`, which quotes row values. The app logger also reduces an Error passed as a log message (Nest's own `ExceptionHandler` does this on a failed bootstrap) to `unhandled_error` with its class name. An aborted request (client gone before any headers were sent) logs `status: null, aborted: true`, never Express's default 200.
+
+## Addendum (2026-10-01, BIB-14): the WEB Protestant corpus
+
+**Source and rights evidence.** The MVP corpus is the World English Bible, Protestant edition (eBible.org `engwebp`, 66-book canon), as PRD §20 recommends.
+
+- Artifact: `https://ebible.org/Scriptures/engwebp_usfm.zip`, downloaded 2026-10-01.
+  - 2,903,129 bytes, `Last-Modified: Tue, 29 Sep 2026 01:50:24 GMT`.
+  - SHA-256 `c725155aa8192b954e552a0b08aa75f8e7b85e6e56f1eb22efd6d30f5b4aa3cc`.
+  - Its `copr.htm` says "generated with Haiola by eBible.org 29 Sep 2026 from source files dated 29 Sep 2026" and "2020 stable text edition". Release id: `2026-09-29`.
+- eBible's details page (https://ebible.org/find/details.php?id=engwebp) says "This edition omits the Deuterocanon/Apocrypha".
+- License, verbatim from the artifact's `copr.htm` (the same text as the publisher notice PRD §20 links, https://ebible.org/study/content/texts/engwebp/about.html):
+
+  > The World English Bible is in the Public Domain. That means that it is not copyrighted. However, "World English Bible" is a Trademark of eBible.org.
+  > … All we ask is that if you CHANGE the actual text of the World English Bible in any way, you not call the result the World English Bible any more.
+
+  A unit test asserts that both sentences appear in the committed artifact.
+
+- Permitted uses: storage, caching, search, quotation, AI processing, and export, all under the public-domain dedication. The one condition: we never present altered text under the WEB name.
+- Territories: the dedication states no territorial restriction.
+- **Outstanding:** human product/legal confirmation of launch territories (PRD §38 open decision; release-gate scenario in §32). It is recorded as `launchTerritoriesConfirmed: false` in the stored rights record.
+
+**Committed, not fetched.** eBible regenerates the download in place: there is no versioned URL, and the bytes change with each regeneration even while the text stays the 2020 stable edition. Fetching at import time would make CI depend on the network and on the publisher's schedule, and a pinned SHA-256 would eventually start failing. So the artifact is committed byte-identical at `apps/api/corpus/engwebp/engwebp_usfm.zip` (about 2.9 MB, once). `.gitattributes` marks it binary, so Git never rewrites its bytes. Anyone can check the SHA-256 against the publisher's copy of the same generation. The import never touches the network. The USFM zip is the publisher's master format; eBible's VPL plain-text product was not used (see the cross-check below for why).
+
+**Import pipeline** (`apps/api/src/modules/bible-content/corpus/`, `pnpm corpus:import`):
+
+1. Verify the artifact SHA-256 against the pinned release (`engwebp-release.ts`).
+2. Unzip it with a small `node:zlib` reader (no dependency) that checks each member's CRC-32 and size.
+3. Parse each canon book's USFM. `FRT` and `GLO` are skipped by their `\id`, and any other unlisted book fails.
+4. Validate everything against the manifest.
+5. Write the edition (inactive), its books and its verses in ONE transaction, activate it, and COMMIT.
+
+Re-running is idempotent:
+
+- The same release and artifact: the stored content checksum is recomputed in SQL and the run is a no-op.
+- The same release from a different artifact: refused.
+- Concurrent runs queue on a table lock.
+- Any failure rolls back the whole transaction, so a bad import never replaces or disturbs the active release.
+
+The command is a separate step, not a migration: migrations only get `context.query(sql)` with no bind parameters, and Scripture must never be string-spliced into SQL. `pnpm db:setup` runs it for the dev and test databases, CI runs it after `db:migrate`, and a deployment runs it after migrating. The integration suite imports in its global setup, and the reversibility test re-imports after it drops everything.
+
+**Text rules (USFM to verse text).** There is an explicit allowlist, and an unknown marker fails the import rather than being guessed at.
+
+- Dropped with their content: footnotes `\f…\f*` and cross-references `\x…\x*`.
+- Dropped as whole lines: book identification and titles (`\id \ide \h \toc1-3 \mt1-3`), `\ms1`, `\s`, Psalm superscriptions and Psalm 119 stanza letters (`\d`), speaker labels (`\sp`), and `\cl`. A heading line that also opens a chapter or verse is refused. These are not verse text in English versification; a later reader ticket can import headings from the same artifact.
+- Markers dropped, content kept: `\w`/`\+w` (Strong's attributes removed), `\wj`, `\qs`, and `\bk`. An opening character marker consumes the one whitespace character after it, which the USFM spec defines as the delimiter; a closing marker consumes nothing.
+- Paragraph and poetry markers become word boundaries.
+- ASCII whitespace runs collapse to one space and the ends are trimmed. Nothing else is touched: curly quotes, dashes, and the publisher's three no-break spaces (U+00A0) are preserved. JavaScript `\s` and `trim()` are deliberately not used, since both treat U+00A0 as whitespace.
+- The result:
+  - 66 books, 1,189 chapters, 31,103 verses, contiguous from 1, all NFC.
+  - 5 verses the edition numbers but gives only in footnotes are stored with empty text: LUK 17:36, ACT 8:37, ACT 15:34, ACT 24:7, ROM 16:25.
+- Book names are the publisher's `\toc2`/`\toc3`. Aliases belong to BIB-15.
+
+**How the expected values were obtained (no Scripture typed).** Every count, the book list, the 5 empty verses, 8 sample-verse SHA-256s, and the content SHA-256 were produced by running this parser over the artifact and pasted as generated output.
+
+- They were re-derived independently with a separate Python implementation of the same rules: identical content SHA-256 `c7083981d77c5b1c41ea867ace86a9da1094f7a4de43010bb545a1ee357995b4`, identical sample hashes, identical chapter counts.
+- That parse was cross-checked against eBible's own VPL rendering of the same generation (`engwebp_vpl.zip`, SHA-256 `7d2e0b91ba43e2500fcab9c64d9db1962750deeff4e1186aed4c30220f5689be`). It matched 30,960 of 31,103 verses exactly. All 143 differences are VPL rendering choices that this import deliberately does not copy:
+  - 117 Psalm superscriptions and 21 Psalm 119 stanza letters folded into verse text;
+  - 4 Song of Songs speaker labels;
+  - one space VPL inserts before `\qs` at Psalm 68:32.
+- The tests take their USFM inputs from the committed artifact at run time. They assert properties and equivalences, for example "removing the footnote span does not change the verse", or "no verse in the corpus has a space before closing punctuation". They never assert typed verse text.
+
+**Immutability is enforced by PostgreSQL**, not by convention (migration `create_bible_corpus`):
+
+- Books and verses can be inserted only while their edition is not yet activated. The insert trigger takes `FOR SHARE` on the edition row, so a racing activation either counts the row or refuses the insert.
+- Books and verses can never be updated, deleted, or truncated.
+- An edition can never be deleted or truncated. Its only permitted update is the single activation (`activated_at` NULL to a timestamp, nothing else changed).
+- Activation recomputes, in SQL, the verse count, every `text_sha256`, each book's chapter count, and the edition `content_sha256` (`bible_edition_content_sha256()`, the same serialization as `contentSha256()` in TypeScript). It refuses on any mismatch.
+- All refusals are SQLSTATE 23000 with content-free messages.
+- `down` drops the tables (DROP fires no row or TRUNCATE triggers).
+- A superuser could still disable triggers. That is an operator action outside the app's reach, and re-running `corpus:import` would detect any drift through the stored checksum.
+
+**Readiness.** `GET /v1/health` also requires this build's pinned release (code, release, artifact SHA-256) to be active. The check is part of the same single statement as the migrations check, and the response gains `corpus: 'ready' | 'missing' | 'unknown'`. A deployment that skipped `corpus:import` is not ready, and the web status line says "Bible corpus missing".
+
+**Privacy.** The CLI logs one `corpus_import` line with counts, checksums, edition code, release, and duration. A failure is the usual `process_failed` line with a fixed `code` (e.g. `CORPUS_ARTIFACT_CHECKSUM`). Validation messages may name a verse, so they are never logged (NFR-PRIV-001). An integration test runs the CLI with production JSON logging and asserts the exact allowlisted line.
+
+**Not in BIB-14:** aliases and reference parsing (BIB-15), `search_vector`/GIN (BIB-16), `/bible` routes and the reader (BIB-17), anchors (BIB-18), AI citation checks (BIB-41).
 
 ## Notes
 

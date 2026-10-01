@@ -7,20 +7,40 @@ import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
 import { DATABASE } from '../src/database/database.module';
 import { shippedMigrationNames } from '../src/database/migrator';
-import { READINESS_CONNECTION, SHIPPED_MIGRATIONS } from '../src/health/health.controller';
+import {
+  PINNED_CORPUS,
+  READINESS_CONNECTION,
+  SHIPPED_MIGRATIONS,
+} from '../src/health/health.controller';
 import {
   checkReadiness,
+  type CorpusPin,
   READINESS_BUDGET_MS,
   READINESS_CACHE_MS,
   READINESS_TIMEOUT_MS,
 } from '../src/health/readiness';
+import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 import { createTestApp } from './app';
 import { hostAndPort, startTcpProxy, type TcpProxy } from './support/tcp-proxy';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const READY = { status: 'ok', database: 'up', migrations: 'current' };
-const DB_DOWN = { status: 'unavailable', database: 'down', migrations: 'unknown' };
+const READY = { status: 'ok', database: 'up', migrations: 'current', corpus: 'ready' };
+const DB_DOWN = {
+  status: 'unavailable',
+  database: 'down',
+  migrations: 'unknown',
+  corpus: 'unknown',
+};
+
+/** The release this build pins (imported by the suite's global setup). */
+const PIN: CorpusPin = {
+  code: ENGWEBP_RELEASE.code,
+  sourceRelease: ENGWEBP_RELEASE.sourceRelease,
+  artifactSha256: ENGWEBP_RELEASE.artifactSha256,
+};
+/** A release that was never imported: same edition, another artifact. */
+const NOT_IMPORTED: CorpusPin = { ...PIN, artifactSha256: '0'.repeat(64) };
 
 /** An app whose readiness probe connects to `connectionString` instead of the test database. */
 function appWithReadinessDatabase(connectionString: string): Promise<INestApplication<Server>> {
@@ -82,6 +102,31 @@ describe('GET /v1/health (readiness) and GET /v1/health/live (liveness)', () => 
         status: 'unavailable',
         database: 'up',
         migrations: 'pending',
+        corpus: 'ready',
+      });
+    });
+  });
+
+  describe('when the pinned Bible corpus release is not imported', () => {
+    let app: INestApplication<Server>;
+
+    beforeAll(async () => {
+      app = await createTestApp(undefined, {
+        override: (builder) => builder.overrideProvider(PINNED_CORPUS).useValue(NOT_IMPORTED),
+      });
+    });
+
+    afterAll(async () => {
+      await app.close();
+    });
+
+    it('answers 503 with the corpus missing, so the deployment is unhealthy', async () => {
+      const res = await request(app.getHttpServer()).get('/v1/health').expect(503);
+      expect(res.body).toStrictEqual({
+        status: 'unavailable',
+        database: 'up',
+        migrations: 'current',
+        corpus: 'missing',
       });
     });
   });
@@ -248,9 +293,18 @@ describe('GET /v1/health (readiness) and GET /v1/health/live (liveness)', () => 
       empty.searchParams.set('options', '-c search_path=readiness_empty');
       try {
         expect(
-          await checkReadiness({ connectionString: empty.toString() }, shippedMigrationNames()),
+          await checkReadiness(
+            { connectionString: empty.toString() },
+            shippedMigrationNames(),
+            PIN,
+          ),
         ).toStrictEqual({
-          report: { status: 'unavailable', database: 'up', migrations: 'pending' },
+          report: {
+            status: 'unavailable',
+            database: 'up',
+            migrations: 'pending',
+            corpus: 'unknown',
+          },
           failure: 'MigrationsPending',
         });
         const [tables] = await db.query(
@@ -264,13 +318,22 @@ describe('GET /v1/health (readiness) and GET /v1/health/live (liveness)', () => 
 
     it('ignores migrations the database has but this build does not ship', async () => {
       expect(
-        await checkReadiness({ connectionString: url }, shippedMigrationNames().slice(0, 1)),
+        await checkReadiness({ connectionString: url }, shippedMigrationNames().slice(0, 1), PIN),
       ).toStrictEqual({ report: READY });
+    });
+
+    it('reports a pinned corpus release that is not active as missing', async () => {
+      expect(
+        await checkReadiness({ connectionString: url }, shippedMigrationNames(), NOT_IMPORTED),
+      ).toStrictEqual({
+        report: { status: 'unavailable', database: 'up', migrations: 'current', corpus: 'missing' },
+        failure: 'CorpusMissing',
+      });
     });
 
     it('reports a refused connection by class and code only', async () => {
       expect(
-        await checkReadiness({ connectionString: 'postgres://ba:secret@127.0.0.1:1/x' }, []),
+        await checkReadiness({ connectionString: 'postgres://ba:secret@127.0.0.1:1/x' }, [], PIN),
       ).toStrictEqual({ report: DB_DOWN, failure: 'Error', code: 'ECONNREFUSED' });
     });
   });

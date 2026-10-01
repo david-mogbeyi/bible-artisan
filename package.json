@@ -16,6 +16,7 @@
     "test:integration": "pnpm --filter @bible-artisan/api test:integration",
     "db:setup": "./scripts/db-setup.sh",
     "db:migrate": "pnpm --filter @bible-artisan/api db:migrate",
+    "corpus:import": "pnpm --filter @bible-artisan/api corpus:import",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
   },
   "devDependencies": {

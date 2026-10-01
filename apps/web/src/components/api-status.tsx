@@ -25,6 +25,7 @@ export async function fetchHealth(): Promise<HealthResponse> {
 function healthLabel(health: HealthResponse): string {
   const parts = [`API ${health.status}`, `database ${health.database}`];
   if (health.migrations !== 'current') parts.push(`migrations ${health.migrations}`);
+  if (health.corpus !== 'ready') parts.push(`Bible corpus ${health.corpus}`);
   return parts.join(' · ');
 }
 

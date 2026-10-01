@@ -35,13 +35,35 @@ export interface ReadinessResult {
   code?: string;
 }
 
-const READY: HealthResponse = { status: 'ok', database: 'up', migrations: 'current' };
-const MIGRATIONS_PENDING: HealthResponse = {
+/**
+ * The corpus release a build depends on (BIB-14): readiness requires exactly this release to be
+ * imported and active, so a deployment whose `pnpm corpus:import` has not run is not ready.
+ */
+export interface CorpusPin {
+  code: string;
+  sourceRelease: string;
+  artifactSha256: string;
+}
+
+const READY: HealthResponse = {
+  status: 'ok',
+  database: 'up',
+  migrations: 'current',
+  corpus: 'ready',
+};
+/** No migration table or corpus table yet: nothing past "pending" can be known. */
+const NOTHING_MIGRATED: HealthResponse = {
   status: 'unavailable',
   database: 'up',
   migrations: 'pending',
+  corpus: 'unknown',
 };
-const DB_DOWN: HealthResponse = { status: 'unavailable', database: 'down', migrations: 'unknown' };
+const DB_DOWN: HealthResponse = {
+  status: 'unavailable',
+  database: 'down',
+  migrations: 'unknown',
+  corpus: 'unknown',
+};
 
 function codeOf(error: unknown): string | undefined {
   const code = (error as { code?: unknown } | null)?.code;
@@ -49,8 +71,9 @@ function codeOf(error: unknown): string | undefined {
 }
 
 /**
- * One readiness check (BIB-13): PostgreSQL answers, and every migration shipped with this build is
- * recorded in SequelizeMeta (a failed migration rolls back its record, so it stays missing).
+ * One readiness check (BIB-13, BIB-14): PostgreSQL answers, every migration shipped with this build
+ * is recorded in SequelizeMeta (a failed migration rolls back its record, so it stays missing), and
+ * the pinned corpus release is active (an import is one transaction, so a failed one leaves none).
  *
  * Runs on its own short-lived pg client, never the request pool: a pool saturated by slow
  * requests must not make a healthy database look down, and a hung database must not leave probe
@@ -61,6 +84,7 @@ function codeOf(error: unknown): string | undefined {
 export async function checkReadiness(
   connection: ClientConfig,
   shippedMigrations: readonly string[],
+  corpus: CorpusPin,
   timeoutMs: number = READINESS_TIMEOUT_MS,
 ): Promise<ReadinessResult> {
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new Error('invalid readiness timeout');
@@ -78,17 +102,31 @@ export async function checkReadiness(
     await client.connect();
     try {
       // Names are unique (primary key), so the count equals the shipped list's length iff every
-      // shipped migration is applied.
-      const { rows } = await client.query<{ applied: number }>(
-        `SELECT count(*)::int AS applied FROM ${META_TABLE} WHERE name = ANY($1::text[])`,
-        [shippedMigrations],
+      // shipped migration is applied. A missing table (either one) is 42P01, handled below.
+      const { rows } = await client.query<{ applied: number; corpus: boolean }>(
+        `SELECT
+           (SELECT count(*)::int FROM ${META_TABLE} WHERE name = ANY($1::text[])) AS applied,
+           EXISTS (
+             SELECT 1 FROM bible_edition
+             WHERE code = $2 AND source_release = $3 AND artifact_sha256 = $4
+               AND activated_at IS NOT NULL
+           ) AS corpus`,
+        [shippedMigrations, corpus.code, corpus.sourceRelease, corpus.artifactSha256],
       );
-      return rows[0]?.applied === shippedMigrations.length
-        ? { report: READY }
-        : { report: MIGRATIONS_PENDING, failure: 'MigrationsPending' };
+      const migrationsCurrent = rows[0]?.applied === shippedMigrations.length;
+      const corpusReady = rows[0]?.corpus === true;
+      const report: HealthResponse = {
+        status: migrationsCurrent && corpusReady ? 'ok' : 'unavailable',
+        database: 'up',
+        migrations: migrationsCurrent ? 'current' : 'pending',
+        corpus: corpusReady ? 'ready' : 'missing',
+      };
+      if (!migrationsCurrent) return { report, failure: 'MigrationsPending' };
+      if (!corpusReady) return { report, failure: 'CorpusMissing' };
+      return { report: READY };
     } catch (error) {
       if (codeOf(error) !== UNDEFINED_TABLE) throw error;
-      return { report: MIGRATIONS_PENDING, failure: 'MigrationsPending' };
+      return { report: NOTHING_MIGRATED, failure: 'MigrationsPending' };
     }
   })();
 
@@ -130,6 +168,7 @@ export class ReadinessProbe {
   constructor(
     private readonly connection: ClientConfig,
     private readonly shippedMigrations: readonly string[],
+    private readonly corpus: CorpusPin,
     private readonly options: ReadinessProbeOptions = {},
   ) {}
 
@@ -142,6 +181,7 @@ export class ReadinessProbe {
     this.inFlight = checkReadiness(
       this.connection,
       this.shippedMigrations,
+      this.corpus,
       this.options.timeoutMs,
     ).then((result) => {
       this.cached = { at: Date.now(), result };
@@ -150,6 +190,7 @@ export class ReadinessProbe {
         this.logger.warn('readiness_failed', {
           database: result.report.database,
           migrations: result.report.migrations,
+          corpus: result.report.corpus,
           failure: result.failure,
           ...(result.code ? { code: result.code } : {}),
         });
