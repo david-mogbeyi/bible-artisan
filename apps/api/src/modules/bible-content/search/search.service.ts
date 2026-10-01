@@ -97,12 +97,15 @@ export class SearchService {
     let remaining = false;
     let last: CursorPosition | null = null;
     scan: for (;;) {
-      // At most three round trips: `limit + 1` candidates (enough when most verify, as in terms
-      // mode), then the rest of the bounded scan at once (phrases the index cannot narrow), then
-      // one row to learn whether anything remains. Each fetch takes one row beyond what this
-      // request may still use, so `remaining` is exact.
+      // Terms candidates nearly always verify, so terms mode first fetches `limit + 1`; phrase
+      // candidates often do not, so phrase mode fetches the whole bounded scan at once (rows are
+      // cheap to transfer, verification stops when the page is full, and every round trip ranks
+      // all matches again). Then the rest of the bound, then one row to learn whether anything
+      // remains. Each fetch takes one row beyond what this request may still use, so `remaining`
+      // is exact.
       const full = results.length === limit || scanned === MAX_SCANNED_CANDIDATES;
-      const size = full ? 1 : scanned === 0 ? limit + 1 : MAX_SCANNED_CANDIDATES - scanned + 1;
+      const first = query.mode === 'phrase' ? MAX_SCANNED_CANDIDATES + 1 : limit + 1;
+      const size = full ? 1 : scanned === 0 ? first : MAX_SCANNED_CANDIDATES - scanned + 1;
       const rows = await this.candidates(editionId, query.tokens.join(' '), book, after, size);
       for (const row of rows) {
         if (results.length === limit || scanned === MAX_SCANNED_CANDIDATES) {

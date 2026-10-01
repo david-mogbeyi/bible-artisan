@@ -5,6 +5,7 @@ import type { SearchBibleResponse, SearchResult } from '@bible-artisan/contracts
 import request from 'supertest';
 import { Op, QueryTypes } from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { AppModule } from '../src/app.module';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { AuthSession } from '../src/database/models/auth-session.model';
@@ -102,6 +103,28 @@ const phraseFormOf = (input: string): string =>
 const slice = (text: string, h: { start: number; end: number }): string =>
   Array.from(text).slice(h.start, h.end).join('');
 
+/**
+ * Server latency per search request, as NFR-PERF-002 states it: each request's `durationMs` from
+ * its own access line (first middleware to response finish). Collected only while `recording`.
+ */
+const serverMs: number[] = [];
+let recording = false;
+const ignore = (): void => undefined;
+const accessRecorder = {
+  log: (message: unknown, ...params: unknown[]): void => {
+    if (!recording || message !== 'http_request') return;
+    for (const p of params) {
+      if (typeof p === 'object' && p !== null && 'durationMs' in p && 'route' in p) {
+        if (p.route === '/v1/bible/search' && typeof p.durationMs === 'number') {
+          serverMs.push(p.durationMs);
+        }
+      }
+    }
+  },
+  error: ignore,
+  warn: ignore,
+};
+
 describe('GET /v1/bible/search', () => {
   let app: INestApplication<Server>;
   let db: Database;
@@ -175,7 +198,7 @@ describe('GET /v1/bible/search', () => {
   }
 
   beforeAll(async () => {
-    app = await createTestApp();
+    app = await createTestApp(AppModule, { logger: accessRecorder });
     db = app.get<Database>(DATABASE);
     const edition = await BibleEdition.findOne({
       where: {
@@ -665,11 +688,12 @@ describe('GET /v1/bible/search', () => {
   });
 
   describe('performance (NFR-PERF-002)', () => {
-    it('keeps p95 latency within 750 ms for 100 concurrent searches', async () => {
+    it('keeps p95 server latency within 750 ms for 100 concurrent searches', async () => {
       const words = byFrequency.map(([w]) => w);
       const [w0 = '', w1 = '', w2 = ''] = words;
       const mid = words[200] ?? '';
-      // Worst cases: the commonest words (rank every match), a phrase that scans the maximum.
+      // Worst cases: the commonest words (every match is ranked) and a phrase of the commonest
+      // word twice (the full candidate bound is scanned and almost nothing verifies).
       const mix: Record<string, string>[] = [
         { q: w0 },
         { q: `${w0} ${w1}`, limit: '100' },
@@ -678,16 +702,18 @@ describe('GET /v1/bible/search', () => {
         { q: mid },
       ];
       await Promise.all(mix.map((query) => search(query).expect(200))); // warm caches
-      const timings = await Promise.all(
-        Array.from({ length: 100 }, async (_, i) => {
-          const started = performance.now();
-          await search(mix[i % mix.length] ?? {}).expect(200);
-          return performance.now() - started;
-        }),
-      );
-      timings.sort((a, b) => a - b);
-      const p95 = timings[94] ?? Infinity;
-      expect(p95).toBeLessThanOrEqual(750);
+      serverMs.length = 0;
+      recording = true;
+      try {
+        await Promise.all(
+          Array.from({ length: 100 }, (_, i) => search(mix[i % mix.length] ?? {}).expect(200)),
+        );
+      } finally {
+        recording = false;
+      }
+      expect(serverMs).toHaveLength(100);
+      serverMs.sort((a, b) => a - b);
+      expect(serverMs[94]).toBeLessThanOrEqual(750);
     });
   });
 });

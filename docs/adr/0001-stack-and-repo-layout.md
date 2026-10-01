@@ -321,12 +321,18 @@ The command is a separate step, not a migration: migrations only get `context.qu
 
 **Performance (NFR-PERF-002).**
 
-- An integration test sends 100 concurrent requests through one app instance (pool of 10 connections, client and server in one Node process) over a worst-case mix: the commonest word, the two commonest with `limit=100`, the commonest word twice as a phrase (maximum scan), a common phrase, and a mid-frequency word.
-- Locally (PostgreSQL 16, Apple silicon), three runs measured p95 306, 314 and 324 ms (p50 160 to 180 ms) against the 750 ms budget.
-- Two changes got there from about 640 ms. The scan bound went from 2,000 to 1,000 candidates. Separators are now canonicalized only where a phrase's words already match, since the plain space takes a fast path. Verification now costs about 3.4 µs of Node CPU per candidate verse, down from about 6.
-- `ts_rank` is computed once per row in an inner query.
-- `EXPLAIN` of the production candidate query shows the GIN index (`bible_verse_search_vector_idx`); a test asserts it for a selective query.
-- Full-scale benchmarking belongs to BIB-52.
+- An integration test sends 100 concurrent requests to one app instance (pool of 10 connections) over a worst-case mix: the commonest word, the two commonest with `limit=100`, the commonest word twice as a phrase (full scan bound, almost nothing verifies), a common phrase, and a mid-frequency word.
+- It asserts p95 **server** latency ≤ 750 ms, as the NFR states it: each request's `durationMs` from its own access line, from the first middleware to response finish.
+- Locally (PostgreSQL 16, Apple silicon), three runs measured server p95 171, 183 and 204 ms (p50 120 to 134 ms).
+- The first CI run timed requests from the in-process test client on a 2-vCPU GitHub runner: p95 922 ms, failing. That figure included client-side work in the same process, and it predates the phrase single-fetch below.
+- Changes made to get here:
+  - The scan bound went from 2,000 to 1,000 candidates.
+  - Phrase mode fetches its whole bound in one query instead of ranking all matches again per batch.
+  - `ts_rank` is computed once per row.
+  - Separators are canonicalized only where a phrase's words already match, with a fast path for the plain space.
+  - Verification costs about 3.4 µs of Node CPU per candidate verse.
+- `EXPLAIN` of the production candidate query shows the GIN index (`bible_verse_search_vector_idx`); a test asserts it for a selective query. For the commonest words the planner may choose a sequential scan (about 10 ms).
+- Benchmarks on deployment hardware belong to BIB-52.
 
 **Privacy.** The query travels in the URL (PRD section 24), but `requestLogging` logs only the route pattern. Errors are fixed strings. `test/log-redaction.int-spec.ts` sends sentinel queries and cursors on 200, 400, 404 and 422, and asserts that neither they nor the returned verse text, labels or cursor appear in any log line.
 
