@@ -58,6 +58,8 @@ beforeEach(() => {
   studyReplies = [];
   fetchMock = vi.fn((input: string) => {
     if (input.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
+    // The page's notes panel (BIB-23): no notes in these tests.
+    if (input.includes('/notes')) return Promise.resolve(jsonResponse(200, { items: [] }));
     if (input.endsWith(`/studies/${STUDY_ID}`)) {
       const next = studyReplies.shift();
       if (!next) throw new Error('unexpected study read');

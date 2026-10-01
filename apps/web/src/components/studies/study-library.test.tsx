@@ -38,6 +38,7 @@ function study(n: number, overrides: Record<string, unknown> = {}) {
     lastActivityAt: '2026-10-01T12:00:00.000Z',
     createdAt: '2026-09-30T12:00:00.000Z',
     purgeAt: null,
+    matchedInNotes: false,
     ...overrides,
   };
 }
@@ -119,7 +120,7 @@ describe('Study library', () => {
     await renderLibrary();
     await screen.findByRole('link', { name: 'Grace alone' });
     replies.push(pageOf([OTHER]));
-    fireEvent.change(screen.getByLabelText('Search titles, descriptions and tags'), {
+    fireEvent.change(screen.getByLabelText('Search titles, descriptions, tags and notes'), {
       target: { value: '  grace  ' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
@@ -137,11 +138,24 @@ describe('Study library', () => {
     expect(JSON.stringify({ ...localStorage })).not.toContain('grace');
   });
 
+  it('says when a search result was found in its notes (BIB-23)', async () => {
+    await renderLibrary();
+    await screen.findByRole('link', { name: 'Grace alone' });
+    expect(screen.queryByText('Found in notes')).toBeNull();
+    replies.push(pageOf([{ ...OTHER, matchedInNotes: true }]));
+    fireEvent.change(screen.getByLabelText('Search titles, descriptions, tags and notes'), {
+      target: { value: 'witness' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const card = (await screen.findByText('Found in notes')).closest('li');
+    expect(within(card as HTMLElement).getByRole('link', { name: 'Grace alone' })).toBeTruthy();
+  });
+
   it('says when nothing matches, and Clear filters (or an empty search) resets them', async () => {
     await renderLibrary();
     await screen.findByRole('link', { name: 'Grace alone' });
     replies.push(pageOf([]));
-    fireEvent.change(screen.getByLabelText('Search titles, descriptions and tags'), {
+    fireEvent.change(screen.getByLabelText('Search titles, descriptions, tags and notes'), {
       target: { value: 'nothing' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
@@ -158,24 +172,24 @@ describe('Study library', () => {
     fireEvent.click(within(results).getByRole('button', { name: 'Clear filters' }));
     await screen.findByRole('link', { name: 'Grace alone' });
     expect(document.activeElement).toBe(
-      screen.getByLabelText('Search titles, descriptions and tags'),
+      screen.getByLabelText('Search titles, descriptions, tags and notes'),
     );
     await waitFor(() =>
       expect(screen.getByRole('status').textContent).toBe('Filters cleared: 2 studies.'),
     );
     expect(params(2)).toStrictEqual({ sort: 'recent' });
     expect(
-      screen.getByLabelText<HTMLInputElement>('Search titles, descriptions and tags').value,
+      screen.getByLabelText<HTMLInputElement>('Search titles, descriptions, tags and notes').value,
     ).toBe('');
 
     // Submitting an empty box after a search also resets.
     replies.push(pageOf([OTHER]));
-    fireEvent.change(screen.getByLabelText('Search titles, descriptions and tags'), {
+    fireEvent.change(screen.getByLabelText('Search titles, descriptions, tags and notes'), {
       target: { value: 'grace' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     await waitFor(() => expect(requests).toHaveLength(4));
-    fireEvent.change(screen.getByLabelText('Search titles, descriptions and tags'), {
+    fireEvent.change(screen.getByLabelText('Search titles, descriptions, tags and notes'), {
       target: { value: '   ' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
@@ -210,7 +224,7 @@ describe('Study library', () => {
     await screen.findByRole('link', { name: 'Grace alone' });
     expect(screen.queryByText('Tag: Witness')).toBeNull();
     expect(document.activeElement).toBe(
-      screen.getByLabelText('Search titles, descriptions and tags'),
+      screen.getByLabelText('Search titles, descriptions, tags and notes'),
     );
     expect(document.activeElement).not.toBe(document.body);
     await waitFor(() =>
@@ -232,7 +246,7 @@ describe('Study library', () => {
   it('refuses an over-wordy search inline without asking the API', async () => {
     await renderLibrary();
     await screen.findByRole('link', { name: 'Grace alone' });
-    const box = screen.getByLabelText('Search titles, descriptions and tags');
+    const box = screen.getByLabelText('Search titles, descriptions, tags and notes');
     fireEvent.change(box, { target: { value: 'a b c d e f g h i j k' } });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     // Announced as an alert, with focus back on the field, which points at the message.

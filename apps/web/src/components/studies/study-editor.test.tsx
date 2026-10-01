@@ -60,6 +60,8 @@ beforeEach(() => {
   patchReplies = [];
   fetchMock = vi.fn((input: string, init?: RequestInit) => {
     if (input.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
+    // The page's notes panel (BIB-23): no notes in these tests.
+    if (input.includes('/notes')) return Promise.resolve(jsonResponse(200, { items: [] }));
     if (input.endsWith(`/studies/${STUDY_ID}`)) {
       const next = init?.method === 'PATCH' ? patchReplies.shift() : studyReplies.shift();
       if (!next) throw new Error(`unexpected ${init?.method ?? 'GET'} of the study`);

@@ -386,6 +386,14 @@ export function StudyEditor({
   // saved, a typed tag not yet added, or a save in flight or with an unknown outcome.
   const unsaved =
     save.isPending || hasFrozen || draftEdit(base, draft) !== null || tagInput.trim() !== '';
+  // A note created meanwhile (BIB-23) moves the study's revision without changing anything this
+  // form edits. While the form holds no work, it takes the newer study as its base (adjusted
+  // during render, React's pattern for state that follows a prop), so the next save is not refused
+  // as stale. With work in it, the base stays: a save then gets 409, and Reload latest rebases.
+  if (!unsaved && study.revision > base.revision) {
+    setBase(study);
+    setDraft(draftOf(study));
+  }
   useEffect(() => {
     onUnsavedChange?.(unsaved);
   }, [unsaved, onUnsavedChange]);

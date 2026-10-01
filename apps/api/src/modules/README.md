@@ -23,6 +23,9 @@ Rules (see /AGENTS.md for the full list):
   (`now()` in SQL), never `new Date()`, and `archived_at` / `deleted_at` are written with it too.
 - Every study mutation follows the mutation contract below. See ADR 0001's BIB-12 addendum.
 - Controllers speak DTOs from `@bible-artisan/contracts`. Never return Sequelize model instances directly.
+- Mutation responses are stored on their Idempotency-Key receipt. Keep private text out of them
+  where the client already has it (BIB-23's note saves return ids, revision and counts, not the
+  note), so it does not linger in `mutation_receipt`.
 - Logging (BIB-13): every request already gets a correlation ID and one access line
   (`observability/request-logging.ts`), and every error one `http_error` line. Don't log request
   data yourself. If a module needs its own line, use Nest's `Logger` with a fixed message and
@@ -67,7 +70,9 @@ What the pipeline guarantees, so a route must not re-implement any of it:
 4. `work` must call `m.updateWithExpectedRevision` (the study, or a child with `study_id`; owner
    and study scoping are added for you) and `m.appendEvent` at least once each, or `execute`
    throws (500) and rolls everything back. Creating a child counts as a study change: check the
-   study's revision (`m.updateWithExpectedRevision(Study, { id: studyId, … })`).
+   study's revision (`m.updateWithExpectedRevision(Study, { id: studyId, … })` inside the Study
+   context; from another module, `StudyRevisionService.checkStudyRevision(m, expectedRevision)`,
+   so that module never touches the `study` table).
 5. `content_revision`, `last_event_sequence` and `last_activity_at` (BIB-21) are written once, by
    the pipeline. Never update them, or `study_event`, yourself. When only the work knows whether it changed content (BIB-20:
    a study edit that may be just a pin or tag change), declare `bumpsContentRevision: false` and

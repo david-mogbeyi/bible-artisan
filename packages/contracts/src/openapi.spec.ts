@@ -9,6 +9,50 @@ describe('buildOpenApiDocument', () => {
       description: 'Error (shared error envelope, PRD section 24)',
       content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorEnvelope' } } },
     };
+    const uuidParam = (name: string, where = 'path') => ({
+      name,
+      in: where,
+      required: where === 'path',
+      schema: { type: 'string', format: 'uuid' },
+    });
+    const idempotencyHeader = {
+      name: 'Idempotency-Key',
+      in: 'header',
+      required: false,
+      schema: { type: 'string', format: 'uuid' },
+    };
+    const studyId = uuidParam('studyId');
+    const noteId = uuidParam('noteId');
+    const json = (name: string) => ({ 'application/json': { schema: ref(name) } });
+    /** BIB-23: a note operation, its description checked by the rules it must state. */
+    const noteOperation = (
+      phrases: string[],
+      parameters: unknown[],
+      status: number,
+      description: string,
+      response: string,
+      request?: string,
+    ): Record<string, unknown> => ({
+      description: expect.stringMatching(
+        new RegExp(phrases.map((phrase) => `(?=[\\s\\S]*${phrase})`).join('')),
+      ),
+      security: [{ sessionCookie: [] }],
+      parameters,
+      ...(request ? { requestBody: { required: true, content: json(request) } } : {}),
+      responses: {
+        [status]: { description, content: json(response) },
+        default: errorResponse,
+      },
+    });
+    const SAME_404 = 'are the same 404';
+    const MUTATION = [
+      '428',
+      '409 with currentRevision',
+      'STUDY_ARCHIVED',
+      'Idempotency-Key',
+      SAME_404,
+    ];
+    const DOCUMENT = ['allowlist', 'http or https', '413 NOTE_TOO_LONG', '1 MiB is 413'];
     // BIB-22: the four lifecycle routes share everything but the first sentences.
     const lifecycle = (description: string): Record<string, unknown> => ({
       description: `${description} expectedRevision is the study's revision: missing is 428, stale is 409 with currentRevision. The change bumps the revision (never contentRevision) and appends one StudyEvent in the same transaction. Archive, unarchive and trash of a trashed study are 422 STUDY_TRASHED; any other transition not allowed from the current state is 422 LIFECYCLE_TRANSITION_INVALID. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, a malformed id, and a study trashed 30 or more days ago are the same 404.`,
@@ -269,7 +313,7 @@ describe('buildOpenApiDocument', () => {
         '/studies': {
           get: {
             description:
-              "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description or one of the study's tag names. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. state=trashed is the Trash view: trashed studies still inside their 30-day recovery window, each with its purgeAt. No totals.",
+              "Lists the signed-in user's own studies (FR-STUDY-004): pinned studies first, then the rest, each group in the chosen sort (recent: last activity, newest first; created: newest first; title: A to Z by the case-folded title in code-point order, whatever the database collation), ties broken by id. pinnedFirst=false lists every study in the chosen sort, pins ignored (Home's recent studies). q matches studies where every word (case- and width-folded, literal: no wildcards or operators) occurs in the title, the description, one of the study's tag names, or the text of one of its live notes; matchedInNotes says a word was found in a note. tag keeps studies carrying that tag; another user's or an absent tag id matches nothing. Keyset pages: nextCursor is non-null exactly when more studies follow; a cursor is opaque and encrypted, works only for the same user, filters, sort and pinnedFirst, and anything else is 400. state=trashed is the Trash view: trashed studies still inside their 30-day recovery window, each with its purgeAt. No totals.",
             security: [{ sessionCookie: [] }],
             parameters: [
               {
@@ -420,6 +464,94 @@ describe('buildOpenApiDocument', () => {
             'Restores a trashed study inside its recovery window to the state it was trashed from (archived if it was archived, else active), with its nodes, events and branches intact. study_restored.',
           ),
         },
+        '/studies/{studyId}/notes': {
+          post: noteOperation(
+            [
+              'NOTE_TARGET_NOT_FOUND',
+              'NOTE_LIMIT_EXCEEDED',
+              'live notes',
+              'note_created',
+              ...DOCUMENT,
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId],
+            201,
+            'The new note, without its content',
+            'CreateNoteResponse',
+            'CreateNoteRequest',
+          ),
+          get: noteOperation(
+            ['state=trashed', 'orphaned-note review', SAME_404],
+            [
+              studyId,
+              {
+                name: 'state',
+                in: 'query',
+                required: false,
+                schema: { type: 'string', enum: ['active', 'trashed'] },
+              },
+            ],
+            200,
+            "The study's notes",
+            'NoteListResponse',
+          ),
+        },
+        '/studies/{studyId}/notes/{noteId}': {
+          get: noteOperation([SAME_404], [studyId, noteId], 200, 'The note', 'NoteResponse'),
+          patch: noteOperation(
+            [
+              'checkpoint: true',
+              '30 seconds',
+              'database clock',
+              'newest 100',
+              'NOTE_UNCHANGED',
+              'NOTE_TRASHED',
+              ...DOCUMENT,
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId, noteId],
+            200,
+            'The note as saved, without its content',
+            'NoteMutationResponse',
+            'UpdateNoteRequest',
+          ),
+          delete: noteOperation(
+            ['note trash', 'note_trashed', ...MUTATION],
+            [idempotencyHeader, studyId, noteId],
+            200,
+            'The note in the trash',
+            'NoteMutationResponse',
+            'NoteStateRequest',
+          ),
+        },
+        '/studies/{studyId}/notes/{noteId}/restore': {
+          post: noteOperation(
+            ['NOTE_NOT_TRASHED', 'NOTE_LIMIT_EXCEEDED', 'note_restored', ...MUTATION],
+            [idempotencyHeader, studyId, noteId],
+            200,
+            'The restored note',
+            'NoteMutationResponse',
+            'NoteStateRequest',
+          ),
+        },
+        '/studies/{studyId}/notes/{noteId}/versions': {
+          get: noteOperation(
+            ['newest first', SAME_404],
+            [studyId, noteId],
+            200,
+            'The versions',
+            'NoteVersionListResponse',
+          ),
+        },
+        '/studies/{studyId}/notes/{noteId}/versions/{versionId}': {
+          get: noteOperation(
+            ['checkpoint: true', SAME_404],
+            [studyId, noteId, uuidParam('versionId')],
+            200,
+            'The version',
+            'NoteVersionResponse',
+          ),
+        },
         '/bible/translations': {
           get: {
             description:
@@ -553,6 +685,40 @@ describe('buildOpenApiDocument', () => {
       'UpdateStudyRequest',
       'UpdateStudyResponse',
       'StudyLifecycleRequest',
+      'CreateNoteRequest',
+      'CreateNoteResponse',
+      'UpdateNoteRequest',
+      'NoteStateRequest',
+      'NoteMutationResponse',
+      'NoteResponse',
+      'NoteListResponse',
+      'NoteVersionListResponse',
+      'NoteVersionResponse',
+      'NoteBlock',
+      'NoteListItem',
     ]);
+  });
+
+  it('resolves every $ref to a component, including the recursive note document (BIB-23)', () => {
+    const doc = buildOpenApiDocument();
+    const text = JSON.stringify(doc);
+    const refs = [...text.matchAll(/"\$ref":"([^"]+)"/g)].map((match) => match[1] ?? '');
+    const unresolved = refs.filter(
+      (target) =>
+        !target.startsWith('#/components/schemas/') ||
+        !(target.slice('#/components/schemas/'.length) in doc.components.schemas),
+    );
+    expect([refs.length > 0, unresolved, text.includes('"definitions"')]).toStrictEqual([
+      true,
+      [],
+      false,
+    ]);
+    // The block schema refers to itself (blockquote) and to list items, which refer back.
+    expect(JSON.stringify(doc.components.schemas.NoteBlock)).toContain(
+      '#/components/schemas/NoteListItem',
+    );
+    expect(JSON.stringify(doc.components.schemas.NoteListItem)).toContain(
+      '#/components/schemas/NoteBlock',
+    );
   });
 });

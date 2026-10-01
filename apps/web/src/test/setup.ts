@@ -20,3 +20,13 @@ if (typeof HTMLDialogElement !== 'undefined' && !('showModal' in HTMLDialogEleme
     },
   });
 }
+
+// jsdom has no layout, so Range lacks the geometry ProseMirror (the Tiptap note editor, BIB-23)
+// asks for when it scrolls a selection into view. Empty rectangles are what a layout-free
+// document would report.
+if (typeof Range !== 'undefined' && !('getClientRects' in Range.prototype)) {
+  Object.defineProperties(Range.prototype, {
+    getClientRects: { configurable: true, value: () => Object.assign([], { item: () => null }) },
+    getBoundingClientRect: { configurable: true, value: () => new DOMRect() },
+  });
+}

@@ -118,6 +118,8 @@ const itemOf = (row: Seeded): StudyListItem => ({
   lastActivityAt: new Date(row.lastActivityAt).toISOString(),
   createdAt: new Date(row.createdAt).toISOString(),
   purgeAt: row.purgeAt,
+  // Seeds have no notes.
+  matchedInNotes: false,
 });
 
 /** Independent search oracle: every folded word occurs in the title, description or a tag. */
@@ -390,6 +392,7 @@ describe('study library (BIB-21)', () => {
             lastActivityAt: stored.lastActivityAt.toISOString(),
             createdAt: study.createdAt,
             purgeAt: null,
+            matchedInNotes: false,
           },
         ],
         nextCursor: null,
@@ -1145,6 +1148,7 @@ describe('study library (BIB-21)', () => {
             lastActivityAt: row.lastActivityAt.toISOString(),
             createdAt: row.createdAt.toISOString(),
             purgeAt: null,
+            matchedInNotes: false,
           })),
           nextCursor: anyCursor,
         });
@@ -1166,6 +1170,7 @@ describe('study library (BIB-21)', () => {
           lastActivityAt: row.lastActivityAt.toISOString(),
           createdAt: row.createdAt.toISOString(),
           purgeAt: null,
+          matchedInNotes: false,
         })),
         nextCursor: anyCursor,
       });

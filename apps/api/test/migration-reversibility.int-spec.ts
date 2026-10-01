@@ -18,6 +18,8 @@ const SEARCH_MIGRATION = '20261001115256_add_bible_verse_search_vector.ts';
 const LIBRARY_MIGRATION = '20261001182657_add_study_library.ts';
 /** BIB-22's lifecycle migration; `down({ to })` reverts down to and including it. */
 const LIFECYCLE_MIGRATION = '20261001194710_add_study_lifecycle.ts';
+/** BIB-23's notes migration. */
+const NOTE_MIGRATION = '20261001222927_create_note.ts';
 
 const DOMAIN_TABLES = [
   'auth_challenge',
@@ -27,6 +29,8 @@ const DOMAIN_TABLES = [
   'bible_superscription',
   'bible_verse',
   'mutation_receipt',
+  'note',
+  'note_version',
   'scripture_reference',
   'study',
   'study_branch',
@@ -219,12 +223,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-22's study lifecycle) is the first `down`
-      // toward the corpus and refuses before anything commits.
+      // No opt-in at all: the newest migration (BIB-23's notes) is the first `down` toward the
+      // corpus and refuses before anything commits, though this study has no note.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: 'study lifecycle drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        message: 'note drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -300,6 +304,60 @@ describe('migration reversibility', () => {
         message: 'study lifecycle transition refused',
         parent: expect.objectContaining({ code: '23000' }),
       });
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies notes (BIB-23) only with the study-data opt-in; the tables, keys and version trigger come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const noteSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid IN ('note'::regclass, 'note_version'::regclass) AND contype IN ('f', 'u')
+         UNION ALL
+         SELECT tgname FROM pg_trigger WHERE tgname = 'note_version_immutable'
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      await db.query(
+        `WITH n AS (
+           INSERT INTO note (study_id, owner_id, rich_text_json, plain_text, search_text)
+           SELECT id, owner_id, '{"type":"doc","content":[{"type":"paragraph"}]}', '', ''
+             FROM study WHERE owner_id = $1
+           RETURNING id, study_id, owner_id
+         )
+         INSERT INTO note_version (note_id, study_id, owner_id, version_number, rich_text_json, plain_text)
+         SELECT id, study_id, owner_id, 1, '{"type":"doc","content":[{"type":"paragraph"}]}', '' FROM n`,
+        { bind: [userId] },
+      );
+      const schemaBefore = await noteSchema();
+      expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'note_owner_id_study_id_id_key',
+        'note_study_owner_fk',
+        'note_target_node_fk',
+        'note_version_immutable',
+        'note_version_note_fk',
+        'note_version_note_id_version_number_key',
+      ]);
+      const before = await recordedMigrations(db);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: 'note drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(
+        await db.query('SELECT 1 FROM note_version', { type: QueryTypes.SELECT }),
+      ).not.toHaveLength(0);
+
+      await withStudyDataDropAllowed(() => migrator.down({ to: NOTE_MIGRATION }));
+      expect(await publicTables(db, ['note', 'note_version'])).toStrictEqual([]);
+      await migrator.up();
+      expect(await noteSchema()).toStrictEqual(schemaBefore);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();

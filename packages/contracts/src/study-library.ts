@@ -132,6 +132,12 @@ export const studyListItemSchema = z.object({
   createdAt: z.iso.datetime(),
   /** As on `GET /studies/:id`: when a trashed study is permanently deleted, else null. */
   purgeAt: z.iso.datetime().nullable(),
+  /**
+   * True when the listing has a search (`q`) and at least one of its words occurs in a live note
+   * of the study (BIB-23), so the card can say it was found in the notes (PRD section 14:
+   * "separate result labels"). Always false without `q`.
+   */
+  matchedInNotes: z.boolean(),
 });
 
 export type StudyListItem = z.infer<typeof studyListItemSchema>;

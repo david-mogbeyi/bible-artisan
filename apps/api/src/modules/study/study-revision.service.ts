@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { studySearchText, studyTitleSortKey } from '@bible-artisan/contracts';
 import { Transaction } from 'sequelize';
 import { NotFoundError } from '../../common/errors/domain-errors';
+import type { StudyMutation } from '../../common/mutation/study-mutation';
 import { isResourceId } from '../../common/validation/resource-id';
 import { Study } from '../../database/models/study.model';
 import { type StudyLifecycle, withinRecoveryWindow } from './study-lifecycle';
@@ -168,6 +169,22 @@ export class StudyRevisionService {
       study.lifecycle,
       study.archivedAt,
     );
+  }
+
+  /**
+   * For another module's mutation that adds a child to the study (BIB-23: a note): checks the
+   * study's `expectedRevision` and moves it by one, in the mutation's transaction, as one
+   * conditional UPDATE (`StudyMutation.updateWithExpectedRevision`): stale → 409 with the
+   * current revision. So that module never touches the `study` table itself. Returns the study's
+   * new revision.
+   */
+  async checkStudyRevision(m: StudyMutation, expectedRevision: number): Promise<number> {
+    const study = await m.updateWithExpectedRevision(Study, {
+      id: m.studyId,
+      expectedRevision,
+      values: {},
+    });
+    return study.revision;
   }
 
   /**

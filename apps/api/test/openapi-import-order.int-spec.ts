@@ -53,6 +53,17 @@ describe('GET /v1/openapi.json when the contracts barrel was loaded before AppMo
       'UpdateStudyRequest',
       'UpdateStudyResponse',
       'StudyLifecycleRequest',
+      'CreateNoteRequest',
+      'CreateNoteResponse',
+      'UpdateNoteRequest',
+      'NoteStateRequest',
+      'NoteMutationResponse',
+      'NoteResponse',
+      'NoteListResponse',
+      'NoteVersionListResponse',
+      'NoteVersionResponse',
+      'NoteBlock',
+      'NoteListItem',
     ]);
   });
 });
