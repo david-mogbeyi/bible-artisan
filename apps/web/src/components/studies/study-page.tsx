@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { useParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { NotesPanel } from '@/components/notes/notes-panel';
 import { RequireAuth } from '@/components/require-auth';
 import { classifyError } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
@@ -81,14 +82,20 @@ function StudyDetails({
   study: StudyResponse;
   onReload: () => Promise<unknown>;
 }) {
-  // The editor's unsaved work, so archiving or trashing never silently discards it (BIB-22).
+  // The editor's and the open note's unsaved work, so archiving or trashing never silently
+  // discards it (BIB-22, BIB-23).
   const [unsavedEdits, setUnsavedEdits] = useState(false);
+  const [unsavedNote, setUnsavedNote] = useState(false);
   const showOriginal =
     study.originalQuestion !== null && study.originalQuestion.nodeId !== study.mainQuestion?.nodeId;
   return (
     <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
       <h1 className="font-serif text-4xl break-words">{study.title}</h1>
-      <StudyLifecycleActions study={study} onReload={onReload} unsavedEdits={unsavedEdits} />
+      <StudyLifecycleActions
+        study={study}
+        onReload={onReload}
+        unsavedEdits={unsavedEdits || unsavedNote}
+      />
       {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
       {study.description ? (
         <p className="break-words whitespace-pre-wrap">{study.description}</p>
@@ -138,6 +145,7 @@ function StudyDetails({
       {study.lifecycle === 'active' ? (
         <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
       ) : null}
+      <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
       <p className="text-muted">
         The study is saved. The workspace for its graph, thread and summary arrives in a later
         release.

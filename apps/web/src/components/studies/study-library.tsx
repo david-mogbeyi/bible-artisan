@@ -269,7 +269,7 @@ function StudyLibrary() {
 
       <div className="flex flex-col gap-3">
         <form role="search" onSubmit={submit} className="flex flex-col gap-2" noValidate>
-          <label htmlFor={inputId}>Search titles, descriptions and tags</label>
+          <label htmlFor={inputId}>Search titles, descriptions, tags and notes</label>
           <div className="flex flex-wrap gap-2">
             <input
               ref={searchRef}
@@ -487,6 +487,8 @@ function StudyGroup({
             {item.purgeAt !== null ? (
               <p>Deleted permanently on {formatPurgeDate(item.purgeAt)}</p>
             ) : null}
+            {/* PRD section 14: search results say where they matched (BIB-23). */}
+            {item.matchedInNotes ? <p className="text-sm">Found in notes</p> : null}
             {item.tags.length > 0 ? (
               <ul aria-label="Tags" className="flex flex-wrap gap-2">
                 {item.tags.map((tag) => (
