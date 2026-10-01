@@ -29,7 +29,9 @@ const ROMANS = {
 const STUDY = {
   id: STUDY_ID,
   title: 'Conscience and the Holy Spirit',
+  description: null,
   lifecycle: 'active',
+  pinned: false,
   revision: 1,
   contentRevision: 1,
   startingReference: ROMANS,
@@ -38,6 +40,12 @@ const STUDY = {
     text: 'What is conscience?',
     status: 'open',
   },
+  originalQuestion: {
+    nodeId: 'dddddddd-2222-4333-8444-555555555555',
+    text: 'What is conscience?',
+    status: 'open',
+  },
+  tags: [],
   branchId: 'eeeeeeee-2222-4333-8444-555555555555',
   createdAt: '2026-10-01T12:00:00.000Z',
 };
@@ -84,19 +92,20 @@ describe('StudyPage', () => {
     expect(screen.getByText('What is conscience?')).toBeTruthy();
   });
 
-  it('shows "None yet" for a blank study', async () => {
+  it('shows "None yet" for a blank study\'s passage, question and tags', async () => {
     studyReplies.push(
       jsonResponse(200, {
         ...STUDY,
         title: 'Untitled study',
         startingReference: null,
         mainQuestion: null,
+        originalQuestion: null,
         branchId: null,
       }),
     );
     renderWithQuery(<StudyPage />);
     expect(await screen.findByRole('heading', { name: 'Untitled study' })).toBeTruthy();
-    expect(screen.getAllByText('None yet')).toHaveLength(2);
+    expect(screen.getAllByText('None yet')).toHaveLength(3);
   });
 
   it('shows the neutral unavailable state for a missing or foreign study, with no retry', async () => {

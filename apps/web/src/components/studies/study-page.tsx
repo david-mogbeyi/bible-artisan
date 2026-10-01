@@ -9,6 +9,7 @@ import { RequireAuth } from '@/components/require-auth';
 import { classifyError } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
+import { StudyEditor } from './study-editor';
 
 const LOAD_COPY: ProblemCopy = {
   notFound: "This study isn't available.",
@@ -17,8 +18,8 @@ const LOAD_COPY: ProblemCopy = {
 };
 
 /**
- * `/studies/:id` (BIB-19): a minimal page that reads back what creation saved, so a new study can
- * be opened and reloaded. The workspace (graph, thread, reader, summary) arrives with later
+ * `/studies/:id` (BIB-19, BIB-20): a minimal page that reads back the study and edits its title,
+ * description, main question, pin and tags, so a study can be opened, organized and reloaded. The workspace (graph, thread, reader, summary) arrives with later
  * tickets. A missing or another user's study shows the same neutral unavailable state.
  */
 export function StudyPage() {
@@ -34,7 +35,11 @@ function StudyView({ studyId }: { studyId: string }) {
     retry: false,
   });
 
-  if (study.data) return <StudyDetails study={study.data} />;
+  if (study.data) {
+    return (
+      <StudyDetails study={study.data} onReload={() => study.refetch({ throwOnError: true })} />
+    );
+  }
 
   if (study.isError) {
     const notFound = classifyError(study.error).kind === 'not_found';
@@ -64,10 +69,22 @@ function StudyView({ studyId }: { studyId: string }) {
   );
 }
 
-function StudyDetails({ study }: { study: StudyResponse }) {
+function StudyDetails({
+  study,
+  onReload,
+}: {
+  study: StudyResponse;
+  onReload: () => Promise<unknown>;
+}) {
+  const showOriginal =
+    study.originalQuestion !== null && study.originalQuestion.nodeId !== study.mainQuestion?.nodeId;
   return (
     <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
       <h1 className="font-serif text-4xl break-words">{study.title}</h1>
+      {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
+      {study.description ? (
+        <p className="break-words whitespace-pre-wrap">{study.description}</p>
+      ) : null}
       <dl className="flex flex-col gap-4">
         <div>
           <dt className="font-medium">Starting passage</dt>
@@ -91,7 +108,24 @@ function StudyDetails({ study }: { study: StudyResponse }) {
             )}
           </dd>
         </div>
+        {showOriginal && study.originalQuestion ? (
+          <div>
+            <dt className="font-medium">Original question</dt>
+            <dd className="break-words whitespace-pre-wrap">{study.originalQuestion.text}</dd>
+          </div>
+        ) : null}
+        <div>
+          <dt className="font-medium">Tags</dt>
+          <dd>
+            {study.tags.length > 0 ? (
+              study.tags.map((tag) => tag.name).join(', ')
+            ) : (
+              <span className="text-muted">None yet</span>
+            )}
+          </dd>
+        </div>
       </dl>
+      <StudyEditor study={study} onReload={onReload} />
       <p className="text-muted">
         The study is saved. The workspace for its graph, thread and summary arrives in a later
         release.
