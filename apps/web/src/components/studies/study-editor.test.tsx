@@ -62,6 +62,8 @@ beforeEach(() => {
     if (input.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
     // The page's notes panel (BIB-23): no notes in these tests.
     if (input.includes('/notes')) return Promise.resolve(jsonResponse(200, { items: [] }));
+    // The page's Nodes section (BIB-25): no nodes in these tests.
+    if (input.includes('/nodes')) return Promise.resolve(jsonResponse(200, { items: [] }));
     if (input.endsWith(`/studies/${STUDY_ID}`)) {
       const next = init?.method === 'PATCH' ? patchReplies.shift() : studyReplies.shift();
       if (!next) throw new Error(`unexpected ${init?.method ?? 'GET'} of the study`);
@@ -187,6 +189,31 @@ describe('StudyEditor', () => {
     ).toStrictEqual([true, true]);
     // The study's own cache is updated in place, never thrown away.
     expect(view.queryClient.getQueryState(studyQueryKey(STUDY_ID))?.isInvalidated).toBe(false);
+  });
+
+  it('refetches the node list after a new main question commits, and only then', async () => {
+    await openStudy();
+    const nodeReads = () =>
+      (fetchMock.mock.calls as [string, RequestInit | undefined][]).filter(
+        ([input, init]) => input.endsWith(`/studies/${STUDY_ID}/nodes`) && !init?.method,
+      ).length;
+    await waitFor(() => expect(nodeReads()).toBeGreaterThan(0));
+    const before = nodeReads();
+
+    fireEvent.change(field('Title'), { target: { value: 'Only the title' } });
+    patchReplies.push(
+      jsonResponse(200, edited({ title: 'Only the title', revision: 2, contentRevision: 2 })),
+    );
+    fireEvent.click(save());
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    expect(nodeReads()).toBe(before);
+
+    fireEvent.change(field(/New main question/), { target: { value: LATER.text } });
+    patchReplies.push(
+      jsonResponse(200, edited({ mainQuestion: LATER, revision: 3, contentRevision: 3 }, '3')),
+    );
+    fireEvent.click(save());
+    await waitFor(() => expect(nodeReads()).toBe(before + 1));
   });
 
   it('keeps the save button focused and aria-disabled while saving, sending one request', async () => {

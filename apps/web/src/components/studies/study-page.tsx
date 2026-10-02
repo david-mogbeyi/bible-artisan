@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { useParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { NodesSection } from '@/components/nodes/nodes-section';
 import { NotesPanel } from '@/components/notes/notes-panel';
 import { RequireAuth } from '@/components/require-auth';
 import { classifyError } from '@/lib/api-errors';
@@ -24,8 +25,8 @@ const LOAD_COPY: ProblemCopy = {
  * `/studies/:id` (BIB-19, BIB-20, BIB-22): a minimal page that reads back the study and edits its
  * title, description, main question, pin and tags, so a study can be opened, organized and
  * reloaded. It archives, unarchives, trashes and restores the study; an archived or trashed study
- * stays readable but has no editor. The workspace (graph, thread, reader, summary) arrives with
- * later tickets. A missing or another user's study, or one past its trash window, shows the same
+ * stays readable but has no editor. Its typed nodes (BIB-25) and notes (BIB-23) are listed below
+ * the editor. The canvas, thread and summary arrive with later tickets. A missing or another user's study, or one past its trash window, shows the same
  * neutral unavailable state.
  */
 export function StudyPage() {
@@ -148,6 +149,8 @@ function StudyDetails({
       {study.lifecycle === 'active' ? (
         <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
       ) : null}
+      {/* BIB-25: the study's typed nodes, readable in every state. */}
+      <NodesSection study={study} onReload={onReload} />
       <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
       <p className="text-muted">
         The study is saved. The workspace for its graph, thread and summary arrives in a later

@@ -419,7 +419,7 @@ describe('buildOpenApiDocument', () => {
           },
           patch: {
             description:
-              "Edits one of the signed-in user's studies (FR-STUDY-003): title, description (null clears it), main question ({text} creates a new open Question node and makes it main; {nodeId} makes an existing live Question node of the study main), pin, and tags as deltas (tags.add: names, reusing the owner's tag with the same normalized key; tags.remove: ids of the study's tags; an item that is already applied is a no-op, and a tag no study uses any more is deleted). The original question is never rewritten; a study that had none gets the first main question as its original. expectedRevision is the study's revision and covers every field: missing is 428, stale is 409 with currentRevision. One StudyEvent per real change (study_renamed, study_description_changed, question_created, main_question_changed, study_pinned/study_unpinned, study_tags_changed; ids only) commits with the edit; contentRevision moves only for title, description or main question changes. An edit that changes nothing is 422 STUDY_UNCHANGED; more than 20 tags after applying the change is 422 TAG_LIMIT_EXCEEDED; a nodeId that is not a live question of this study is 422 QUESTION_NOT_FOUND. An archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, a malformed id, and a study trashed 30 or more days ago are the same 404.",
+              "Edits one of the signed-in user's studies (FR-STUDY-003): title, description (null clears it), main question ({text} creates a new open Question node and makes it main; {nodeId} makes an existing live Question node of the study main), pin, and tags as deltas (tags.add: names, reusing the owner's tag with the same normalized key; tags.remove: ids of the study's tags; an item that is already applied is a no-op, and a tag no study uses any more is deleted). The original question is never rewritten; a study that had none gets the first main question as its original. A new Question node counts toward the 2,000 live-node cap (422 NODE_LIMIT_EXCEEDED), and a study without a branch gets its initial branch, rooted at its first question, on any main question change. expectedRevision is the study's revision and covers every field: missing is 428, stale is 409 with currentRevision. One StudyEvent per real change (study_renamed, study_description_changed, question_created, main_question_changed, study_pinned/study_unpinned, study_tags_changed; ids only) commits with the edit; contentRevision moves only for title, description or main question changes. An edit that changes nothing is 422 STUDY_UNCHANGED; more than 20 tags after applying the change is 422 TAG_LIMIT_EXCEEDED; a nodeId that is not a live question of this study is 422 QUESTION_NOT_FOUND. An archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original 200. Another user's, an absent, a malformed id, and a study trashed 30 or more days ago are the same 404.",
             security: [{ sessionCookie: [] }],
             parameters: [
               {
@@ -608,6 +608,55 @@ describe('buildOpenApiDocument', () => {
             'AnnotationStateRequest',
           ),
         },
+        '/studies/{studyId}/nodes': {
+          post: noteOperation(
+            [
+              'REFERENCE_NOT_FOUND',
+              'SCRIPTURE_NODE_EXISTS',
+              'never fetched',
+              'The server sets origin',
+              'scripture_added_to_graph',
+              'NODE_LIMIT_EXCEEDED',
+              'The response carries no text',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId],
+            201,
+            'The new node, without its text',
+            'CreateNodeResponse',
+            'CreateNodeRequest',
+          ),
+          get: noteOperation(
+            ['oldest first', '160 characters', SAME_404],
+            [studyId],
+            200,
+            "The study's nodes",
+            'NodeListResponse',
+          ),
+        },
+        '/studies/{studyId}/nodes/{nodeId}': {
+          get: noteOperation(
+            ['never verse text', SAME_404],
+            [studyId, uuidParam('nodeId')],
+            200,
+            'The node',
+            'NodeResponse',
+          ),
+          patch: noteOperation(
+            [
+              'type never changes',
+              'NODE_NOT_EDITABLE',
+              'NODE_UNCHANGED',
+              'observation_updated',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId, uuidParam('nodeId')],
+            200,
+            'The node as saved, without its text',
+            'NodeMutationResponse',
+            'UpdateNodeRequest',
+          ),
+        },
         '/bible/translations': {
           get: {
             description:
@@ -756,6 +805,12 @@ describe('buildOpenApiDocument', () => {
       'AnnotationStateRequest',
       'AnnotationMutationResponse',
       'AnnotationListResponse',
+      'CreateNodeRequest',
+      'CreateNodeResponse',
+      'UpdateNodeRequest',
+      'NodeMutationResponse',
+      'NodeListResponse',
+      'NodeResponse',
       'NoteBlock',
       'NoteListItem',
     ]);

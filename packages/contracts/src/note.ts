@@ -457,8 +457,10 @@ export const listNotesQuerySchema = z.strictObject({
 /**
  * What a note is attached to (null: the study).
  *
- * `node`: `label` is what identifies it to the owner: a question's text, a Scripture node's
- * reference label; null for a type without one yet. `deleted`: the node was deleted, so the note
+ * `node`: `label` is what identifies it to the owner, exactly as the node list shows it
+ * (`nodeLabel`, BIB-25): the `nodePreview` of its statement, text or source title, or a Scripture
+ * node's reference label (`SCRIPTURE_LABEL_UNAVAILABLE` once its edition is no longer active).
+ * `deleted`: the node was deleted, so the note
  * is listed for orphaned-note review (FR-NOTE-002); it keeps its target.
  *
  * `scripture` (BIB-24): a verse range or phrase anchor, re-checked against the corpus on every
@@ -471,7 +473,7 @@ export const noteTargetSchema = z.discriminatedUnion('kind', [
     kind: z.literal('node'),
     nodeId: z.uuid(),
     nodeType: z.enum(STUDY_NODE_TYPES),
-    label: z.string().nullable(),
+    label: z.string(),
     deleted: z.boolean(),
   }),
   z.object({

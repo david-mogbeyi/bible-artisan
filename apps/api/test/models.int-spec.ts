@@ -28,6 +28,7 @@ import { StudyTag } from '../src/database/models/study-tag.model';
 import { Study } from '../src/database/models/study.model';
 import { Tag } from '../src/database/models/tag.model';
 import { User } from '../src/database/models/user.model';
+import { THOUGHT } from './support/nodes';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -50,6 +51,21 @@ describe('Sequelize models against the real schema', () => {
     const study = await Study.create({ ownerId, title: 'Conscience in Romans' });
     created.studies.push(study.id);
     return study;
+  }
+
+  /** A shared reference row (immutable, never deleted): upserted for the first active verse. */
+  async function firstReference(): Promise<ScriptureReference> {
+    await db.query(
+      `INSERT INTO scripture_reference
+         (edition_id, book_code, start_chapter, start_verse, end_chapter, end_verse)
+       SELECT v.edition_id, v.book_code, v.chapter, v.verse, v.chapter, v.verse
+         FROM bible_verse v
+         JOIN bible_edition e ON e.id = v.edition_id AND e.activated_at IS NOT NULL
+        ORDER BY v.book_code, v.chapter, v.verse
+        LIMIT 1
+       ON CONFLICT DO NOTHING`,
+    );
+    return ScriptureReference.findOne({ rejectOnEmpty: true });
   }
 
   beforeAll(() => {
@@ -292,45 +308,88 @@ describe('Sequelize models against the real schema', () => {
     ).rejects.toBeInstanceOf(DatabaseError);
   });
 
-  it('creates a StudyNode with only required fields and reads it back', async () => {
+  it('creates a node of each of the six types through the model and reads it back (BIB-25)', async () => {
     const owner = await createUser();
     const study = await createStudy(owner.id);
-    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'thought' });
-    const found = await StudyNode.findByPk(node.id, { rejectOnEmpty: true });
-    expect(found.get({ plain: true })).toStrictEqual({
-      id: expect.stringMatching(UUID),
-      studyId: study.id,
-      ownerId: owner.id,
-      type: 'thought',
+    const reference = await firstReference();
+    const rows = [
+      { type: 'scripture', origin: 'scripture', scriptureReferenceId: reference.id },
+      { type: 'question', origin: 'user', title: 'What is conscience?', questionStatus: 'open' },
+      {
+        type: 'observation',
+        origin: 'user',
+        body: 'Paul appeals to his conscience.',
+        observationKind: 'interpretation',
+      },
+      { type: 'thought', origin: 'user', body: 'A witness?' },
+      {
+        type: 'conclusion',
+        origin: 'user',
+        title: 'It bears witness.',
+        conclusionStatus: 'tentative',
+      },
+      {
+        type: 'source',
+        origin: 'external',
+        title: 'Romans commentary',
+        payloadJson: { kind: 'commentary', locator: 'p. 12' },
+      },
+    ] as const;
+    const blank = {
       title: null,
+      body: null,
       questionStatus: null,
+      conclusionStatus: null,
+      observationKind: null,
       scriptureReferenceId: null,
-      revision: 1,
-      deletedAt: null,
-      createdAt: expect.any(Date),
-      updatedAt: expect.any(Date),
-    });
+      payloadJson: null,
+    };
+    for (const row of rows) {
+      const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, ...row });
+      const found = await StudyNode.findByPk(node.id, { rejectOnEmpty: true });
+      expect(found.get({ plain: true })).toStrictEqual({
+        id: expect.stringMatching(UUID),
+        studyId: study.id,
+        ownerId: owner.id,
+        ...blank,
+        ...row,
+        revision: 1,
+        deletedAt: null,
+        createdAt: expect.any(Date),
+        updatedAt: expect.any(Date),
+      });
+    }
+  });
+
+  it("rejects a model-level node with another type's columns, an unknown origin, or a source without a URL or locator (CHECK)", async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    for (const row of [
+      { ...THOUGHT, origin: 'robot' },
+      { ...THOUGHT, title: 'x' },
+      { ...THOUGHT, observationKind: 'interpretation' },
+      { type: 'observation', origin: 'user', body: 'x' },
+      { type: 'conclusion', origin: 'user', title: 'x' },
+      { type: 'conclusion', origin: 'user', title: 'x', conclusionStatus: 'proven' },
+      { type: 'source', origin: 'external', title: 'x', payloadJson: { kind: 'web' } },
+      { type: 'source', origin: 'external', title: 'x'.repeat(201), payloadJson: { locator: 'p' } },
+      { type: 'question', origin: 'user', title: 'x', questionStatus: 'open', body: 'x' },
+    ]) {
+      await expect(StudyNode.create({ ...scope, ...row })).rejects.toBeInstanceOf(DatabaseError);
+    }
+    expect(await StudyNode.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('creates Question and Scripture nodes, a StudyBranch and the study pointers through the models (BIB-19)', async () => {
     const owner = await createUser();
     const study = await createStudy(owner.id);
-    // A shared reference row (immutable, never deleted): upsert one for the first active verse.
-    await db.query(
-      `INSERT INTO scripture_reference
-         (edition_id, book_code, start_chapter, start_verse, end_chapter, end_verse)
-       SELECT v.edition_id, v.book_code, v.chapter, v.verse, v.chapter, v.verse
-         FROM bible_verse v
-         JOIN bible_edition e ON e.id = v.edition_id AND e.activated_at IS NOT NULL
-        ORDER BY v.book_code, v.chapter, v.verse
-        LIMIT 1
-       ON CONFLICT DO NOTHING`,
-    );
-    const reference = await ScriptureReference.findOne({ rejectOnEmpty: true });
+    const reference = await firstReference();
     const question = await StudyNode.create({
       studyId: study.id,
       ownerId: owner.id,
       type: 'question',
+      origin: 'user',
       title: 'What is conscience?',
       questionStatus: 'open',
     });
@@ -338,6 +397,7 @@ describe('Sequelize models against the real schema', () => {
       studyId: study.id,
       ownerId: owner.id,
       type: 'scripture',
+      origin: 'scripture',
       scriptureReferenceId: reference.id,
     });
     const branch = await StudyBranch.create({
@@ -382,9 +442,9 @@ describe('Sequelize models against the real schema', () => {
     const foreignNode = await StudyNode.create({
       studyId: otherStudy.id,
       ownerId: owner.id,
-      type: 'thought',
+      ...THOUGHT,
     });
-    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'thought' });
+    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, ...THOUGHT });
     await expect(
       StudyBranch.create({ studyId: study.id, ownerId: otherOwner.id, rootNodeId: node.id }),
     ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
@@ -407,7 +467,7 @@ describe('Sequelize models against the real schema', () => {
     const owner = await createUser();
     const study = await createStudy(owner.id);
     await expect(
-      StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'question' }),
+      StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'question', origin: 'user' }),
     ).rejects.toBeInstanceOf(DatabaseError);
   });
 
@@ -440,7 +500,7 @@ describe('Sequelize models against the real schema', () => {
     const otherOwner = await createUser();
     const study = await createStudy(owner.id);
     await expect(
-      StudyNode.create({ studyId: study.id, ownerId: otherOwner.id, type: 'thought' }),
+      StudyNode.create({ studyId: study.id, ownerId: otherOwner.id, ...THOUGHT }),
     ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
     expect(await StudyNode.count({ where: { studyId: study.id } })).toBe(0);
   });
@@ -466,7 +526,7 @@ describe('Sequelize models against the real schema', () => {
     const target = await StudyNode.create({
       studyId: study.id,
       ownerId: owner.id,
-      type: 'thought',
+      ...THOUGHT,
     });
     const content = { type: 'doc', content: [{ type: 'paragraph' }] } as const;
     const note = await Note.create({
@@ -532,7 +592,7 @@ describe('Sequelize models against the real schema', () => {
     const foreignNode = await StudyNode.create({
       studyId: otherStudy.id,
       ownerId: owner.id,
-      type: 'thought',
+      ...THOUGHT,
     });
     const content = { type: 'doc', content: [{ type: 'paragraph' }] } as const;
     const base = { studyId: study.id, ownerId: owner.id, richTextJson: content, searchText: '' };
@@ -666,7 +726,7 @@ describe('Sequelize models against the real schema', () => {
     await Annotation.create({ ...base, label: '🙂'.repeat(80) });
 
     const content = { type: 'doc', content: [{ type: 'paragraph' }] } as const;
-    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'thought' });
+    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, ...THOUGHT });
     const note = { studyId: study.id, ownerId: owner.id, richTextJson: content, plainText: '' };
     const withTarget = await Note.create({
       ...note,

@@ -1,8 +1,22 @@
 import { Module } from '@nestjs/common';
+import { MutationModule } from '../../common/mutation/mutation.module';
+import { BibleContentModule } from '../bible-content/bible-content.module';
+import { StudyModule } from '../study/study.module';
+import { NodesController } from './nodes.controller';
+import { NodesService } from './nodes.service';
 
 /**
- * Graph bounded context (PRD §26). Owns StudyEdge, NodeVersion, StudyBranch, and node mutation
- * routes. Placeholder module — its tables and endpoints ship with Graph's own tickets.
+ * Graph bounded context (PRD §26). Owns node creation, edits and reads (`/studies/:id/nodes`,
+ * BIB-25) on `study_node`, whose table the Study context created: Study still inserts the roots
+ * at study creation and BIB-20's new main question, and keeps the `StudyAccessService` lookups
+ * every module uses. Writes run through `MutationService` (the StudyEvent commits in the same
+ * transaction); the study revision check goes through `StudyRevisionService`, never the `study`
+ * table, and Scripture references through `ReferenceService`. StudyEdge, NodeVersion and branch
+ * membership arrive with Graph's later tickets.
  */
-@Module({})
+@Module({
+  imports: [MutationModule, StudyModule, BibleContentModule],
+  controllers: [NodesController],
+  providers: [NodesService],
+})
 export class GraphModule {}

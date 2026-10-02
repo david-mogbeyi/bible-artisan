@@ -34,6 +34,36 @@ const STUDY: StudyResponse = {
   createdAt: '2026-10-01T12:00:00.000Z',
 };
 const T = '2026-10-01T12:00:00.000Z';
+const THOUGHT_ID = 'cccccccc-2222-4333-8444-555555555555';
+/** The study's live nodes (BIB-25), answered for every node list read unless a test queues one. */
+const NODE_LIST = {
+  items: [
+    {
+      id: QUESTION_ID,
+      type: 'question',
+      origin: 'user',
+      label: 'What is conscience?',
+      status: 'open',
+      observationKind: null,
+      referenceId: null,
+      revision: 1,
+      createdAt: T,
+      updatedAt: T,
+    },
+    {
+      id: THOUGHT_ID,
+      type: 'thought',
+      origin: 'user',
+      label: `A second witness ${'x'.repeat(100)}`,
+      status: null,
+      observationKind: null,
+      referenceId: null,
+      revision: 1,
+      createdAt: T,
+      updatedAt: T,
+    },
+  ],
+};
 
 const doc = (text: string): NoteDocument => ({
   type: 'doc',
@@ -106,6 +136,9 @@ beforeEach(() => {
       });
       const queue = replies.get(`${method} ${path}`);
       const next = queue?.shift();
+      if (!next && method === 'GET' && path === `/studies/${STUDY_ID}/nodes`) {
+        return Promise.resolve(jsonResponse(200, NODE_LIST));
+      }
       if (!next) throw new Error(`unexpected ${method} ${path}`);
       return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
     }),
@@ -163,7 +196,18 @@ describe('NotesPanel (BIB-23)', () => {
     const { queryClient } = renderPanel();
 
     expect(await screen.findByText(NOTES_COPY.empty)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Attach to'), { target: { value: 'main' } });
+    // BIB-25: every live node of the study, by type and label, the main question marked.
+    await screen.findByRole('option', { name: 'Question: What is conscience? (main question)' });
+    expect(
+      within(screen.getByLabelText('Attach to'))
+        .getAllByRole('option')
+        .map((o) => o.textContent),
+    ).toStrictEqual([
+      'This study',
+      'Question: What is conscience? (main question)',
+      `Thought: A second witness ${'x'.repeat(53)}…`,
+    ]);
+    fireEvent.change(screen.getByLabelText('Attach to'), { target: { value: QUESTION_ID } });
     fireEvent.click(screen.getByRole('button', { name: 'New note' }));
     const editor = await noteEditor();
     expect(requests.find((r) => r.method === 'POST')).toMatchObject({

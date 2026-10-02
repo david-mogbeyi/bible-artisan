@@ -256,6 +256,36 @@ const ROUTES: Record<string, Access> = {
       test: 'DELETE /v1/studies/:studyId/annotations/:annotationId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  // Typed graph nodes (BIB-25): Bob's calls on Alice's study and nodes, absent and malformed
+  // ids, Alice's node under his own study, and Alice's node under another of her studies.
+  'POST /v1/studies/:studyId/nodes': {
+    access: 'private',
+    crossUserTest: {
+      file: 'nodes.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/nodes gives another user the same neutral 404 as an absent or malformed study, writing nothing',
+    },
+  },
+  'GET /v1/studies/:studyId/nodes': {
+    access: 'private',
+    crossUserTest: {
+      file: 'nodes.int-spec.ts',
+      test: "GET /v1/studies/:studyId/nodes lists nothing of another user's: their study is the same 404 as an absent one",
+    },
+  },
+  'GET /v1/studies/:studyId/nodes/:nodeId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'nodes.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/nodes/:nodeId gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
+  'PATCH /v1/studies/:studyId/nodes/:nodeId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'nodes.int-spec.ts',
+      test: 'PATCH /v1/studies/:studyId/nodes/:nodeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

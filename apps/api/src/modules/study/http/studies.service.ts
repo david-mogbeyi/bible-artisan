@@ -28,13 +28,14 @@ import { requireExpectedRevision } from '../../../common/revision/expected-revis
 import { parseBody } from '../../../common/validation/parse-body';
 import { ENV } from '../../../config/config.module';
 import { cursorSecret, type Env } from '../../../config/env';
-import { StudyBranch } from '../../../database/models/study-branch.model';
 import { StudyNode } from '../../../database/models/study-node.model';
 import { Study } from '../../../database/models/study.model';
 import type { AppendEventInput } from '../../thread/thread.service';
 import { ReferenceService } from '../../bible-content/reference/reference.service';
 import { NotesSearchService } from '../../notes/notes-search.service';
 import { StudyAccessService } from '../study-access.service';
+import { QUESTION_CREATED } from '../study-events';
+import { StudyGraphService } from '../study-graph.service';
 import type { StudyLifecycleTransition } from '../study-lifecycle';
 import { deriveStudyTitle } from '../study-title';
 import { libraryCursorKey } from './library-cursor';
@@ -55,7 +56,7 @@ const STUDY_CREATED = 'study_created';
 export const STUDY_EDIT_EVENTS = {
   renamed: 'study_renamed',
   descriptionChanged: 'study_description_changed',
-  questionCreated: 'question_created',
+  questionCreated: QUESTION_CREATED,
   mainQuestionChanged: 'main_question_changed',
   pinned: 'study_pinned',
   unpinned: 'study_unpinned',
@@ -89,6 +90,7 @@ export class StudiesService {
     private readonly access: StudyAccessService,
     private readonly references: ReferenceService,
     private readonly notesSearch: NotesSearchService,
+    private readonly graph: StudyGraphService,
     @Inject(ENV) env: Env,
   ) {
     this.cursorKey = libraryCursorKey(cursorSecret(env));
@@ -113,16 +115,18 @@ export class StudiesService {
       study: { title, startingReferenceId: reference?.id ?? null },
       work: async (m) => {
         const scripture = reference
-          ? await m.createChild(StudyNode, {
+          ? await this.graph.addNode(m, {
               type: 'scripture',
+              origin: 'scripture',
               scriptureReferenceId: reference.id,
             })
           : null;
         const question =
           body.question === undefined
             ? null
-            : await m.createChild(StudyNode, {
+            : await this.graph.addNode(m, {
                 type: 'question',
+                origin: 'user',
                 title: body.question,
                 questionStatus: 'open',
               });
@@ -133,8 +137,8 @@ export class StudiesService {
           });
         }
         // PRD section 10: the question establishes the initial branch; else the passage roots it.
-        const root = question ?? scripture;
-        const branch = root ? await m.createChild(StudyBranch, { rootNodeId: root.id }) : null;
+        // A blank study gets none yet (its first question will root it).
+        const branchId = await this.graph.ensureInitialBranch(m);
         // Ids and the reference label only: the title and question are private text the thread
         // reads from the study and node, not copies in the event (PRD section 23).
         const event = await m.appendEvent({
@@ -144,7 +148,7 @@ export class StudiesService {
             startingReferenceLabel: reference?.label ?? null,
             scriptureNodeId: scripture?.id ?? null,
             questionNodeId: question?.id ?? null,
-            branchId: branch?.id ?? null,
+            branchId,
             blank: body.blank === true,
           },
         });
@@ -155,7 +159,7 @@ export class StudiesService {
           contentRevision: m.contentRevision,
           rootNodeId: scripture?.id ?? null,
           questionNodeId: question?.id ?? null,
-          branchId: branch?.id ?? null,
+          branchId,
           lastEventSequence: event.sequence,
         };
         return { status: 201, body: created };
@@ -201,7 +205,9 @@ export class StudiesService {
    * 1. Revision check first, so a stale edit is 409 whatever else it says.
    * 2. Work out what really changes; a field equal to its current value is no change, and an
    *    edit that changes nothing is 422 STUDY_UNCHANGED (rolled back: no receipt, nothing).
-   * 3. Write: a new Question node (and the initial branch, for a study without one), the study
+   * 3. Write: a new Question node (through `StudyGraphService.addNode`, so the live-node cap
+   *    applies: 422 NODE_LIMIT_EXCEEDED), the initial branch for a study without one
+   *    (`StudyGraphService.ensureInitialBranch`, on any main question change), the study
    *    row (one revision bump for the whole edit); one event per change.
    *
    * Tag deltas apply before step 2's verdict (see `applyTagChange`), and their 20-tag limit is a
@@ -248,24 +254,21 @@ export class StudiesService {
           throw new StudyUnchangedError();
         }
 
-        // A new main question is a new Question node; the old one (and the original) stay.
+        // A new main question is a new Question node (through the shared node cap); the old one
+        // (and the original) stay.
         let createdQuestionId: string | null = null;
-        let createdBranchId: string | null = null;
         if (target && 'text' in target) {
-          const node = await m.createChild(StudyNode, {
+          const node = await this.graph.addNode(m, {
             type: 'question',
+            origin: 'user',
             title: target.text,
             questionStatus: 'open',
           });
           createdQuestionId = node.id;
-          // A blank study's first question roots its initial branch, as at creation.
-          const hasBranch = await StudyBranch.count({
-            where: { studyId: m.studyId, ownerId: m.ownerId },
-          });
-          if (hasBranch === 0) {
-            createdBranchId = (await m.createChild(StudyBranch, { rootNodeId: node.id })).id;
-          }
         }
+        // A study without a branch (a blank one) gets its initial branch from its first question,
+        // whether this edit created it or made an existing one main.
+        const createdBranchId = mainChanged ? await this.graph.ensureInitialBranch(m) : null;
         const newMainId =
           target === undefined ? null : 'text' in target ? createdQuestionId : target.nodeId;
 
@@ -306,6 +309,8 @@ export class StudiesService {
             payload: { cleared: body.description === null },
           });
         }
+        // The branch this edit created is reported once: on question_created when the edit
+        // created the question that roots it, else on main_question_changed.
         if (createdQuestionId !== null) {
           events.push({
             eventType: STUDY_EDIT_EVENTS.questionCreated,
@@ -319,6 +324,7 @@ export class StudiesService {
               fromNodeId: current.mainQuestionNodeId,
               toNodeId: newMainId,
               originalQuestionNodeId: updated.originalQuestionNodeId,
+              branchId: createdQuestionId === null ? createdBranchId : null,
             },
           });
         }

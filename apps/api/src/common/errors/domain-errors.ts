@@ -15,6 +15,8 @@ import {
   NOTE_TOO_LONG,
   NOTE_TRASHED,
   NOTE_UNCHANGED,
+  NODE_ERROR_MESSAGES,
+  type NodeErrorCode,
   type NoteErrorCode,
   QUESTION_NOT_FOUND,
   REFERENCE_NOT_FOUND,
@@ -322,5 +324,18 @@ export class NoteTooLongError extends Error {
   constructor() {
     super(`A note can have at most ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters`);
     this.name = 'NoteTooLongError';
+  }
+}
+
+/**
+ * A node change the study's or node's state cannot apply (BIB-25; PRD section 24: 422): a second
+ * live Scripture node for the same reference, the per-study node cap, an edit of a type or field
+ * not editable here, or an edit that changes nothing. Raised under the study lock, so nothing is
+ * written. Fixed messages: never a node's text, a label or a reference.
+ */
+export class NodeRuleError extends Error {
+  constructor(readonly code: NodeErrorCode) {
+    super(NODE_ERROR_MESSAGES[code]);
+    this.name = 'NodeRuleError';
   }
 }

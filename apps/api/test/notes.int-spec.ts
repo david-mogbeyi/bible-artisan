@@ -31,9 +31,11 @@ import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
 import { AnchorService } from '../src/modules/bible-content/anchor/anchor.service';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
+import { ReferenceService } from '../src/modules/bible-content/reference/reference.service';
 import { SessionService } from '../src/modules/identity/session.service';
 import { createTestApp } from './app';
 import { envelope, NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
+import { THOUGHT } from './support/nodes';
 
 interface Owner {
   user: User;
@@ -466,6 +468,86 @@ describe('notes (BIB-23)', () => {
       });
     });
 
+    it('labels a note on a Scripture node whose edition is no longer active as the node list does', async () => {
+      const edition = await BibleEdition.findOne({
+        where: {
+          code: ENGWEBP_RELEASE.code,
+          sourceRelease: ENGWEBP_RELEASE.sourceRelease,
+          activatedAt: { [Op.ne]: null },
+        },
+        rejectOnEmpty: true,
+      });
+      const resolved = await send(alice, 'post', '/v1/bible/resolve', {
+        input: 'Rom 9:2',
+        editionId: edition.id,
+      });
+      const outcome = resolved.body as ResolveReferenceResponse;
+      if (outcome.outcome !== 'resolved') throw new Error('expected a resolved reference');
+      const study = await createStudy(alice, { startingReferenceId: outcome.reference.id });
+      const note = await createNote(alice, study.studyId, doc('Paul grieves'), {
+        targetNodeId: study.rootNodeId,
+      });
+      // Activated editions can never be deactivated (BIB-14 triggers): stand one in.
+      vi.spyOn(app.get(ReferenceService), 'storedReferences').mockResolvedValue(new Map());
+      const read = await send(alice, 'get', notePath(study.studyId, note.id));
+      const list = await send(alice, 'get', `/v1/studies/${study.studyId}/nodes`);
+      expect({
+        target: (read.body as { target: unknown }).target,
+        listed: (list.body as { items: { label: string }[] }).items.map((n) => n.label),
+      }).toStrictEqual({
+        target: {
+          kind: 'node',
+          nodeId: study.rootNodeId,
+          nodeType: 'scripture',
+          label: 'Passage (translation unavailable)',
+          deleted: false,
+        },
+        listed: ['Passage (translation unavailable)'],
+      });
+    });
+
+    it("labels a note on a Thought or a Source with the node list's label (BIB-25)", async () => {
+      const study = await createStudy(alice);
+      const create = async (body: object) => {
+        const res = await send(alice, 'post', `/v1/studies/${study.studyId}/nodes`, {
+          expectedRevision: await studyRevision(study.studyId),
+          ...body,
+        });
+        expect(res.status).toBe(201);
+        return (res.body as { id: string }).id;
+      };
+      const thought = await create({
+        type: 'thought',
+        text: `  A second   witness,\nperhaps ${'x'.repeat(200)}`,
+      });
+      const source = await create({
+        type: 'source',
+        source: { title: 'Commentary on Romans', kind: 'book', locator: 'p. 4' },
+      });
+      const targets = [];
+      for (const targetNodeId of [thought, source]) {
+        const note = await createNote(alice, study.studyId, doc('On it'), { targetNodeId });
+        const read = await send(alice, 'get', notePath(study.studyId, note.id));
+        targets.push((read.body as { target: unknown }).target);
+      }
+      expect(targets).toStrictEqual([
+        {
+          kind: 'node',
+          nodeId: thought,
+          nodeType: 'thought',
+          label: `A second witness, perhaps ${'x'.repeat(134)}`,
+          deleted: false,
+        },
+        {
+          kind: 'node',
+          nodeId: source,
+          nodeType: 'source',
+          label: 'Commentary on Romans',
+          deleted: false,
+        },
+      ]);
+    });
+
     it('refuses a target that is not a live node of this study with 422 NOTE_TARGET_NOT_FOUND, writing nothing', async () => {
       const study = await createStudy(alice);
       const otherStudy = await createStudy(alice);
@@ -473,7 +555,7 @@ describe('notes (BIB-23)', () => {
       const deleted = await StudyNode.create({
         studyId: study.studyId,
         ownerId: alice.user.id,
-        type: 'thought',
+        ...THOUGHT,
         deletedAt: new Date(),
       });
       const before = await ownerRows(alice);

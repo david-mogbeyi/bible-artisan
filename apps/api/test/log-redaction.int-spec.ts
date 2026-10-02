@@ -1358,6 +1358,116 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs typed graph nodes (BIB-25) without node text, citations, excerpts, URLs, labels, passages, ids, or keys', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ blank: true })
+      .expect(201);
+    const nodeStudyId = track((created.body as { studyId: string }).studyId);
+    const listRoute = '/v1/studies/:studyId/nodes';
+    const itemRoute = '/v1/studies/:studyId/nodes/:nodeId';
+    const send = (method: 'get' | 'post' | 'patch', path: string, body?: object) => {
+      const req = withPrivateChannels(
+        http()[method](`/v1/studies/${nodeStudyId}/nodes${path}${query()}`),
+        cookie,
+      ).set('Idempotency-Key', track(randomUUID()));
+      return body ? req.send(body) : req;
+    };
+    // Typed passage input goes to the resolver, never to a node route.
+    const edition = await BibleEdition.findOne({ where: { code: 'engwebp' }, rejectOnEmpty: true });
+    const passage = await withPrivateChannels(http().post('/v1/bible/resolve'), cookie).send({
+      input: secret('passage-input'),
+      editionId: edition.id,
+    });
+    await expectLogged(passage, { method: 'POST', route: '/v1/bible/resolve', status: 200 });
+
+    // Text the owner's own reads return: tracked for the log check only.
+    const thought = await send('post', '', {
+      expectedRevision: 1,
+      type: 'thought',
+      text: track(`SENTINEL-node-thought-${randomUUID()}`),
+    });
+    await expectLogged(thought, { method: 'POST', route: listRoute, status: 201 });
+    const thoughtId = track((thought.body as { id: string }).id);
+    const source = await send('post', '', {
+      expectedRevision: 2,
+      type: 'source',
+      source: {
+        title: track(`SENTINEL-node-source-title-${randomUUID()}`),
+        kind: 'web',
+        url: track(`https://example.org/SENTINEL-node-url-${randomUUID()}`),
+        excerpt: track(`SENTINEL-node-excerpt-${randomUUID()}`),
+        excerptKind: 'quotation',
+      },
+    });
+    await expectLogged(source, { method: 'POST', route: listRoute, status: 201 });
+    track((source.body as { id: string }).id);
+
+    const badUrl = await send('post', '', {
+      expectedRevision: 3,
+      type: 'source',
+      source: { title: secret('node-bad-title'), kind: 'web', url: `javascript:${secret('url')}` },
+    });
+    await expectLogged(
+      badUrl,
+      { method: 'POST', route: listRoute, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { 'source.url': ['must be an http or https URL without credentials'] },
+        }),
+      },
+    );
+    const stale = await send('patch', `/${thoughtId}`, {
+      expectedRevision: 7,
+      text: secret('node-stale-text'),
+    });
+    await expectLogged(
+      stale,
+      { method: 'PATCH', route: itemRoute, status: 409 },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 1,
+        }),
+      },
+    );
+    const notEditable = await send('patch', `/${thoughtId}`, {
+      expectedRevision: 1,
+      observationKind: 'interpretation',
+    });
+    await expectLogged(
+      notEditable,
+      { method: 'PATCH', route: itemRoute, status: 422 },
+      {
+        errorType: 'NodeRuleError',
+        body: envelope({
+          code: 'NODE_NOT_EDITABLE',
+          message: 'This node cannot be edited this way',
+        }),
+      },
+    );
+    const edited = await send('patch', `/${thoughtId}`, {
+      expectedRevision: 1,
+      text: track(`SENTINEL-node-new-text-${randomUUID()}`),
+    });
+    await expectLogged(edited, { method: 'PATCH', route: itemRoute, status: 200 });
+    await expectLogged(await send('get', ''), { method: 'GET', route: listRoute, status: 200 });
+    await expectLogged(await send('get', `/${thoughtId}`), {
+      method: 'GET',
+      route: itemRoute,
+      status: 200,
+    });
+    await expectLogged(
+      await send('get', `/${track(randomUUID())}`),
+      { method: 'GET', route: itemRoute, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+  });
+
   it('logs a request the client aborted with no status, never a default 200', async () => {
     const correlationId = randomUUID();
     // The probe holds its transaction for 1 s; the client gives up after 200 ms.

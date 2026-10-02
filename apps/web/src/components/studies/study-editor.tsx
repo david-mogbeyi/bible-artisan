@@ -24,6 +24,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { ApiError } from '@/lib/api-client';
+import { nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey, updateStudy } from '@/lib/studies';
 
 export const CONFLICT =
@@ -325,6 +326,11 @@ export function StudyEditor({
       // Every committed edit moves last activity, and may change the title, pin or tags the
       // library lists and orders by (BIB-21).
       void invalidateLibrary(queryClient);
+      // A new main question is a new Question node, and the first one may root the initial
+      // branch: refresh the node list (the Nodes section and the Notes "Attach to" select).
+      if (attempt.body.mainQuestion !== undefined) {
+        void queryClient.invalidateQueries({ queryKey: nodesQueryKey(study.id) });
+      }
       const { expectedRevision: _revision, ...sent } = attempt.body;
       const oldBase = latestBase.current;
       setDraft((current) => settleDraft(current, oldBase, state, sent));
