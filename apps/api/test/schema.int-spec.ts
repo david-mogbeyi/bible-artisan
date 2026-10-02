@@ -449,10 +449,29 @@ describe('schema (composite-key owner isolation)', () => {
   describe('canonical Scripture nodes (BIB-26)', () => {
     const CANONICAL_VIOLATION = { code: '23505', constraint: 'study_node_canonical_scripture_key' };
 
-    /** Two shared reference ids (any; the corpus is imported in the test database). */
+    /**
+     * Two shared reference ids, upserted for the first two active verses so this file does not
+     * depend on another spec having created references (rows are immutable and never deleted).
+     */
     async function references(): Promise<[string, string]> {
+      const verses = `SELECT v.edition_id, v.book_code, v.chapter, v.verse
+                        FROM bible_verse v
+                        JOIN bible_edition e ON e.id = v.edition_id AND e.activated_at IS NOT NULL
+                       ORDER BY v.book_code, v.chapter, v.verse
+                       LIMIT 2`;
+      await db.query(
+        `INSERT INTO scripture_reference
+           (edition_id, book_code, start_chapter, start_verse, end_chapter, end_verse)
+         SELECT edition_id, book_code, chapter, verse, chapter, verse FROM (${verses}) v
+         ON CONFLICT DO NOTHING`,
+      );
       const rows = await db.query<{ id: string }>(
-        `SELECT id FROM scripture_reference ORDER BY id LIMIT 2`,
+        `SELECT r.id FROM (${verses}) v
+           JOIN scripture_reference r
+             ON r.edition_id = v.edition_id AND r.book_code = v.book_code
+            AND r.start_chapter = v.chapter AND r.start_verse = v.verse
+            AND r.end_chapter = v.chapter AND r.end_verse = v.verse
+          ORDER BY v.book_code, v.chapter, v.verse`,
         { type: QueryTypes.SELECT },
       );
       const [first, second] = rows;
