@@ -3,6 +3,7 @@ import {
   NOTE_TEXT_INVALID,
   NOTE_TOO_DEEP,
   NOTE_TOO_MANY_NODES,
+  NOTE_TOO_MANY_REFERENCES,
   type NoteDocument,
   noteDocumentSchema,
 } from '@bible-artisan/contracts';
@@ -21,7 +22,14 @@ interface EditorNode {
  * the problem (the server stays strict; the client normalizes what it safely can first).
  */
 export type NoteContentProblem =
-  'link' | 'list_numbering' | 'characters' | 'too_deep' | 'too_many_parts' | 'structure';
+  | 'link'
+  | 'list_numbering'
+  | 'characters'
+  | 'too_deep'
+  | 'too_many_parts'
+  /** A Bible reference link the server could not verify (BIB-24, 422 NOTE_REFERENCE_INVALID). */
+  | 'reference'
+  | 'structure';
 
 /** The editor's content as the API takes it, or why it can't be saved. */
 export type NoteDraft =
@@ -65,6 +73,9 @@ function keptAttrs(type: string, attrs: Record<string, unknown> | undefined) {
     }
     case 'link':
       return attrs.href === undefined || attrs.href === null ? undefined : { href: attrs.href };
+    case 'scriptureReference':
+      // Exactly what the allowlist carries; the server verifies both against the corpus.
+      return { referenceId: attrs.referenceId, label: attrs.label };
     default:
       return undefined;
   }
@@ -109,6 +120,7 @@ export function classifyNoteIssues(issues: readonly Issue[]): NoteContentProblem
     if (message === NOTE_TOO_DEEP) return 'too_deep';
     if (message === NOTE_TOO_MANY_NODES) return 'too_many_parts';
     if (message === NOTE_TEXT_INVALID) return 'characters';
+    if (message === NOTE_TOO_MANY_REFERENCES || path.includes('referenceId')) return 'reference';
     if (path.includes('href')) return 'link';
     if (path.includes('start')) return 'list_numbering';
   }

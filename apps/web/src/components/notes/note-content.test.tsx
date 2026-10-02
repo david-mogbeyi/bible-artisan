@@ -75,3 +75,41 @@ describe('NoteContent (BIB-23, NFR-SEC-002)', () => {
     expect(textOf(screen.getByRole('document', { name: 'Note' }))).toContain('click');
   });
 });
+
+describe('NoteContent reference links (BIB-24)', () => {
+  it('renders a verified reference as an internal link to the reader, its label as text', () => {
+    const referenceId = 'eeeeeeee-2222-4333-8444-555555555555';
+    const studyId = 'aaaaaaaa-2222-4333-8444-555555555555';
+    render(
+      <NoteContent
+        label="Note"
+        studyId={studyId}
+        doc={{
+          type: 'doc',
+          content: [
+            {
+              type: 'paragraph',
+              content: [
+                { type: 'text', text: 'See ' },
+                {
+                  type: 'scriptureReference',
+                  attrs: { referenceId, label: '<b>Romans 9:1</b>' },
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+    const link = screen.getByRole('link', { name: '<b>Romans 9:1</b>' });
+    expect({
+      href: link.getAttribute('href'),
+      target: link.getAttribute('target'),
+      html: link.innerHTML,
+    }).toStrictEqual({
+      href: `/bible?ref=${referenceId}&study=${studyId}`,
+      target: null,
+      html: '&lt;b&gt;Romans 9:1&lt;/b&gt;',
+    });
+  });
+});

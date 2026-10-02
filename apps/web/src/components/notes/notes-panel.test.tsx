@@ -8,6 +8,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import type { Editor } from '@tiptap/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noteQueryKey } from '@/lib/notes';
+import { TRANSLATION } from '@/test/bible-fixtures';
 import { studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { INVALID_COPY, SAVE_COPY } from './note-editor';
@@ -54,6 +55,7 @@ const note = (overrides: Record<string, unknown> = {}) => ({
   studyId: STUDY_ID,
   revision: 1,
   target: null,
+  targetAnchor: null,
   content: doc('First thoughts'),
   characterCount: 14,
   latestVersionNumber: 1,
@@ -67,6 +69,7 @@ const mutation = (overrides: Record<string, unknown> = {}) => ({
   studyId: STUDY_ID,
   revision: 2,
   targetNodeId: null,
+  targetReferenceId: null,
   characterCount: 14,
   latestVersionNumber: 1,
   createdAt: T,
@@ -276,6 +279,7 @@ describe('NotesPanel (BIB-23)', () => {
       'Numbered list',
       'Quote',
       'Link',
+      'Resolve reference',
       'Undo',
       'Redo',
     ]);
@@ -308,6 +312,7 @@ describe('NotesPanel (BIB-23)', () => {
             id: 'cccccccc-2222-4333-8444-555555555555',
             preview: 'About the old question',
             target: {
+              kind: 'node',
               nodeId: QUESTION_ID,
               nodeType: 'question',
               label: 'Who bears witness?',
@@ -648,5 +653,194 @@ describe('NotesPanel (BIB-23)', () => {
     expect(Object.values(INVALID_COPY).some((copy) => textOf(saveStatus()).includes(copy))).toBe(
       false,
     );
+  });
+});
+
+describe('Bible references and passages in notes (BIB-24)', () => {
+  const ROMANS = {
+    id: 'eeeeeeee-2222-4333-8444-555555555555',
+    editionId: TRANSLATION.id,
+    bookCode: 'ROM',
+    startChapter: 9,
+    startVerse: 1,
+    endChapter: 9,
+    endVerse: 1,
+    label: 'Romans 9:1',
+  };
+  /** Selects `text` inside the editor's first paragraph (the user's selection). */
+  function select(editor: Editor, text: string) {
+    const start = editor.state.doc.textContent.indexOf(text);
+    act(() => {
+      editor.commands.setTextSelection({ from: start + 1, to: start + 1 + text.length });
+    });
+  }
+  const linked = (before: string, after: string): NoteDocument => ({
+    type: 'doc',
+    content: [
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: before },
+          { type: 'scriptureReference', attrs: { referenceId: ROMANS.id, label: ROMANS.label } },
+          { type: 'text', text: after },
+        ],
+      },
+    ],
+  });
+
+  async function openNote(text: string) {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note({ content: doc(text) })));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    return noteEditor();
+  }
+  const resolveStatus = () =>
+    within(screen.getByRole('region', { name: 'Note editor' })).getAllByRole('status')[1];
+
+  it('resolves the selected reference into a verified link, saves it, and asks nothing else of the study', async () => {
+    reply('GET /bible/translations', jsonResponse(200, { translations: [TRANSLATION] }));
+    reply('POST /bible/resolve', jsonResponse(200, { outcome: 'resolved', reference: ROMANS }));
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation()));
+    const editor = await openNote('See Rom 9:1 now');
+    select(editor, 'Rom 9:1');
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve reference' }));
+
+    await waitFor(() => expect(textOf(resolveStatus())).toContain('Linked Romans 9:1.'));
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved), {
+      timeout: 3000,
+    });
+    expect(
+      requests.filter((r) => r.method !== 'GET').map((r) => [r.method, r.path, r.body]),
+    ).toStrictEqual([
+      // The typed text and edition travel in the body only.
+      ['POST', '/bible/resolve', { input: 'Rom 9:1', editionId: TRANSLATION.id }],
+      ['PATCH', NOTE, { expectedRevision: 1, content: linked('See ', ' now') }],
+    ]);
+    // The editor shows the canonical label as one unit.
+    expect(textOf(screen.getByRole('textbox', { name: 'Note text' }))).toContain(
+      'See Romans 9:1 now',
+    );
+  });
+
+  it('offers the candidates of an ambiguous book and links only the one chosen', async () => {
+    reply('GET /bible/translations', jsonResponse(200, { translations: [TRANSLATION] }));
+    reply(
+      'POST /bible/resolve',
+      jsonResponse(200, {
+        outcome: 'ambiguous',
+        candidates: [
+          { bookCode: 'PHP', bookName: 'Philippians', input: 'PHP 1:1' },
+          { bookCode: 'PHM', bookName: 'Philemon', input: 'PHM 1:1' },
+        ],
+      }),
+      jsonResponse(200, { outcome: 'resolved', reference: { ...ROMANS, label: 'Romans 9:1' } }),
+    );
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation()));
+    const editor = await openNote('Ph 1:1');
+    select(editor, 'Ph 1:1');
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve reference' }));
+    const group = await screen.findByRole('group', { name: 'Choose the book' });
+    expect(
+      within(group)
+        .getAllByRole('button')
+        .map((b) => b.textContent),
+    ).toStrictEqual(['Philippians', 'Philemon', 'Cancel']);
+    fireEvent.click(within(group).getByRole('button', { name: 'Philippians' }));
+    await waitFor(() => expect(textOf(resolveStatus())).toContain('Linked Romans 9:1.'));
+    expect(requests.filter((r) => r.path === '/bible/resolve').map((r) => r.body)).toStrictEqual([
+      { input: 'Ph 1:1', editionId: TRANSLATION.id },
+      { input: 'PHP 1:1', editionId: TRANSLATION.id },
+    ]);
+  });
+
+  it('leaves text that is not a reference, or an invalid one, exactly as typed', async () => {
+    reply('GET /bible/translations', jsonResponse(200, { translations: [TRANSLATION] }));
+    reply(
+      'POST /bible/resolve',
+      jsonResponse(200, { outcome: 'not_reference' }),
+      jsonResponse(422, {
+        code: 'REFERENCE_VERSE_OUT_OF_RANGE',
+        message: 'x',
+        retryable: false,
+        correlationId: 'c',
+      }),
+    );
+    const editor = await openNote('grace Rom 9:99');
+    select(editor, 'grace');
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve reference' }));
+    await waitFor(() =>
+      expect(textOf(resolveStatus())).toContain(
+        'The selected text is not a Bible reference, so nothing was linked.',
+      ),
+    );
+    select(editor, 'Rom 9:99');
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve reference' }));
+    await waitFor(() =>
+      expect(textOf(resolveStatus())).toContain('That verse does not exist in this chapter.'),
+    );
+    expect(editor.getJSON()).toStrictEqual(doc('grace Rom 9:99'));
+    expect(requests.some((r) => r.method === 'PATCH')).toBe(false);
+  });
+
+  it('names Scripture targets in the list, and shows an open note’s passage with its quote, saying when it no longer matches', async () => {
+    const target = (problem: string | null, anchorKind: string) => ({
+      kind: 'scripture',
+      anchorKind,
+      reference: ROMANS,
+      problem,
+    });
+    const anchor = {
+      version: 1,
+      editionId: TRANSLATION.id,
+      bookCode: 'ROM',
+      kind: 'phrase',
+      segments: [{ chapter: 9, verse: 1, start: 0, end: 6, textSha256: 'a'.repeat(64) }],
+      quote: 'I tell',
+    };
+    reply(
+      `GET ${NOTES}`,
+      jsonResponse(200, {
+        items: [
+          summary({ target: target(null, 'phrase') }),
+          summary({
+            id: 'cccccccc-2222-4333-8444-555555555555',
+            preview: 'Second',
+            target: target('ANCHOR_QUOTE_MISMATCH', 'verses'),
+          }),
+        ],
+      }),
+    );
+    reply(
+      `GET ${NOTE}`,
+      jsonResponse(
+        200,
+        note({ target: target('ANCHOR_QUOTE_MISMATCH', 'phrase'), targetAnchor: anchor }),
+      ),
+    );
+    reply('GET /bible/translations', jsonResponse(200, { translations: [TRANSLATION] }));
+    renderPanel({ ...STUDY, lifecycle: 'archived' });
+    const list = await screen.findByRole('list', { name: 'Notes' });
+    expect(
+      within(list)
+        .getAllByRole('listitem')
+        .map((item) => textOf(item)),
+    ).toStrictEqual([
+      expect.stringContaining('On a phrase in Romans 9:1 · Updated'),
+      expect.stringContaining('On Romans 9:1 (no longer matches the text) · Updated'),
+    ]);
+    fireEvent.click(within(list).getByRole('button', { name: 'First thoughts' }));
+    const passage = await screen.findByRole('region', { name: 'Attached passage' });
+    await waitFor(() =>
+      expect(textOf(passage)).toContain(
+        `This note’s passage no longer matches the ${TRANSLATION.name} text.`,
+      ),
+    );
+    expect({
+      quote: textOf(passage.querySelector('blockquote')),
+      reselect: within(passage)
+        .getByRole('link', { name: 'Reselect Romans 9:1' })
+        .getAttribute('href'),
+    }).toStrictEqual({ quote: '“I tell”', reselect: `/bible?ref=${ROMANS.id}&study=${STUDY_ID}` });
   });
 });

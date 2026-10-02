@@ -89,9 +89,15 @@ describe('StudyPage', () => {
     expect(
       await screen.findByRole('heading', { level: 1, name: 'Conscience and the Holy Spirit' }),
     ).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Romans 9:1' }).getAttribute('href')).toBe(
-      `/bible?ref=${ROMANS.id}`,
-    );
+    // BIB-24: the passage and "Read in this study" open the reader in this study (ids only).
+    expect(
+      ['Romans 9:1', 'Read in this study'].map((name) =>
+        screen.getByRole('link', { name }).getAttribute('href'),
+      ),
+    ).toStrictEqual([
+      `/bible?ref=${ROMANS.id}&study=${STUDY.id}`,
+      `/bible?ref=${ROMANS.id}&study=${STUDY.id}`,
+    ]);
     expect(screen.getByText('What is conscience?')).toBeTruthy();
   });
 

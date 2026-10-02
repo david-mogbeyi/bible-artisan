@@ -34,6 +34,23 @@ const ME = {
   timezone: 'UTC',
 };
 const GENESIS_1_ID = '77777777-2222-4333-8444-555555555555';
+const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
+const STUDY = {
+  id: STUDY_ID,
+  title: 'Conscience',
+  description: null,
+  lifecycle: 'active',
+  pinned: false,
+  revision: 3,
+  contentRevision: 2,
+  startingReference: null,
+  mainQuestion: null,
+  originalQuestion: null,
+  tags: [],
+  branchId: null,
+  purgeAt: null,
+  createdAt: '2026-10-01T12:00:00.000Z',
+};
 const REVELATION_22_ID = '88888888-2222-4333-8444-555555555555';
 const VERSE_ID = '99999999-2222-4333-8444-555555555555';
 
@@ -106,6 +123,11 @@ beforeEach(() => {
       return Promise.resolve(respond());
     }
     if (path.endsWith('/bible/search')) return Promise.resolve(jsonResponse(200, SEARCH_PAGE));
+    // BIB-24: reading in a study.
+    if (path.endsWith(`/studies/${STUDY_ID}`)) return Promise.resolve(jsonResponse(200, STUDY));
+    if (path.endsWith(`/studies/${STUDY_ID}/annotations`)) {
+      return Promise.resolve(jsonResponse(200, { items: [] }));
+    }
     const queue = path.endsWith('/bible/resolve')
       ? resolveResponses
       : path.endsWith('/bible/references')
@@ -429,5 +451,25 @@ describe('BiblePage', () => {
     );
     expect(screen.getByLabelText<HTMLSelectElement>('Translation').value).toBe(OTHER_EDITION_ID);
     expect(push).not.toHaveBeenCalled();
+  });
+});
+
+describe('BiblePage in a study (BIB-24)', () => {
+  it('names the study, shows its highlights section, and keeps reading in it across chapters with opaque ids only', async () => {
+    const { follow } = await renderAt(`ref=${PSALM_3_ID}&study=${STUDY_ID}`);
+    const link = await screen.findByRole('link', { name: 'Conscience' });
+    expect(link.getAttribute('href')).toBe(`/studies/${STUDY_ID}`);
+    expect(await screen.findByRole('region', { name: 'Highlights in this chapter' })).toBeTruthy();
+    // Highlights are asked for by the passage's opaque reference id.
+    expect(
+      requestsTo('/annotations').map(([input]) => new URL(input).searchParams.toString()),
+    ).toStrictEqual([`referenceId=${PSALM_3_ID}`]);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Next chapter: Psalms 4' }));
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    const [href] = push.mock.calls.at(-1) as [string];
+    expect(href).toBe(`/bible?ref=${PSALM_4_ID}&study=${STUDY_ID}`);
+    follow(href);
+    expect(await screen.findByRole('heading', { name: 'Psalms 4' })).toBeTruthy();
   });
 });

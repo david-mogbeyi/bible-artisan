@@ -28,6 +28,7 @@ import {
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { NoteContent } from './note-content';
 import { NoteEditor, type NoteEditorHandle } from './note-editor';
+import { NoteScriptureTarget, noteTargetText } from './note-target';
 
 export const NOTES_COPY = {
   empty: 'No notes yet.',
@@ -53,12 +54,6 @@ type Target = 'study' | 'main';
 interface FrozenCreate {
   key: string;
   body: CreateNoteRequest;
-}
-
-function targetText(note: NoteSummary): string {
-  if (!note.target) return 'On this study';
-  const label = note.target.label ?? 'a study item';
-  return note.target.nodeType === 'question' ? `On the question: ${label}` : `On ${label}`;
 }
 
 /**
@@ -244,8 +239,8 @@ export function NotesPanel({
   }
 
   const notes = live.data?.items ?? [];
-  const attached = notes.filter((note) => !note.target?.deleted);
-  const orphaned = notes.filter((note) => note.target?.deleted);
+  const orphaned = notes.filter((note) => note.target?.kind === 'node' && note.target.deleted);
+  const attached = notes.filter((note) => !orphaned.includes(note));
 
   const noteItem = (note: NoteSummary) => (
     <li key={note.id} className="flex flex-col">
@@ -262,7 +257,7 @@ export function NotesPanel({
         {note.preview || 'Empty note'}
       </button>
       <span className="text-sm text-muted">
-        {targetText(note)} · Updated {formatNoteTime(note.updatedAt)}
+        {noteTargetText(note)} · Updated {formatNoteTime(note.updatedAt)}
       </span>
     </li>
   );
@@ -347,6 +342,9 @@ export function NotesPanel({
         </>
       )}
 
+      {openId !== null && open.data ? (
+        <NoteScriptureTarget note={open.data} studyId={study.id} />
+      ) : null}
       {openId !== null ? (
         open.data ? (
           editable && open.data.deletedAt === null ? (
@@ -354,6 +352,7 @@ export function NotesPanel({
               key={open.data.id}
               studyId={study.id}
               note={open.data}
+              editionId={study.startingReference?.editionId ?? null}
               autoFocus={freshId === open.data.id}
               handle={editorHandle}
               onClose={closeNote}
@@ -362,7 +361,7 @@ export function NotesPanel({
             />
           ) : (
             <div className="flex flex-col gap-2 rounded border border-muted p-3">
-              <NoteContent doc={open.data.content} label="Note" />
+              <NoteContent doc={open.data.content} label="Note" studyId={study.id} />
               <button type="button" onClick={closeNote} className="self-start underline">
                 Close note
               </button>

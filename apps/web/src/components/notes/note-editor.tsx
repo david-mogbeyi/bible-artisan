@@ -3,6 +3,8 @@
 import {
   httpUrlSchema,
   MAX_NOTE_CHARACTERS,
+  MAX_SEARCH_QUERY_LENGTH,
+  type ReferenceCandidate,
   NOTE_TRASHED,
   type NoteDocument,
   type NoteMutationResponse,
@@ -11,7 +13,13 @@ import {
 } from '@bible-artisan/contracts';
 import { useQueryClient } from '@tanstack/react-query';
 import { Fragment, type Node as ProseMirrorNode, Slice } from '@tiptap/pm/model';
-import { type Editor, EditorContent, useEditor, useEditorState } from '@tiptap/react';
+import {
+  type Editor,
+  EditorContent,
+  Node as TiptapNode,
+  useEditor,
+  useEditorState,
+} from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import {
   type FormEvent,
@@ -24,6 +32,13 @@ import {
   useState,
 } from 'react';
 import { ApiError } from '@/lib/api-client';
+import { classifyError, REFERENCE_ERROR_COPY } from '@/lib/api-errors';
+import {
+  bibleHref,
+  fetchTranslations,
+  resolveReference,
+  TRANSLATIONS_QUERY_KEY,
+} from '@/lib/bible';
 import {
   changeNoteState,
   fetchNote,
@@ -73,6 +88,8 @@ export const INVALID_COPY: Record<NoteContentProblem, string> = {
     'Lists and quotes are nested too deeply to save (at most 12 levels). Your text is still here.',
   too_many_parts:
     'This note has too many paragraphs, list items or line breaks to save. Try splitting it into two notes. Your text is still here.',
+  reference:
+    "A Bible reference link in this note couldn't be verified, so this can't be saved. Remove it, or resolve the reference again. Your text is still here.",
   structure: SAVE_COPY.invalid,
 };
 
@@ -109,12 +126,63 @@ function stateText(state: SaveState): string {
 
 const LINK_INVALID = 'Enter a full web address starting with http:// or https://.';
 
+/** "Resolve reference" outcomes, in fixed copy (never the typed text). */
+const RESOLVE_COPY = {
+  empty: 'Select a Bible reference in the note, such as Romans 9:1, then choose Resolve reference.',
+  tooLong: 'Select just the reference, such as Romans 9:1.',
+  notReference: 'The selected text is not a Bible reference, so nothing was linked.',
+  changed: 'The selected text changed, so nothing was linked. Select the reference again.',
+  failed: "Couldn't check the reference. Try again.",
+  ambiguous: 'That book name matches more than one book. Choose one:',
+} as const;
+
+/**
+ * A verified Bible reference link (BIB-24, FR-NOTE-003): an inline atom holding a shared
+ * reference id and its canonical label, inserted only by "Resolve reference" after the server
+ * resolved the selected text. It is deleted as a unit and shows its label as text. The server
+ * verifies both attributes on every save (422 `NOTE_REFERENCE_INVALID`), so a pasted or edited
+ * one can never point at a passage other than the one it names.
+ */
+const ScriptureReferenceNode = TiptapNode.create({
+  name: 'scriptureReference',
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return { referenceId: { default: null }, label: { default: '' } };
+  },
+  parseHTML() {
+    return [
+      {
+        tag: 'a[data-scripture-reference]',
+        getAttrs: (element) => ({
+          referenceId: element.getAttribute('data-scripture-reference'),
+          label: element.textContent ?? '',
+        }),
+      },
+    ];
+  },
+  renderHTML({ node }) {
+    const referenceId = String(node.attrs.referenceId ?? '');
+    return [
+      'a',
+      { 'data-scripture-reference': referenceId, href: bibleHref(referenceId) },
+      String(node.attrs.label ?? ''),
+    ];
+  },
+  renderText({ node }) {
+    return String(node.attrs.label ?? '');
+  },
+});
+
 /**
  * The editor's schema: the note allowlist and nothing else (no code, strike, underline, rule,
  * image or HTML). Built once for every editor, so a render never reconfigures Tiptap. Pasted HTML
  * goes through this schema too, so an image, script, table or unknown mark in it is dropped.
  */
 const NOTE_EXTENSIONS = [
+  ScriptureReferenceNode,
   StarterKit.configure({
     code: false,
     codeBlock: false,
@@ -163,7 +231,9 @@ function editorCharacters(editor: Editor): number {
   const known = counted.get(doc);
   if (known !== undefined) return known;
   let count = 0;
-  for (const _ of doc.textBetween(0, doc.content.size, '\n', '\n')) count += 1;
+  const leafText = (leaf: ProseMirrorNode) =>
+    leaf.type.name === 'scriptureReference' ? String(leaf.attrs.label ?? '') : '\n';
+  for (const _ of doc.textBetween(0, doc.content.size, '\n', leafText)) count += 1;
   counted.set(doc, count);
   return count;
 }
@@ -192,6 +262,7 @@ export interface NoteEditorHandle {
 export function NoteEditor({
   studyId,
   note,
+  editionId = null,
   autoFocus = false,
   handle,
   onClose,
@@ -200,6 +271,11 @@ export function NoteEditor({
 }: {
   studyId: string;
   note: NoteResponse;
+  /**
+   * The translation typed references resolve in (BIB-24): the study's starting passage edition;
+   * null falls back to the first active translation.
+   */
+  editionId?: string | null;
   /** Focus the text at once (a note just created). */
   autoFocus?: boolean;
   /** Lets the panel close this note through the same save-first path before switching notes. */
@@ -223,6 +299,15 @@ export function NoteEditor({
   const [trashing, setTrashing] = useState(false);
   const trashAttempt = useRef<{ key: string; revision: number } | null>(null);
   const [reloadProblem, setReloadProblem] = useState(false);
+  // "Resolve reference" (BIB-24): the selection it was asked for, and what came back.
+  const [resolving, setResolving] = useState(false);
+  const [resolveMessage, setResolveMessage] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<{
+    from: number;
+    to: number;
+    text: string;
+    options: ReferenceCandidate[];
+  } | null>(null);
 
   // One autosave per open note, created once (the editor is keyed by note id).
   const [saver] = useState(
@@ -428,6 +513,65 @@ export function NoteEditor({
     setLinkError(null);
   }
 
+  /**
+   * Resolves the selected text as a Bible reference (`POST /bible/resolve`, the same rules as the
+   * reader) and, only when it resolves, replaces exactly that text with a verified reference
+   * link. Nothing is guessed: an ambiguous book offers its candidates, anything else leaves the
+   * text as it is. No node, edge or study event comes of it (FR-NOTE-003).
+   */
+  async function resolveSelection(
+    range?: { from: number; to: number; text: string },
+    input?: string,
+  ) {
+    if (!editor || resolving) return;
+    const { from, to } = range ?? editor.state.selection;
+    const text = range?.text ?? editor.state.doc.textBetween(from, to, ' ', ' ').trim();
+    setResolveMessage(null);
+    setCandidates(null);
+    if (text === '') return setResolveMessage(RESOLVE_COPY.empty);
+    if (text.length > MAX_SEARCH_QUERY_LENGTH) return setResolveMessage(RESOLVE_COPY.tooLong);
+    setResolving(true);
+    try {
+      // Without a starting passage, the first active translation (asked for only now).
+      const resolveEditionId =
+        editionId ??
+        (
+          await queryClient.ensureQueryData({
+            queryKey: TRANSLATIONS_QUERY_KEY,
+            queryFn: fetchTranslations,
+          })
+        ).translations[0]?.id;
+      if (!resolveEditionId) return setResolveMessage(RESOLVE_COPY.failed);
+      const outcome = await resolveReference(input ?? text, resolveEditionId);
+      // The note may have changed while the request was out: link only the same text.
+      if (editor.state.doc.textBetween(from, to, ' ', ' ').trim() !== text) {
+        return setResolveMessage(RESOLVE_COPY.changed);
+      }
+      if (outcome.outcome === 'resolved') {
+        const { id, label } = outcome.reference;
+        editor
+          .chain()
+          .focus()
+          .insertContentAt({ from, to }, [
+            { type: 'scriptureReference', attrs: { referenceId: id, label } },
+          ])
+          .run();
+        setResolveMessage(`Linked ${label}.`);
+      } else if (outcome.outcome === 'ambiguous') {
+        setCandidates({ from, to, text, options: outcome.candidates });
+      } else {
+        setResolveMessage(RESOLVE_COPY.notReference);
+      }
+    } catch (error) {
+      const kind = classifyError(error);
+      setResolveMessage(
+        kind.kind === 'reference' ? REFERENCE_ERROR_COPY[kind.code] : RESOLVE_COPY.failed,
+      );
+    } finally {
+      setResolving(false);
+    }
+  }
+
   function removeLink() {
     editor?.chain().focus().extendMarkRange('link').unsetLink().run();
     setLinkOpen(false);
@@ -519,6 +663,16 @@ export function NoteEditor({
           className="rounded border border-muted px-2 py-1 text-sm aria-pressed:bg-accent aria-pressed:text-canvas"
         >
           Link
+        </button>
+        <button
+          type="button"
+          aria-disabled={resolving || !writable ? true : undefined}
+          onClick={() => {
+            if (!resolving && writable) void resolveSelection();
+          }}
+          className="rounded border border-muted px-2 py-1 text-sm aria-disabled:opacity-60"
+        >
+          Resolve reference
         </button>
         <button
           type="button"
@@ -626,6 +780,43 @@ export function NoteEditor({
         <p role="alert" className="text-sm font-medium text-accent">
           Couldn&apos;t load the latest note. Your text is still here.
         </p>
+      ) : null}
+
+      {/* Polite: the outcome of Resolve reference (references only, never the typed text). */}
+      <p role="status" aria-live="polite" className={resolveMessage ? 'text-sm' : 'sr-only'}>
+        {resolving ? 'Checking the reference…' : (resolveMessage ?? '')}
+      </p>
+      {candidates ? (
+        <div role="group" aria-label="Choose the book" className="flex flex-col gap-2">
+          <p className="text-sm">{RESOLVE_COPY.ambiguous}</p>
+          <div className="flex flex-wrap gap-2">
+            {candidates.options.map((option) => (
+              <button
+                key={option.bookCode}
+                type="button"
+                onClick={() =>
+                  void resolveSelection(
+                    { from: candidates.from, to: candidates.to, text: candidates.text },
+                    option.input,
+                  )
+                }
+                className="rounded border border-accent px-2 py-1 text-sm text-accent"
+              >
+                {option.bookName}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setCandidates(null);
+                editor?.commands.focus();
+              }}
+              className="rounded border border-muted px-2 py-1 text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       ) : null}
 
       <div className="flex flex-wrap gap-3">

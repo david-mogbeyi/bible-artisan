@@ -11,17 +11,21 @@ import {
   fetchTranslations,
   referenceFor,
   referenceIdFromParams,
+  studyIdFromParams,
   TRANSLATIONS_QUERY_KEY,
 } from '@/lib/bible';
+import { fetchStudy, studyQueryKey } from '@/lib/studies';
 import { BibleReader, type FocusRequest, usePassage } from './bible-reader';
 import { type Navigation, ReferenceSearch } from './bible-search';
 import { ProblemAlert } from './problem-alert';
 
 /**
- * `/bible`: reading outside a study (PRD section 9). Records no study events. The URL holds only
- * the opaque reference id (`?ref=<scripture reference id>`), which also fixes the edition, so
- * links, bookmarks, reload, and back/forward reopen the same passage in the same edition while no
- * Scripture reference or search text reaches a URL, history entry, or request log.
+ * `/bible`: reading outside a study (PRD section 9), or in one (`&study=<study id>`, BIB-24: its
+ * highlights are drawn and can be added, and a selection can be noted). Reading records no study
+ * events. The URL holds only opaque ids (`?ref=<scripture reference id>`, which also fixes the
+ * edition), so links, bookmarks, reload, and back/forward reopen the same passage in the same
+ * edition while no Scripture reference, search text, quote or label reaches a URL, history entry,
+ * or request log.
  */
 export function BiblePage() {
   return <RequireAuth>{() => <BibleWorkspace />}</RequireAuth>;
@@ -36,6 +40,11 @@ const OPEN_COPY = {
   notFound: 'That passage is not available.',
   refused: "We couldn't open that passage.",
   unavailable: "We couldn't open that passage.",
+};
+const STUDY_COPY = {
+  notFound: "This study isn't available. You can still read here.",
+  refused: "We couldn't open this study. You can still read here.",
+  unavailable: "We couldn't load this study. You can still read here.",
 };
 const TRANSLATIONS_COPY = {
   notFound: 'No Bible translation is available yet.',
@@ -52,7 +61,16 @@ function BibleWorkspace() {
   const [chosenEditionId, setChosenEditionId] = useState<string | null>(null);
   const translations = useQuery({ queryKey: TRANSLATIONS_QUERY_KEY, queryFn: fetchTranslations });
   const referenceId = referenceIdFromParams(params);
+  const studyId = studyIdFromParams(params);
   const passage = usePassage(referenceId);
+  const study = useQuery({
+    queryKey: studyId ? studyQueryKey(studyId) : ['studies', 'none'],
+    queryFn: () => {
+      if (!studyId) throw new Error('no study');
+      return fetchStudy(studyId);
+    },
+    enabled: studyId !== null,
+  });
 
   const list = translations.data?.translations ?? [];
   // The open reference fixes the edition; with nothing open, the user's pick or the first one.
@@ -85,7 +103,7 @@ function BibleWorkspace() {
     if (token !== latest.current) return;
     if (focus) setFocusRequest((prev) => ({ referenceId: id, n: (prev?.n ?? 0) + 1 }));
     pushedReferenceId.current = id;
-    router.push(bibleHref(id), { scroll: false });
+    router.push(bibleHref(id, studyId), { scroll: false });
   };
   const navigation: Navigation = { begin, open: (token, id) => open(token, id, true) };
 
@@ -121,6 +139,23 @@ function BibleWorkspace() {
         </Link>
       </nav>
       <h1 className="font-serif text-4xl">Bible</h1>
+      {studyId ? (
+        study.data ? (
+          <p>
+            Reading in the study{' '}
+            <Link href={`/studies/${study.data.id}`} className="text-accent underline">
+              {study.data.title}
+            </Link>
+            . Your highlights in it are shown on the text.
+          </p>
+        ) : study.isError ? (
+          <ProblemAlert
+            error={study.error}
+            copy={STUDY_COPY}
+            onRetry={() => void study.refetch()}
+          />
+        ) : null
+      ) : null}
 
       {/* One live region, mounted from the first render; only its text changes. */}
       <p role="status" aria-live="polite" className={status ? 'text-muted' : 'sr-only'}>
@@ -158,6 +193,7 @@ function BibleWorkspace() {
               setChosenEditionId(id);
             }}
             focusRequest={focusRequest}
+            study={study.data ?? null}
           />
         </>
       ) : null}

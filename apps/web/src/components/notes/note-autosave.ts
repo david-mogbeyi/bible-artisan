@@ -3,6 +3,7 @@ import {
   NOTE_TOO_LONG,
   NOTE_TRASHED,
   NOTE_UNCHANGED,
+  NOTE_REFERENCE_INVALID,
   noteCharacterCount,
   type NoteDocument,
   type NoteMutationResponse,
@@ -347,6 +348,9 @@ export class NoteAutosave {
       if (code === STUDY_ARCHIVED || code === STUDY_TRASHED || code === NOTE_TRASHED) {
         this.stopped = true;
         return this.setState({ kind: 'locked', code });
+      }
+      if (code === NOTE_REFERENCE_INVALID) {
+        return this.setState({ kind: 'invalid', problem: 'reference' });
       }
       if (code === NOTE_UNCHANGED) {
         // The server already holds what was sent (at this revision, or the request would have

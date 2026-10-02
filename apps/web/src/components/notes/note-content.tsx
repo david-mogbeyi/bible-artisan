@@ -5,7 +5,9 @@ import {
   type NoteInline,
   type NoteMark,
 } from '@bible-artisan/contracts';
+import Link from 'next/link';
 import type { ReactNode } from 'react';
+import { bibleHref } from '@/lib/bible';
 
 /**
  * Link attributes for user-supplied URLs (PRD section 29: "external links accept HTTPS/HTTP only,
@@ -45,39 +47,53 @@ function withMarks(text: string, marks: readonly NoteMark[] | undefined): ReactN
   return node;
 }
 
-function inline(content: readonly NoteInline[] | undefined): ReactNode[] {
-  return (content ?? []).map((node, index) =>
-    node.type === 'hardBreak' ? (
-      <br key={index} />
-    ) : (
-      <span key={index}>{withMarks(node.text, node.marks)}</span>
-    ),
-  );
+/** The study whose reader a verified reference link opens (null: the reader outside a study). */
+type Context = string | null;
+
+function inline(content: readonly NoteInline[] | undefined, studyId: Context): ReactNode[] {
+  return (content ?? []).map((node, index) => {
+    if (node.type === 'hardBreak') return <br key={index} />;
+    if (node.type === 'scriptureReference') {
+      // A verified internal link (BIB-24): an opaque reference id, its canonical label as text.
+      return (
+        <Link
+          key={index}
+          href={bibleHref(node.attrs.referenceId, studyId)}
+          className="text-accent underline"
+        >
+          {node.attrs.label}
+        </Link>
+      );
+    }
+    return <span key={index}>{withMarks(node.text, node.marks)}</span>;
+  });
 }
 
-function block(node: NoteBlock, key: number): ReactNode {
+function block(node: NoteBlock, key: number, studyId: Context): ReactNode {
+  const blocks = (children: readonly NoteBlock[]) =>
+    children.map((child, index) => block(child, index, studyId));
   switch (node.type) {
     case 'paragraph':
-      return <p key={key}>{inline(node.content)}</p>;
+      return <p key={key}>{inline(node.content, studyId)}</p>;
     case 'heading': {
       const Heading = (['h3', 'h4', 'h5'] as const)[node.attrs.level - 1] ?? 'h5';
       return (
         <Heading key={key} className="font-serif font-semibold">
-          {inline(node.content)}
+          {inline(node.content, studyId)}
         </Heading>
       );
     }
     case 'blockquote':
       return (
         <blockquote key={key} className="border-l-4 border-muted pl-3">
-          {node.content.map(block)}
+          {blocks(node.content)}
         </blockquote>
       );
     case 'bulletList':
       return (
         <ul key={key} className="list-disc pl-6">
           {node.content.map((item, index) => (
-            <li key={index}>{item.content.map(block)}</li>
+            <li key={index}>{blocks(item.content)}</li>
           ))}
         </ul>
       );
@@ -85,7 +101,7 @@ function block(node: NoteBlock, key: number): ReactNode {
       return (
         <ol key={key} start={node.attrs?.start} className="list-decimal pl-6">
           {node.content.map((item, index) => (
-            <li key={index}>{item.content.map(block)}</li>
+            <li key={index}>{blocks(item.content)}</li>
           ))}
         </ol>
       );
@@ -99,10 +115,19 @@ function block(node: NoteBlock, key: number): ReactNode {
  * above, and every text node is escaped by React. Note headings sit below the page's own heading
  * levels (h3-h5).
  */
-export function NoteContent({ doc, label }: { doc: NoteDocument; label: string }) {
+export function NoteContent({
+  doc,
+  label,
+  studyId = null,
+}: {
+  doc: NoteDocument;
+  label: string;
+  /** Reference links open the reader in this study (BIB-24). */
+  studyId?: string | null;
+}) {
   return (
     <div aria-label={label} role="document" className="flex flex-col gap-2 break-words">
-      {doc.content.map(block)}
+      {doc.content.map((node, index) => block(node, index, studyId))}
     </div>
   );
 }

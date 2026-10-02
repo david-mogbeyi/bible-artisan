@@ -105,7 +105,10 @@ function StudyDetails({
           <dt className="font-medium">Starting passage</dt>
           <dd>
             {study.startingReference ? (
-              <Link href={bibleHref(study.startingReference.id)} className="text-accent underline">
+              <Link
+                href={bibleHref(study.startingReference.id, study.id)}
+                className="text-accent underline"
+              >
                 {study.startingReference.label}
               </Link>
             ) : (
@@ -151,6 +154,13 @@ function StudyDetails({
         release.
       </p>
       <nav aria-label="Study" className="flex flex-wrap gap-4">
+        {/* BIB-24: the reader with this study's highlights (opaque ids only in the URL). */}
+        <Link
+          href={bibleHref(study.startingReference?.id ?? null, study.id)}
+          className="text-accent underline"
+        >
+          Read in this study
+        </Link>
         <Link href="/" className="text-accent underline">
           Home
         </Link>
