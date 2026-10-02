@@ -1,7 +1,9 @@
 import type { Edge, NodeSummary } from '@bible-artisan/contracts';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CONNECT_COPY } from '@/components/graph/connect-dialog';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
+import { EDGE_RULE_COPY } from './relationship-controls';
 import { RELATIONSHIPS_COPY, Relationships } from './relationships';
 
 const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
@@ -123,7 +125,6 @@ const mutations = () => requests.filter((r) => r.method !== 'GET');
 function renderFor(nodeId: string, { editable = true } = {}) {
   const props = {
     onLocked: vi.fn(),
-    onReload: vi.fn(() => Promise.resolve()),
     onShowNode: vi.fn(),
   };
   const self = NODES.find((n) => n.id === nodeId);
@@ -190,27 +191,34 @@ describe('Relationships', () => {
     expect(within(readOnly).queryByRole('button', { name: /^Remove/ })).toBeNull();
   });
 
-  it('connects by keyboard: picks the type and other node, swaps direction with a spoken preview, and says "Relationship added"', async () => {
+  it('connects by keyboard through the Connect dialog: From is this node, picks the type and To, swaps direction with a spoken preview, and says "Relationship added"', async () => {
     renderFor(OBS);
     await screen.findByText(RELATIONSHIPS_COPY.empty);
     const connect = screen.getByRole('button', { name: 'Connect' });
     fireEvent.click(connect);
-    const form = screen.getByRole('form', { name: 'Connect this node' });
-    const type = within(form).getByRole('combobox', { name: 'Relationship' });
+    const dialog = screen.getByRole('dialog', { name: CONNECT_COPY.title });
+    expect(within(dialog).getByRole<HTMLSelectElement>('combobox', { name: 'From' }).value).toBe(
+      OBS,
+    );
+    const type = within(dialog).getByRole('combobox', { name: 'Relationship' });
     expect(document.activeElement).toBe(type);
-    expect(form.querySelector('optgroup[label="More relationships"]')).not.toBeNull();
+    expect(dialog.querySelector('optgroup[label="More relationships"]')).not.toBeNull();
 
     fireEvent.change(type, { target: { value: 'supports' } });
-    fireEvent.change(within(form).getByRole('combobox', { name: 'Other node' }), {
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'To' }), {
       target: { value: CON },
     });
-    const preview = within(form).getByText(/supports/);
+    const preview = within(dialog).getByText(/ supports /);
     expect(preview.getAttribute('aria-live')).toBe('polite');
-    expect(textOf(preview)).toBe('This observation supports Conclusion: Conscience testifies');
-    fireEvent.click(within(form).getByRole('button', { name: 'Swap direction' }));
-    expect(textOf(preview)).toBe('Conclusion: Conscience testifies supports this observation');
-    fireEvent.click(within(form).getByRole('button', { name: 'Swap direction' }));
-    fireEvent.change(within(form).getByRole('textbox', { name: 'Note (optional)' }), {
+    expect(textOf(preview)).toBe(
+      'Observation: Paul appeals to conscience supports Conclusion: Conscience testifies',
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Swap direction' }));
+    expect(textOf(preview)).toBe(
+      'Conclusion: Conscience testifies supports Observation: Paul appeals to conscience',
+    );
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Swap direction' }));
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Note (optional)' }), {
       target: { value: 'Both speak of witness' },
     });
 
@@ -220,9 +228,9 @@ describe('Relationships', () => {
       jsonResponse(201, mutationBody(created, { outcome: 'created', studyRevision: 5 })),
     );
     server[OBS] = [created];
-    fireEvent.submit(form);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
 
-    await waitFor(() => expect(status()).toBe(RELATIONSHIPS_COPY.added));
+    await waitFor(() => expect(status()).toBe(CONNECT_COPY.added));
     expect(mutations()).toStrictEqual([
       {
         method: 'POST',
@@ -238,38 +246,67 @@ describe('Relationships', () => {
       },
     ]);
     await waitFor(() => expect(sentences()).toHaveLength(1));
-    expect(screen.queryByRole('form', { name: 'Connect this node' })).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Connect' }));
   });
 
-  it('hides Swap direction for a two-way type, and Escape closes the form back to Connect', async () => {
+  it('hides Swap direction for a two-way type, and Escape closes the dialog back to Connect', async () => {
     renderFor(OBS);
     await screen.findByText(RELATIONSHIPS_COPY.empty);
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-    const form = screen.getByRole('form', { name: 'Connect this node' });
-    fireEvent.change(within(form).getByRole('combobox', { name: 'Relationship' }), {
+    const dialog = screen.getByRole('dialog', { name: CONNECT_COPY.title });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Relationship' }), {
       target: { value: 'related_to' },
     });
-    expect(within(form).queryByRole('button', { name: 'Swap direction' })).toBeNull();
-    expect(within(form).getByText('No claim that one supports the other.')).toBeTruthy();
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'To' }), {
+      target: { value: CON },
+    });
+    expect(within(dialog).queryByRole('button', { name: 'Swap direction' })).toBeNull();
+    expect(within(dialog).getByText('No claim that one supports the other.')).toBeTruthy();
     expect(
-      within(form).getByText('This observation is related to Conclusion: Conscience testifies'),
+      within(dialog).getByText(
+        'Observation: Paul appeals to conscience is related to Conclusion: Conscience testifies',
+      ),
     ).toBeTruthy();
-    fireEvent.keyDown(form, { key: 'Escape' });
-    expect(screen.queryByRole('form', { name: 'Connect this node' })).toBeNull();
+    fireEvent.keyDown(within(dialog).getByRole('combobox', { name: 'To' }), { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Connect' }));
+    expect(mutations()).toStrictEqual([]);
   });
 
-  it('keeps the form and draft when the relationship already exists, and says the note was not added', async () => {
+  it('disables Connect with the reason when the study has no other node', async () => {
+    renderWithQuery(
+      <Relationships
+        studyId={STUDY_ID}
+        node={{ id: OBS, type: 'observation' }}
+        nodes={NODES.filter((n) => n.id === OBS)}
+        studyRevision={4}
+        editable
+        onLocked={vi.fn()}
+        onShowNode={vi.fn()}
+      />,
+    );
+    await screen.findByText(RELATIONSHIPS_COPY.empty);
+    const connect = screen.getByRole<HTMLButtonElement>('button', { name: 'Connect' });
+    expect(connect.disabled).toBe(true);
+    expect(textOf(document.getElementById(connect.getAttribute('aria-describedby') ?? ''))).toBe(
+      CONNECT_COPY.noOther,
+    );
+  });
+
+  it('keeps the dialog and draft when the relationship already exists, and says the note was not added', async () => {
     const existing = edge(E1, OBS, CON, 'references');
     renderFor(OBS);
     await screen.findByText(RELATIONSHIPS_COPY.empty);
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-    const form = screen.getByRole('form', { name: 'Connect this node' });
-    fireEvent.change(within(form).getByRole('combobox', { name: 'Other node' }), {
+    const dialog = screen.getByRole('dialog', { name: CONNECT_COPY.title });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Relationship' }), {
+      target: { value: 'references' },
+    });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'To' }), {
       target: { value: CON },
     });
-    const note = within(form).getByRole('textbox', { name: 'Note (optional)' });
+    const note = within(dialog).getByRole('textbox', { name: 'Note (optional)' });
     fireEvent.change(note, { target: { value: 'My draft' } });
     reply(
       `POST ${EDGES}`,
@@ -280,9 +317,10 @@ describe('Relationships', () => {
     );
     // Made in another tab: this node's list hasn't seen it yet, and refetches on 'existing'.
     server[OBS] = [existing];
-    fireEvent.submit(form);
-    expect(await within(form).findByText(RELATIONSHIPS_COPY.existing)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
+    expect(await within(dialog).findByText(CONNECT_COPY.existing)).toBeTruthy();
     expect((note as HTMLTextAreaElement).value).toBe('My draft');
+    expect(screen.getByRole('dialog', { name: CONNECT_COPY.title })).toBe(dialog);
     await waitFor(() =>
       expect(sentences()).toStrictEqual([
         'This observation references Conclusion: Conscience testifies',
@@ -291,40 +329,50 @@ describe('Relationships', () => {
   });
 
   it('resends the same key and body on Retry after an unknown outcome, and asks to press Connect again after a 409', async () => {
-    const { onReload } = renderFor(OBS);
+    renderFor(OBS);
     await screen.findByText(RELATIONSHIPS_COPY.empty);
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-    const form = screen.getByRole('form', { name: 'Connect this node' });
+    const dialog = screen.getByRole('dialog', { name: CONNECT_COPY.title });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Relationship' }), {
+      target: { value: 'supports' },
+    });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'To' }), {
+      target: { value: CON },
+    });
     reply(
       `POST ${EDGES}`,
       new TypeError('offline'),
       jsonResponse(409, envelope('REVISION_CONFLICT', { currentRevision: 6 })),
     );
-    fireEvent.submit(form);
-    expect(await within(form).findByText(RELATIONSHIPS_COPY.unknownAdd)).toBeTruthy();
-    fireEvent.click(within(form).getByRole('button', { name: 'Retry' }));
-    expect(await within(form).findByText(RELATIONSHIPS_COPY.conflict)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
+    expect(await within(dialog).findByText(CONNECT_COPY.unknownAdd)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
+    expect(await within(dialog).findByText(CONNECT_COPY.conflict)).toBeTruthy();
     const [first, retry] = mutations();
     expect(retry).toStrictEqual(first);
-    expect(onReload).toHaveBeenCalledTimes(1);
   });
 
-  it('turns read-only through onLocked on a lifecycle refusal, and shows the target rule next to Relationship', async () => {
+  it('closes the dialog and turns read-only through onLocked on a lifecycle refusal, and shows the target rule next to Relationship', async () => {
     const { onLocked } = renderFor(OBS);
     await screen.findByText(RELATIONSHIPS_COPY.empty);
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-    const form = screen.getByRole('form', { name: 'Connect this node' });
+    const dialog = screen.getByRole('dialog', { name: CONNECT_COPY.title });
+    const type = within(dialog).getByRole('combobox', { name: 'Relationship' });
+    fireEvent.change(type, { target: { value: 'answers' } });
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'To' }), {
+      target: { value: CON },
+    });
     reply(
       `POST ${EDGES}`,
       jsonResponse(422, envelope('EDGE_TARGET_NOT_QUESTION')),
       jsonResponse(422, envelope('STUDY_ARCHIVED')),
     );
-    fireEvent.submit(form);
-    const type = within(form).getByRole('combobox', { name: 'Relationship' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
     await waitFor(() => expect(type.getAttribute('aria-invalid')).toBe('true'));
-    expect(within(form).getByText(RELATIONSHIPS_COPY.targetNotQuestion)).toBeTruthy();
-    fireEvent.submit(form);
+    expect(within(dialog).getByText(EDGE_RULE_COPY.targetNotQuestion)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
     await waitFor(() => expect(onLocked).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('edits within the same direction class with a preview, saves only after the 200, and keeps the draft on a 409 until Reload', async () => {
