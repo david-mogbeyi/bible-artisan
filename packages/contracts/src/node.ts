@@ -61,8 +61,6 @@ export const MAX_NODES_PER_STUDY = 2000;
 /** PRD section 11: "previews show at most 160 characters". */
 export const NODE_PREVIEW_LENGTH = 160;
 
-/** 422: a live Scripture node with this reference is already in the study (until BIB-26). */
-export const SCRIPTURE_NODE_EXISTS = 'SCRIPTURE_NODE_EXISTS';
 /** 422: the study already holds `MAX_NODES_PER_STUDY` live nodes. */
 export const NODE_LIMIT_EXCEEDED = 'NODE_LIMIT_EXCEEDED';
 /** 422: this node type, or this field on it, cannot be edited here. */
@@ -70,21 +68,32 @@ export const NODE_NOT_EDITABLE = 'NODE_NOT_EDITABLE';
 /** 422: the edit changes nothing. */
 export const NODE_UNCHANGED = 'NODE_UNCHANGED';
 
-export const NODE_ERROR_CODES = [
-  SCRIPTURE_NODE_EXISTS,
-  NODE_LIMIT_EXCEEDED,
-  NODE_NOT_EDITABLE,
-  NODE_UNCHANGED,
-] as const;
+export const NODE_ERROR_CODES = [NODE_LIMIT_EXCEEDED, NODE_NOT_EDITABLE, NODE_UNCHANGED] as const;
 export type NodeErrorCode = (typeof NODE_ERROR_CODES)[number];
 
 /** Fixed messages: never a node's text, a label or a reference. */
 export const NODE_ERROR_MESSAGES: Record<NodeErrorCode, string> = {
-  [SCRIPTURE_NODE_EXISTS]: 'This passage is already in the study',
   [NODE_LIMIT_EXCEEDED]: `A study can hold at most ${MAX_NODES_PER_STUDY.toLocaleString('en-US')} nodes`,
   [NODE_NOT_EDITABLE]: 'This node cannot be edited this way',
   [NODE_UNCHANGED]: 'The node already has these values',
 };
+
+/**
+ * Adding a Scripture reference the study already holds as a live canonical node (BIB-26; PRD
+ * sections 12, 24; FR-GRAPH-002/003). `focus_existing`, the default, records the deliberate
+ * return as a visit and creates nothing; `explicit_duplicate` creates a labeled noncanonical copy
+ * linked to the canonical node. With no canonical node, both simply create it.
+ */
+export const DUPLICATE_POLICIES = ['focus_existing', 'explicit_duplicate'] as const;
+export type DuplicatePolicy = (typeof DUPLICATE_POLICIES)[number];
+
+/**
+ * What `POST /nodes` did: `created` (201, a new canonical node, and every non-Scripture create),
+ * `focused_existing` (200, the existing canonical node; no node written, contentRevision
+ * unchanged) or `explicit_duplicate` (201, a new copy whose `canonicalNodeId` names the original).
+ */
+export const NODE_CREATE_OUTCOMES = ['created', 'focused_existing', 'explicit_duplicate'] as const;
+export type NodeCreateOutcome = (typeof NODE_CREATE_OUTCOMES)[number];
 
 /** What the UI calls each type, origin, status and kind: text, never color alone (WCAG). */
 export const NODE_TYPE_NAMES: Record<StudyNodeType, string> = {
@@ -261,6 +270,8 @@ export const createNodeRequestSchema = z.discriminatedUnion('type', [
     type: z.literal('scripture'),
     expectedRevision: expectedRevisionSchema,
     referenceId: z.uuid(),
+    /** Omitted means `focus_existing`. The client never names the canonical node. */
+    duplicatePolicy: z.enum(DUPLICATE_POLICIES).optional(),
   }),
   z.strictObject({
     type: z.literal('question'),
@@ -333,9 +344,15 @@ export const nodeMutationResponseSchema = z.object({
 
 export type NodeMutationResponse = z.infer<typeof nodeMutationResponseSchema>;
 
-/** 201 from `POST`: as above, plus the study revision the creation moved to. */
+/**
+ * From `POST`: as above (the new node's, or for `focused_existing` the existing canonical node's,
+ * fields), plus the study revision the request moved to, what it did, and the canonical node a
+ * new duplicate copies (else null).
+ */
 export const createNodeResponseSchema = nodeMutationResponseSchema.extend({
   studyRevision: z.number().int().positive(),
+  outcome: z.enum(NODE_CREATE_OUTCOMES),
+  canonicalNodeId: z.uuid().nullable(),
 });
 
 export type CreateNodeResponse = z.infer<typeof createNodeResponseSchema>;
@@ -349,6 +366,8 @@ export const nodeSummarySchema = z.object({
   status: z.enum([...QUESTION_STATUSES, ...CONCLUSION_STATUSES]).nullable(),
   observationKind: z.enum(OBSERVATION_KINDS).nullable(),
   referenceId: z.uuid().nullable(),
+  /** A duplicate Scripture node's canonical node (BIB-26), else null. */
+  canonicalNodeId: z.uuid().nullable(),
   revision: z.number().int().positive(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
@@ -365,6 +384,8 @@ const nodeCommon = {
   id: z.uuid(),
   studyId: z.uuid(),
   origin: z.enum(NODE_ORIGINS),
+  /** A duplicate Scripture node's canonical node (BIB-26), else null. */
+  canonicalNodeId: z.uuid().nullable(),
   revision: z.number().int().positive(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),

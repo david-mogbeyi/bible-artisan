@@ -343,6 +343,7 @@ describe('Sequelize models against the real schema', () => {
       observationKind: null,
       scriptureReferenceId: null,
       payloadJson: null,
+      canonicalNodeId: null,
     };
     for (const row of rows) {
       const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, ...row });
@@ -359,6 +360,34 @@ describe('Sequelize models against the real schema', () => {
         updatedAt: expect.any(Date),
       });
     }
+  });
+
+  it('creates a canonical Scripture node and a labeled duplicate of it through the model (BIB-26)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const reference = await firstReference();
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const values = { type: 'scripture', origin: 'scripture', scriptureReferenceId: reference.id };
+    const canonical = await StudyNode.create({ ...scope, ...values });
+    const duplicate = await StudyNode.create({
+      ...scope,
+      ...values,
+      canonicalNodeId: canonical.id,
+    });
+    const found = await StudyNode.findAll({
+      where: { studyId: study.id },
+      attributes: ['id', 'canonicalNodeId'],
+      order: [['createdAt', 'ASC']],
+      raw: true,
+    });
+    expect(found).toStrictEqual([
+      { id: canonical.id, canonicalNodeId: null },
+      { id: duplicate.id, canonicalNodeId: canonical.id },
+    ]);
+    // A second canonical node for the same reference is refused (partial unique index).
+    await expect(StudyNode.create({ ...scope, ...values })).rejects.toBeInstanceOf(
+      UniqueConstraintError,
+    );
   });
 
   it("rejects a model-level node with another type's columns, an unknown origin, or a source without a URL or locator (CHECK)", async () => {

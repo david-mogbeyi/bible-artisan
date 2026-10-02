@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createNodeRequestSchema,
+  createNodeResponseSchema,
   NODE_EDIT_EMPTY,
   NODE_ORIGIN_NAMES,
   NODE_ORIGINS,
@@ -115,6 +116,58 @@ describe('typed node requests (BIB-25)', () => {
       updateNodeRequestSchema.safeParse({ expectedRevision: 2, observationKind: 'interpretation' })
         .success,
     ).toBe(true);
+  });
+});
+
+describe('Scripture duplicate policy (BIB-26)', () => {
+  const scripture = { type: 'scripture', expectedRevision: 1, referenceId: REFERENCE_ID } as const;
+
+  it('accepts a Scripture add with no policy, focus_existing or explicit_duplicate, and nothing else', () => {
+    expect(
+      [
+        scripture,
+        { ...scripture, duplicatePolicy: 'focus_existing' },
+        { ...scripture, duplicatePolicy: 'explicit_duplicate' },
+        { ...scripture, duplicatePolicy: 'merge' },
+        { ...scripture, duplicatePolicy: null },
+        { ...scripture, navigation: { fromNodeId: REFERENCE_ID } },
+        { ...scripture, canonicalNodeId: REFERENCE_ID },
+        { ...scripture, editionId: REFERENCE_ID },
+      ].map((body) => createNodeRequestSchema.safeParse(body).success),
+    ).toStrictEqual([true, true, true, false, false, false, false, false]);
+  });
+
+  it('refuses a duplicate policy on every other type', () => {
+    for (const body of VALID.filter((b) => b.type !== 'scripture')) {
+      expect(
+        createNodeRequestSchema.safeParse({ ...body, duplicatePolicy: 'explicit_duplicate' })
+          .success,
+      ).toBe(false);
+    }
+  });
+
+  it('describes each outcome with the canonical node a duplicate copies', () => {
+    const base = {
+      id: REFERENCE_ID,
+      studyId: REFERENCE_ID,
+      type: 'scripture',
+      origin: 'scripture',
+      revision: 1,
+      referenceId: REFERENCE_ID,
+      createdAt: '2026-10-02T00:00:00.000Z',
+      updatedAt: '2026-10-02T00:00:00.000Z',
+      lastEventSequence: '3',
+      studyRevision: 3,
+    };
+    expect(
+      [
+        { ...base, outcome: 'created', canonicalNodeId: null },
+        { ...base, outcome: 'focused_existing', canonicalNodeId: null },
+        { ...base, outcome: 'explicit_duplicate', canonicalNodeId: REFERENCE_ID },
+        { ...base, outcome: 'merged', canonicalNodeId: null },
+        { ...base, outcome: 'created' },
+      ].map((body) => createNodeResponseSchema.safeParse(body).success),
+    ).toStrictEqual([true, true, true, false, false]);
   });
 });
 

@@ -12,6 +12,7 @@ const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
 const NODE_ID = 'bbbbbbbb-2222-4333-8444-555555555555';
 const SCRIPTURE_ID = 'cccccccc-2222-4333-8444-555555555555';
 const REFERENCE_ID = 'dddddddd-2222-4333-8444-555555555555';
+const DUPLICATE_ID = 'ffffffff-2222-4333-8444-555555555555';
 const T = '2026-10-01T12:00:00.000Z';
 const STUDY: StudyResponse = {
   id: STUDY_ID,
@@ -48,6 +49,7 @@ const summary = (overrides: Record<string, unknown> = {}) => ({
   status: null,
   observationKind: null,
   referenceId: null,
+  canonicalNodeId: null,
   revision: 1,
   createdAt: T,
   updatedAt: T,
@@ -57,6 +59,7 @@ const common = (overrides: Record<string, unknown> = {}) => ({
   id: NODE_ID,
   studyId: STUDY_ID,
   origin: 'user',
+  canonicalNodeId: null,
   revision: 1,
   createdAt: T,
   updatedAt: T,
@@ -72,6 +75,8 @@ const mutation = (overrides: Record<string, unknown> = {}) => ({
   createdAt: T,
   updatedAt: T,
   lastEventSequence: '6',
+  outcome: 'created',
+  canonicalNodeId: null,
   ...overrides,
 });
 const envelope = (code: string, extra: Record<string, unknown> = {}) => ({
@@ -386,7 +391,126 @@ describe('NodesSection', () => {
     ]);
   });
 
-  it('says a passage is already in the study and Show it opens the existing node', async () => {
+  it('focuses a passage already in the study, then adds a separate copy labeled Duplicate whose original is one button away', async () => {
+    const existing = summary({
+      id: SCRIPTURE_ID,
+      type: 'scripture',
+      origin: 'scripture',
+      label: 'Romans 9:1',
+      referenceId: REFERENCE_ID,
+    });
+    const copy = summary({
+      id: DUPLICATE_ID,
+      type: 'scripture',
+      origin: 'scripture',
+      label: 'Romans 9:1',
+      referenceId: REFERENCE_ID,
+      canonicalNodeId: SCRIPTURE_ID,
+    });
+    const scriptureDetail = (id: string, canonicalNodeId: string | null) =>
+      jsonResponse(200, {
+        type: 'scripture',
+        ...common({ id, origin: 'scripture', canonicalNodeId }),
+        reference: ROMANS,
+      });
+    const scriptureMutation = (overrides: Record<string, unknown>) =>
+      mutation({ type: 'scripture', origin: 'scripture', referenceId: REFERENCE_ID, ...overrides });
+    reply(
+      `GET ${NODES}`,
+      jsonResponse(200, { items: [existing] }),
+      jsonResponse(200, { items: [existing] }),
+      jsonResponse(200, { items: [existing, copy] }),
+      jsonResponse(200, { items: [existing, copy] }),
+    );
+    reply('POST /bible/resolve', jsonResponse(200, { outcome: 'resolved', reference: ROMANS }));
+    reply(
+      `POST ${NODES}`,
+      jsonResponse(
+        200,
+        scriptureMutation({ id: SCRIPTURE_ID, outcome: 'focused_existing', studyRevision: 5 }),
+      ),
+      jsonResponse(
+        201,
+        scriptureMutation({
+          id: DUPLICATE_ID,
+          outcome: 'explicit_duplicate',
+          canonicalNodeId: SCRIPTURE_ID,
+          studyRevision: 6,
+        }),
+      ),
+    );
+    reply(`GET ${NODES}/${SCRIPTURE_ID}`, scriptureDetail(SCRIPTURE_ID, null));
+    reply(`GET ${NODES}/${DUPLICATE_ID}`, scriptureDetail(DUPLICATE_ID, SCRIPTURE_ID));
+    const { queryClient } = renderSection();
+    const group = await openAdd();
+    fireEvent.click(within(group).getByRole('radio', { name: 'Scripture' }));
+    fireEvent.change(screen.getByLabelText('Passage'), { target: { value: 'Rom 9:1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve' }));
+    await screen.findByText(/^Resolved: Romans 9:1/);
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    // focused_existing: the existing node opens with focus on its heading; the form closes.
+    const original = await screen.findByRole('region', { name: 'Scripture' });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(original).getByRole('heading', { name: 'Scripture' }),
+      ),
+    );
+    expect(screen.queryByRole('heading', { name: 'Add a node' })).toBeNull();
+    // Shown next to "Add a separate copy" and announced in the section's polite live region.
+    const said = screen.getAllByText('Romans 9:1 is already in this study. Showing it.');
+    expect(said.map((el) => el.getAttribute('role'))).toStrictEqual(['status', null]);
+    expect(within(original).queryByText('Duplicate')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Show it' })).toBeNull();
+    expect(queryClient.getQueryData<StudyResponse>(studyQueryKey(STUDY_ID))?.revision).toBe(5);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add a separate copy' }));
+    // The detail now shows the new duplicate (a new region replaces the original's).
+    await screen.findByRole('button', { name: 'Show the original' });
+    const duplicate = screen.getByRole('region', { name: 'Scripture' });
+    const [first, second] = posts();
+    expect([first?.body, second?.body]).toStrictEqual([
+      { type: 'scripture', expectedRevision: 4, referenceId: REFERENCE_ID },
+      {
+        type: 'scripture',
+        // The revision the focus moved the study to.
+        expectedRevision: 5,
+        referenceId: REFERENCE_ID,
+        duplicatePolicy: 'explicit_duplicate',
+      },
+    ]);
+    // A different request, so a new Idempotency-Key.
+    expect(second?.key).not.toBe(first?.key);
+    expect(screen.getByText('Duplicate of Romans 9:1 added')).toBeTruthy();
+    expect(screen.queryByText(/already in this study/)).toBeNull();
+    // "Duplicate" is text in the list and the detail, never color alone.
+    expect(
+      await screen.findByRole('button', {
+        name: 'Scripture · Scripture Text · Duplicate Romans 9:1',
+      }),
+    ).toBeTruthy();
+    expect(textOf(within(duplicate).getByText(/^of /).closest('p'))).toBe(
+      'Duplicate of Romans 9:1',
+    );
+
+    fireEvent.click(within(duplicate).getByRole('button', { name: 'Show the original' }));
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole('button', { name: 'Scripture · Scripture Text Romans 9:1' })
+          .getAttribute('aria-pressed'),
+      ).toBe('true'),
+    );
+    const shown = screen.getByRole('region', { name: 'Scripture' });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(shown).getByRole('heading', { name: 'Scripture' }),
+      ),
+    );
+    expect(within(shown).queryByRole('button', { name: 'Show the original' })).toBeNull();
+  });
+
+  it('opens the node named by ?node= once the list has it, and ignores an id it does not list', async () => {
     const existing = summary({
       id: SCRIPTURE_ID,
       type: 'scripture',
@@ -395,8 +519,6 @@ describe('NodesSection', () => {
       referenceId: REFERENCE_ID,
     });
     reply(`GET ${NODES}`, jsonResponse(200, { items: [existing] }));
-    reply('POST /bible/resolve', jsonResponse(200, { outcome: 'resolved', reference: ROMANS }));
-    reply(`POST ${NODES}`, jsonResponse(422, envelope('SCRIPTURE_NODE_EXISTS')));
     reply(
       `GET ${NODES}/${SCRIPTURE_ID}`,
       jsonResponse(200, {
@@ -405,29 +527,25 @@ describe('NodesSection', () => {
         reference: ROMANS,
       }),
     );
-    renderSection();
-    const group = await openAdd();
-    fireEvent.click(within(group).getByRole('radio', { name: 'Scripture' }));
-    fireEvent.change(screen.getByLabelText('Passage'), { target: { value: 'Rom 9:1' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Resolve' }));
-    await screen.findByText(/^Resolved: Romans 9:1/);
-    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
-    const alert = await screen.findByRole('alert');
-    expect(textOf(alert)).toBe('Romans 9:1 is already in this study.Show it');
-    expect(screen.queryByText('server text, never shown')).toBeNull();
-
-    fireEvent.click(within(alert).getByRole('button', { name: 'Show it' }));
+    const onReload = vi.fn(() => Promise.resolve());
+    const { unmount } = renderWithQuery(
+      <NodesSection study={STUDY} onReload={onReload} initialNodeId={SCRIPTURE_ID} />,
+    );
     const region = await screen.findByRole('region', { name: 'Scripture' });
     await waitFor(() =>
       expect(document.activeElement).toBe(
         within(region).getByRole('heading', { name: 'Scripture' }),
       ),
     );
-    expect(within(region).getByText('Scripture Text')).toBeTruthy();
-    expect(within(region).getByText('World English Bible')).toBeTruthy();
-    expect(
-      within(region).getByRole('link', { name: 'Open in reader Romans 9:1' }).getAttribute('href'),
-    ).toBe(`/bible?ref=${REFERENCE_ID}&study=${STUDY_ID}`);
+    unmount();
+
+    reply(`GET ${NODES}`, jsonResponse(200, { items: [existing] }));
+    renderWithQuery(
+      <NodesSection study={STUDY} onReload={onReload} initialNodeId="not-a-listed-node" />,
+    );
+    await screen.findByRole('button', { name: 'Scripture · Scripture Text Romans 9:1' });
+    expect(screen.queryByRole('region', { name: 'Scripture' })).toBeNull();
+    expect(requests.filter((r) => r.path.startsWith(`${NODES}/`))).toHaveLength(1);
   });
 
   it('keeps the draft on a 409 and asks to press Create again; Retry after an unknown outcome resends the same key and body', async () => {

@@ -16,6 +16,7 @@ import {
   type UpdateNodeRequest,
 } from '@bible-artisan/contracts';
 import { apiFetch } from './api-client';
+import { studyHref } from './studies';
 
 /**
  * Typed graph node data access (BIB-25). Node text, citations and labels travel only in request
@@ -81,11 +82,26 @@ export function nodeStateText(
   return null;
 }
 
-/** "Thought: Maybe conscience…", as the Notes "Attach to" select names a node. */
-export function nodeOptionText(node: Pick<NodeSummary, 'type' | 'label'>, max = 80): string {
+/**
+ * "Thought: Maybe conscience…", as the Notes "Attach to" select names a node; a duplicate
+ * Scripture node (BIB-26) says so: "Scripture: Romans 9:1 (duplicate)".
+ */
+export function nodeOptionText(
+  node: Pick<NodeSummary, 'type' | 'label' | 'canonicalNodeId'>,
+  max = 80,
+): string {
+  const suffix = node.canonicalNodeId ? ` ${DUPLICATE_SUFFIX}` : '';
   const text = `${NODE_TYPE_NAMES[node.type]}: ${node.label}`;
   const points = Array.from(text);
-  return points.length > max ? `${points.slice(0, max - 1).join('')}…` : text;
+  const room = max - Array.from(suffix).length;
+  return (points.length > room ? `${points.slice(0, room - 1).join('')}…` : text) + suffix;
+}
+
+const DUPLICATE_SUFFIX = '(duplicate)';
+
+/** A study page link that opens with one node selected (BIB-26): its opaque id, never a label. */
+export function studyNodeHref(studyId: string, nodeId: string): string {
+  return `${studyHref(studyId)}?node=${encodeURIComponent(nodeId)}`;
 }
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });

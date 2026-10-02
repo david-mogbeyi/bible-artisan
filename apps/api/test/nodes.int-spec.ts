@@ -60,10 +60,6 @@ const REFERENCE_NOT_FOUND = envelope({
   code: 'REFERENCE_NOT_FOUND',
   message: 'That passage is not available in an active translation',
 });
-const SCRIPTURE_NODE_EXISTS = envelope({
-  code: 'SCRIPTURE_NODE_EXISTS',
-  message: 'This passage is already in the study',
-});
 const NODE_LIMIT_EXCEEDED = envelope({
   code: 'NODE_LIMIT_EXCEEDED',
   message: 'A study can hold at most 2,000 nodes',
@@ -291,6 +287,8 @@ describe('typed graph nodes (BIB-25)', () => {
             updatedAt: anyTime,
             studyRevision: index + 2,
             lastEventSequence: String(index + 2),
+            outcome: 'created',
+            canonicalNodeId: null,
           },
         ]);
         created.push(res.body as CreateNodeResponse);
@@ -319,6 +317,7 @@ describe('typed graph nodes (BIB-25)', () => {
               status: null,
               observationKind: null,
               referenceId: romans.id,
+              canonicalNodeId: null,
               revision: 1,
               ...timesOf(0),
             },
@@ -330,6 +329,7 @@ describe('typed graph nodes (BIB-25)', () => {
               status: 'open',
               observationKind: null,
               referenceId: null,
+              canonicalNodeId: null,
               revision: 1,
               ...timesOf(1),
             },
@@ -341,6 +341,7 @@ describe('typed graph nodes (BIB-25)', () => {
               status: null,
               observationKind: 'textual_observation',
               referenceId: null,
+              canonicalNodeId: null,
               revision: 1,
               ...timesOf(2),
             },
@@ -352,6 +353,7 @@ describe('typed graph nodes (BIB-25)', () => {
               status: null,
               observationKind: null,
               referenceId: null,
+              canonicalNodeId: null,
               revision: 1,
               ...timesOf(3),
             },
@@ -363,6 +365,7 @@ describe('typed graph nodes (BIB-25)', () => {
               status: 'tentative',
               observationKind: null,
               referenceId: null,
+              canonicalNodeId: null,
               revision: 1,
               ...timesOf(4),
             },
@@ -374,6 +377,7 @@ describe('typed graph nodes (BIB-25)', () => {
               status: null,
               observationKind: null,
               referenceId: null,
+              canonicalNodeId: null,
               revision: 1,
               ...timesOf(5),
             },
@@ -385,6 +389,7 @@ describe('typed graph nodes (BIB-25)', () => {
         id: created[index]?.id,
         studyId: study.studyId,
         origin,
+        canonicalNodeId: null,
         revision: 1,
         ...timesOf(index),
       });
@@ -475,7 +480,7 @@ describe('typed graph nodes (BIB-25)', () => {
           {
             sequence: '2',
             eventType: 'scripture_added_to_graph',
-            payload: { nodeId: scripture.id, referenceId: romans.id },
+            payload: { nodeId: scripture.id, referenceId: romans.id, duplicateOfNodeId: null },
           },
           {
             sequence: '3',
@@ -627,45 +632,385 @@ describe('typed graph nodes (BIB-25)', () => {
         unchanged: true,
       });
     });
+  });
 
-    it('refuses a second live node for the same reference with 422 SCRIPTURE_NODE_EXISTS; an overlapping range is its own node', async () => {
+  /**
+   * BIB-26: one live canonical Scripture node per exact reference (FR-GRAPH-002/003). Adding it
+   * again focuses it and records a visit; Explicit Duplicate makes a labeled copy.
+   */
+  describe('canonical Scripture nodes (BIB-26)', () => {
+    const scripture = (referenceId: string, extra: object = {}) => ({
+      type: 'scripture',
+      referenceId,
+      ...extra,
+    });
+
+    async function addScripture(
+      owner: Owner,
+      studyId: string,
+      referenceId: string,
+      extra: object = {},
+      key?: string,
+    ) {
+      return send(
+        owner,
+        'post',
+        nodesPath(studyId),
+        { expectedRevision: await studyRevision(studyId), ...scripture(referenceId, extra) },
+        key,
+      );
+    }
+
+    async function counters(studyId: string) {
+      const study = await Study.findByPk(studyId, { rejectOnEmpty: true });
+      return {
+        revision: study.revision,
+        contentRevision: study.contentRevision,
+        lastActivityAt: study.lastActivityAt.getTime(),
+      };
+    }
+
+    /** The study's live Scripture nodes for one reference, oldest first. */
+    async function scriptureRows(studyId: string, referenceId: string) {
+      const rows = await StudyNode.findAll({
+        where: { studyId, type: 'scripture', scriptureReferenceId: referenceId, deletedAt: null },
+        order: [
+          ['createdAt', 'ASC'],
+          ['id', 'ASC'],
+        ],
+      });
+      return rows.map((n) => ({
+        id: n.id,
+        canonicalNodeId: n.canonicalNodeId,
+        revision: n.revision,
+        updatedAt: n.updatedAt.toISOString(),
+      }));
+    }
+
+    it('focuses the canonical node on each repeated Add: 200 focused_existing, no node written, content revision unchanged, one scripture_revisited per Add', async () => {
+      const study = await createStudy(alice);
+      const created = await addScripture(alice, study.studyId, romans.id);
+      expect([created.status, created.body]).toStrictEqual([
+        201,
+        {
+          id: anyId,
+          studyId: study.studyId,
+          type: 'scripture',
+          origin: 'scripture',
+          revision: 1,
+          referenceId: romans.id,
+          createdAt: anyTime,
+          updatedAt: anyTime,
+          studyRevision: 2,
+          lastEventSequence: '2',
+          outcome: 'created',
+          canonicalNodeId: null,
+        },
+      ]);
+      const node = created.body as CreateNodeResponse;
+      const rowsBefore = await scriptureRows(study.studyId, romans.id);
+      const before = await counters(study.studyId);
+
+      const again = await addScripture(alice, study.studyId, romans.id);
+      const third = await addScripture(alice, study.studyId, romans.id, {
+        duplicatePolicy: 'focus_existing',
+      });
+      const focused = (studyRevision: number, sequence: string) => [
+        200,
+        {
+          id: node.id,
+          studyId: study.studyId,
+          type: 'scripture',
+          origin: 'scripture',
+          revision: 1,
+          referenceId: romans.id,
+          createdAt: node.createdAt,
+          updatedAt: node.updatedAt,
+          studyRevision,
+          lastEventSequence: sequence,
+          outcome: 'focused_existing',
+          canonicalNodeId: null,
+        },
+      ];
+      const after = await counters(study.studyId);
+      expect({
+        again: [again.status, again.body],
+        third: [third.status, third.body],
+        rows: await scriptureRows(study.studyId, romans.id),
+        revision: after.revision - before.revision,
+        contentRevision: after.contentRevision - before.contentRevision,
+        activityMoved: after.lastActivityAt > before.lastActivityAt,
+        events: await events(study.studyId),
+      }).toStrictEqual({
+        again: focused(3, '3'),
+        third: focused(4, '4'),
+        // The node itself is untouched: same revision and updatedAt, still the only one.
+        rows: rowsBefore,
+        revision: 2,
+        contentRevision: 0,
+        activityMoved: true,
+        events: [
+          { sequence: '1', eventType: 'study_created', payload: expect.any(Object) },
+          {
+            sequence: '2',
+            eventType: 'scripture_added_to_graph',
+            payload: { nodeId: node.id, referenceId: romans.id, duplicateOfNodeId: null },
+          },
+          {
+            sequence: '3',
+            eventType: 'scripture_revisited',
+            payload: { nodeId: node.id, referenceId: romans.id },
+          },
+          {
+            sequence: '4',
+            eventType: 'scripture_revisited',
+            payload: { nodeId: node.id, referenceId: romans.id },
+          },
+        ],
+      });
+    });
+
+    it('creates a labeled duplicate on explicit_duplicate; later plain Adds still focus the canonical node; with no canonical node it simply creates one', async () => {
+      const study = await createStudy(alice);
+      const canonical = (await addScripture(alice, study.studyId, romans.id))
+        .body as CreateNodeResponse;
+      const before = await counters(study.studyId);
+      const duplicate = await addScripture(alice, study.studyId, romans.id, {
+        duplicatePolicy: 'explicit_duplicate',
+      });
+      expect([duplicate.status, duplicate.body]).toStrictEqual([
+        201,
+        {
+          id: anyId,
+          studyId: study.studyId,
+          type: 'scripture',
+          origin: 'scripture',
+          revision: 1,
+          referenceId: romans.id,
+          createdAt: anyTime,
+          updatedAt: anyTime,
+          studyRevision: 3,
+          lastEventSequence: '3',
+          outcome: 'explicit_duplicate',
+          canonicalNodeId: canonical.id,
+        },
+      ]);
+      const copy = duplicate.body as CreateNodeResponse;
+      expect(copy.id).not.toBe(canonical.id);
+      const afterDuplicate = await counters(study.studyId);
+
+      const plain = await addScripture(alice, study.studyId, romans.id);
+      expect([plain.status, (plain.body as CreateNodeResponse).id]).toStrictEqual([
+        200,
+        canonical.id,
+      ]);
+
+      const verse2 = await resolve('Romans 9:2');
+      const stale = await addScripture(alice, study.studyId, verse2.id, {
+        duplicatePolicy: 'explicit_duplicate',
+      });
+      expect([stale.status, stale.body]).toStrictEqual([
+        201,
+        expect.objectContaining({
+          referenceId: verse2.id,
+          outcome: 'created',
+          canonicalNodeId: null,
+        }),
+      ]);
+      const verse2Node = stale.body as CreateNodeResponse;
+
+      const list = await send(alice, 'get', nodesPath(study.studyId));
+      const detail = await send(alice, 'get', nodePath(study.studyId, copy.id));
+      const canonicalDetail = await send(alice, 'get', nodePath(study.studyId, canonical.id));
+      expect({
+        contentRevision: afterDuplicate.contentRevision - before.contentRevision,
+        events: (await events(study.studyId)).slice(2),
+        list: (
+          list.body as { items: { id: string; label: string; canonicalNodeId: unknown }[] }
+        ).items.map(({ id, label, canonicalNodeId }) => ({ id, label, canonicalNodeId })),
+        detail: [detail.status, detail.body],
+        canonicalDetail: (canonicalDetail.body as { canonicalNodeId: unknown }).canonicalNodeId,
+      }).toStrictEqual({
+        contentRevision: 1,
+        events: [
+          {
+            sequence: '3',
+            eventType: 'scripture_added_to_graph',
+            payload: { nodeId: copy.id, referenceId: romans.id, duplicateOfNodeId: canonical.id },
+          },
+          {
+            sequence: '4',
+            eventType: 'scripture_revisited',
+            payload: { nodeId: canonical.id, referenceId: romans.id },
+          },
+          {
+            sequence: '5',
+            eventType: 'scripture_added_to_graph',
+            payload: { nodeId: verse2Node.id, referenceId: verse2.id, duplicateOfNodeId: null },
+          },
+        ],
+        list: [
+          { id: canonical.id, label: 'Romans 9:1', canonicalNodeId: null },
+          { id: copy.id, label: 'Romans 9:1', canonicalNodeId: canonical.id },
+          { id: verse2Node.id, label: 'Romans 9:2', canonicalNodeId: null },
+        ],
+        detail: [
+          200,
+          {
+            type: 'scripture',
+            id: copy.id,
+            studyId: study.studyId,
+            origin: 'scripture',
+            canonicalNodeId: canonical.id,
+            revision: 1,
+            createdAt: copy.createdAt,
+            updatedAt: copy.updatedAt,
+            reference: romans,
+          },
+        ],
+        canonicalDetail: null,
+      });
+    });
+
+    it("focuses the study's starting passage node when it is added again", async () => {
       const study = await createStudy(alice, { startingReferenceId: romans.id });
-      const before = await ownerRows(alice);
-      const again = await send(
+      const [root] = await scriptureRows(study.studyId, romans.id);
+      const again = await addScripture(alice, study.studyId, romans.id);
+      expect({
+        answer: [again.status, (again.body as CreateNodeResponse).id],
+        outcome: (again.body as CreateNodeResponse).outcome,
+        events: (await events(study.studyId)).map((e) => e.eventType),
+      }).toStrictEqual({
+        answer: [200, root?.id],
+        outcome: 'focused_existing',
+        events: ['study_created', 'scripture_revisited'],
+      });
+    });
+
+    it('deduplicates exact references only: an overlapping range is its own canonical node, and the existing node keeps its reference', async () => {
+      const study = await createStudy(alice);
+      const verse = (await addScripture(alice, study.studyId, romans.id))
+        .body as CreateNodeResponse;
+      const range = await resolve('Romans 9:1-3');
+      const overlapping = await addScripture(alice, study.studyId, range.id);
+      expect([overlapping.status, overlapping.body]).toStrictEqual([
+        201,
+        expect.objectContaining({
+          referenceId: range.id,
+          outcome: 'created',
+          canonicalNodeId: null,
+        }),
+      ]);
+      const detail = await send(alice, 'get', nodePath(study.studyId, verse.id));
+      expect([
+        (detail.body as { reference: unknown }).reference,
+        await StudyNode.count({
+          where: { studyId: study.studyId, type: 'scripture', canonicalNodeId: null },
+        }),
+      ]).toStrictEqual([romans, 2]);
+    });
+
+    it('replays a retried focused_existing Add without a second visit; the same key with another policy is refused', async () => {
+      const study = await createStudy(alice);
+      await addScripture(alice, study.studyId, romans.id);
+      const key = randomUUID();
+      const body = { expectedRevision: 2, ...scripture(romans.id) };
+      const first = await send(alice, 'post', nodesPath(study.studyId), body, key);
+      const replay = await send(alice, 'post', nodesPath(study.studyId), body, key);
+      const reused = await send(
         alice,
         'post',
         nodesPath(study.studyId),
-        { expectedRevision: 1, type: 'scripture', referenceId: romans.id },
-        randomUUID(),
+        { ...body, duplicatePolicy: 'explicit_duplicate' },
+        key,
       );
-      expect([again.status, again.body]).toStrictEqual([422, SCRIPTURE_NODE_EXISTS]);
-      expect(await ownerRows(alice)).toStrictEqual(before);
-
-      const overlapping = await resolve('Romans 9:1-2');
-      await createNode(alice, study.studyId, { type: 'scripture', referenceId: overlapping.id });
-      const list = await send(alice, 'get', nodesPath(study.studyId));
-      expect(
-        (list.body as { items: { label: string }[] }).items.map((item) => item.label),
-      ).toStrictEqual(['Romans 9:1', 'Romans 9:1–2']);
+      expect({
+        statuses: [first.status, replay.status, replay.headers['idempotent-replayed']],
+        sameBody: isDeepStrictEqual(replay.body, first.body),
+        reused: [reused.status, reused.body],
+        events: (await events(study.studyId)).map((e) => e.eventType),
+        nodes: await StudyNode.count({ where: { studyId: study.studyId } }),
+      }).toStrictEqual({
+        statuses: [200, 200, 'true'],
+        sameBody: true,
+        reused: [422, KEY_REUSED],
+        events: ['study_created', 'scripture_added_to_graph', 'scripture_revisited'],
+        nodes: 1,
+      });
     });
 
-    it('lets two creates of one reference from one study revision race: one 201, one 409, and the retry meets the duplicate guard', async () => {
+    it('lets two Adds of one reference from one study revision race: one 201 created, one 409, and the retry focuses the one canonical node', async () => {
       const study = await createStudy(alice);
-      const body = { expectedRevision: 1, type: 'scripture', referenceId: romans.id };
+      const body = { expectedRevision: 1, ...scripture(romans.id) };
       const results = await raceThroughGate(study.studyId, () => [
         send(alice, 'post', nodesPath(study.studyId), body),
         send(alice, 'post', nodesPath(study.studyId), body),
       ]);
-      expect(results.map((res) => res.status).sort()).toStrictEqual([201, 409]);
-      expect(results.find((res) => res.status === 409)?.body).toStrictEqual(conflict(2));
+      const winner = results.find((res) => res.status === 201);
+      const loser = results.find((res) => res.status !== 201);
+      expect([
+        (winner?.body as CreateNodeResponse | undefined)?.outcome,
+        [loser?.status, loser?.body],
+      ]).toStrictEqual(['created', [409, conflict(2)]]);
       const retried = await send(alice, 'post', nodesPath(study.studyId), {
         ...body,
         expectedRevision: 2,
       });
-      expect([retried.status, retried.body]).toStrictEqual([422, SCRIPTURE_NODE_EXISTS]);
-      expect(await StudyNode.count({ where: { studyId: study.studyId, type: 'scripture' } })).toBe(
-        1,
+      expect({
+        retried: [retried.status, (retried.body as CreateNodeResponse).outcome],
+        sameNode: (retried.body as CreateNodeResponse).id === (winner?.body as { id: string }).id,
+        rows: (await scriptureRows(study.studyId, romans.id)).length,
+      }).toStrictEqual({ retried: [200, 'focused_existing'], sameNode: true, rows: 1 });
+    });
+
+    it('still focuses at the 2,000-node cap, while an explicit duplicate is 422 NODE_LIMIT_EXCEEDED, writing nothing', async () => {
+      const study = await createStudy(alice);
+      await addScripture(alice, study.studyId, romans.id);
+      await insertThoughts(study.studyId, alice, 1999);
+      const focused = await addScripture(alice, study.studyId, romans.id);
+      const before = await ownerRows(alice);
+      const refused = await addScripture(
+        alice,
+        study.studyId,
+        romans.id,
+        { duplicatePolicy: 'explicit_duplicate' },
+        randomUUID(),
       );
+      expect({
+        focused: [focused.status, (focused.body as CreateNodeResponse).outcome],
+        refused: [refused.status, refused.body],
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({
+        focused: [200, 'focused_existing'],
+        refused: [422, NODE_LIMIT_EXCEEDED],
+        unchanged: true,
+      });
+    });
+
+    it("never focuses or duplicates another owner's node: each study has its own canonical node, and another user's study is 404 writing nothing", async () => {
+      const aliceStudy = await createStudy(alice);
+      const aliceNode = (await addScripture(alice, aliceStudy.studyId, romans.id))
+        .body as CreateNodeResponse;
+      const bobStudy = await createStudy(bob);
+      const aliceBefore = await ownerRows(alice);
+      const bobCreated = await addScripture(bob, bobStudy.studyId, romans.id);
+      const bobAgain = await addScripture(bob, bobStudy.studyId, romans.id);
+      const intoAlice = await send(bob, 'post', nodesPath(aliceStudy.studyId), {
+        expectedRevision: await studyRevision(aliceStudy.studyId),
+        ...scripture(romans.id, { duplicatePolicy: 'explicit_duplicate' }),
+      });
+      const bobNode = bobCreated.body as CreateNodeResponse;
+      expect({
+        bob: [bobCreated.status, bobNode.outcome, bobNode.id !== aliceNode.id],
+        bobAgain: [bobAgain.status, (bobAgain.body as CreateNodeResponse).id === bobNode.id],
+        intoAlice: [intoAlice.status, intoAlice.body],
+        aliceUnchanged: isDeepStrictEqual(await ownerRows(alice), aliceBefore),
+      }).toStrictEqual({
+        bob: [201, 'created', true],
+        bobAgain: [200, true],
+        intoAlice: [404, NOT_FOUND],
+        aliceUnchanged: true,
+      });
     });
   });
 
@@ -1036,7 +1381,7 @@ describe('typed graph nodes (BIB-25)', () => {
           {
             sequence: '2',
             eventType: 'scripture_added_to_graph',
-            payload: { nodeId: scripture.id, referenceId: romans.id },
+            payload: { nodeId: scripture.id, referenceId: romans.id, duplicateOfNodeId: null },
           },
           {
             sequence: '3',
@@ -1107,6 +1452,12 @@ describe('typed graph nodes (BIB-25)', () => {
             expectedRevision: 1,
             text: 'y',
           }),
+          // BIB-26: an Add of a reference is refused too, whether it would create or focus.
+          await send(alice, 'post', nodesPath(study.studyId), {
+            expectedRevision: 3,
+            type: 'scripture',
+            referenceId: romans.id,
+          }),
         ].map((r): unknown[] => [r.status, r.body]);
         const reads = [
           await send(alice, 'get', nodesPath(study.studyId)),
@@ -1118,12 +1469,14 @@ describe('typed graph nodes (BIB-25)', () => {
         answers: [
           [422, STUDY_ARCHIVED],
           [422, STUDY_ARCHIVED],
+          [422, STUDY_ARCHIVED],
         ],
         reads: [200, 200],
         unchanged: true,
       });
       expect(await answersFor('trash')).toStrictEqual({
         answers: [
+          [422, STUDY_TRASHED],
           [422, STUDY_TRASHED],
           [422, STUDY_TRASHED],
         ],

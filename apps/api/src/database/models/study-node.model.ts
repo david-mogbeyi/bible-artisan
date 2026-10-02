@@ -83,6 +83,15 @@ export class StudyNode extends Model {
   @Column({ field: 'scripture_reference_id', type: DataType.UUID, allowNull: true })
   declare scriptureReferenceId: string | null;
 
+  /**
+   * A deliberate duplicate's canonical node (BIB-26): same study, owner and reference (composite
+   * FK); NULL for a canonical node and every non-Scripture node (CHECK). At most one live
+   * canonical Scripture node per study and reference (partial unique index). Never written by a
+   * client; not covered by the identity trigger, so BIB-31 can re-point duplicates.
+   */
+  @Column({ field: 'canonical_node_id', type: DataType.UUID, allowNull: true })
+  declare canonicalNodeId: string | null;
+
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 1 })
   declare revision: number;
 

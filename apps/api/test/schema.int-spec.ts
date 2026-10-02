@@ -292,6 +292,7 @@ describe('schema (composite-key owner isolation)', () => {
       { name: 'study_branch_study_owner_fk', action: 'c' },
       { name: 'study_event_study_owner_fk', action: 'c' },
       { name: 'study_main_question_node_fk', action: 'a' },
+      { name: 'study_node_canonical_node_fk', action: 'a' },
       { name: 'study_node_scripture_reference_id_fkey', action: 'a' },
       { name: 'study_node_study_owner_fk', action: 'c' },
       { name: 'study_original_question_node_fk', action: 'a' },
@@ -443,5 +444,131 @@ describe('schema (composite-key owner isolation)', () => {
         { bind: [studyId, owner], type: QueryTypes.INSERT },
       ),
     ).rejects.toThrow(constraint);
+  });
+
+  describe('canonical Scripture nodes (BIB-26)', () => {
+    const CANONICAL_VIOLATION = { code: '23505', constraint: 'study_node_canonical_scripture_key' };
+
+    /** Two shared reference ids (any; the corpus is imported in the test database). */
+    async function references(): Promise<[string, string]> {
+      const rows = await db.query<{ id: string }>(
+        `SELECT id FROM scripture_reference ORDER BY id LIMIT 2`,
+        { type: QueryTypes.SELECT },
+      );
+      const [first, second] = rows;
+      if (!first || !second) throw new Error('expected two scripture references');
+      return [first.id, second.id];
+    }
+
+    /** Inserts a Scripture node (canonical unless `canonical` is given); returns its id. */
+    async function insertScripture(
+      studyId: string,
+      ownerId: string,
+      referenceId: string,
+      canonical: string | null = null,
+      id: string = randomUUID(),
+    ): Promise<string> {
+      await db.query(
+        `INSERT INTO study_node
+           (id, study_id, owner_id, type, origin, scripture_reference_id, canonical_node_id)
+         VALUES ($1, $2, $3, 'scripture', 'scripture', $4, $5)`,
+        { bind: [id, studyId, ownerId, referenceId, canonical], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    it('allows one live canonical node per study and reference; a deleted one does not count, and other references and studies are independent', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const otherStudyId = await insertStudy(owner);
+      const [romans, other] = await references();
+      const first = await insertScripture(studyId, owner, romans);
+      await expect(insertScripture(studyId, owner, romans)).rejects.toMatchObject({
+        parent: expect.objectContaining(CANONICAL_VIOLATION),
+      });
+      await insertScripture(studyId, owner, other);
+      await insertScripture(otherStudyId, owner, romans);
+      await db.query(`UPDATE study_node SET deleted_at = now() WHERE id = $1`, { bind: [first] });
+      await expect(insertScripture(studyId, owner, romans)).resolves.toEqual(expect.any(String));
+    });
+
+    it('refuses a second live canonical node from a concurrent transaction once the first commits', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const [romans] = await references();
+      const insert = `INSERT INTO study_node (study_id, owner_id, type, origin, scripture_reference_id)
+                      VALUES ($1, $2, 'scripture', 'scripture', $3)`;
+      const first = await db.transaction();
+      const second = await db.transaction();
+      try {
+        await db.query(insert, { bind: [studyId, owner, romans], transaction: first });
+        // The second insert waits on the first's uncommitted index entry, then fails on COMMIT.
+        const racing = db
+          .query(insert, { bind: [studyId, owner, romans], transaction: second })
+          .then(
+            () => 'inserted',
+            (error: unknown) => error,
+          );
+        await first.commit();
+        expect(await racing).toMatchObject({
+          parent: expect.objectContaining(CANONICAL_VIOLATION),
+        });
+      } finally {
+        await second.rollback();
+      }
+      const [row] = await db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM study_node WHERE study_id = $1`,
+        { bind: [studyId], type: QueryTypes.SELECT },
+      );
+      expect(row?.n).toBe(1);
+    });
+
+    it('lets a duplicate name only a Scripture node of its own study, owner and reference, never itself; no other type can be a duplicate', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const otherStudyId = await insertStudy(owner);
+      const [romans, other] = await references();
+      const canonical = await insertScripture(studyId, owner, romans);
+      const otherReference = await insertScripture(studyId, owner, other);
+      const otherStudy = await insertScripture(otherStudyId, owner, romans);
+      const question = await insertNode(studyId, owner);
+      for (const target of [otherReference, otherStudy, question, randomUUID()]) {
+        await expect(insertScripture(studyId, owner, romans, target)).rejects.toThrow(
+          /study_node_canonical_node_fk/,
+        );
+      }
+      const self = randomUUID();
+      await expect(insertScripture(studyId, owner, romans, self, self)).rejects.toThrow(
+        /study_node_canonical_check/,
+      );
+      await expect(
+        db.query(
+          `INSERT INTO study_node (study_id, owner_id, type, origin, body, canonical_node_id)
+           VALUES ($1, $2, 'thought', 'user', 'T', $3)`,
+          { bind: [studyId, owner, canonical], type: QueryTypes.INSERT },
+        ),
+      ).rejects.toThrow(/study_node_canonical_check/);
+      // Several duplicates of one canonical node are fine, live or deleted.
+      await insertScripture(studyId, owner, romans, canonical);
+      await insertScripture(studyId, owner, romans, canonical);
+      await expect(
+        db.query(`DELETE FROM study_node WHERE id = $1`, { bind: [canonical] }),
+      ).rejects.toThrow(/study_node_canonical_node_fk/);
+    });
+
+    it('purges a study holding a canonical node and its duplicates in one statement', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const [romans] = await references();
+      const canonical = await insertScripture(studyId, owner, romans);
+      await insertScripture(studyId, owner, romans, canonical);
+      await insertScripture(studyId, owner, romans, canonical);
+      await db.query(`DELETE FROM study WHERE id = $1`, { bind: [studyId] });
+      const [row] = await db.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM study_node WHERE study_id = $1`,
+        { bind: [studyId], type: QueryTypes.SELECT },
+      );
+      expect(row?.n).toBe(0);
+    });
   });
 });

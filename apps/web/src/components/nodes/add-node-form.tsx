@@ -8,13 +8,11 @@ import {
   MAX_QUESTION_LENGTH,
   NODE_LIMIT_EXCEEDED,
   NODE_TYPE_NAMES,
-  type NodeSummary,
   OBSERVATION_KIND_NAMES,
   OBSERVATION_KINDS,
   type ObservationKind,
   type ReferenceCandidate,
   REFERENCE_NOT_FOUND,
-  SCRIPTURE_NODE_EXISTS,
   type ScriptureReference,
   STUDY_ARCHIVED,
   STUDY_NODE_TYPES,
@@ -55,30 +53,30 @@ type Passage =
   | { state: 'ambiguous'; candidates: ReferenceCandidate[] }
   | { state: 'invalid'; message: string };
 
-type Problem =
-  | { kind: 'message'; text: string; retry?: boolean }
-  | { kind: 'exists'; label: string; nodeId: string | null };
+interface Problem {
+  text: string;
+  retry?: boolean;
+}
 
 /**
  * The inline Add node form (BIB-25): a Type radio group of the six types, then that type's
  * fields. A Scripture node is made only from a passage the server resolved (never from typed
  * text). Each request is frozen with its Idempotency-Key and resent verbatim after an unknown
  * outcome; a changed draft is a new request with a new key. Everything typed stays on a refusal.
+ * A passage the study already holds is not a refusal (BIB-26): the server answers
+ * `focused_existing`, and `onCreated` gets every outcome with the passage's label.
  */
 export function AddNodeForm({
   study,
-  nodes,
   onCreated,
   onCancel,
-  onShow,
   onLocked,
   onReload,
 }: {
   study: StudyResponse;
-  nodes: readonly NodeSummary[];
-  onCreated: (created: CreateNodeResponse) => void;
+  /** `label`: the resolved passage's reference label for a Scripture node, else null. */
+  onCreated: (created: CreateNodeResponse, label: string | null) => void;
   onCancel: () => void;
-  onShow: (nodeId: string) => void;
   onLocked: () => void;
   onReload: () => Promise<unknown>;
 }) {
@@ -93,7 +91,12 @@ export function AddNodeForm({
   const [errors, setErrors] = useState<FieldErrors>({});
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
-  const frozen = useRef<{ json: string; key: string; body: CreateNodeRequest } | null>(null);
+  const frozen = useRef<{
+    json: string;
+    key: string;
+    body: CreateNodeRequest;
+    label: string | null;
+  } | null>(null);
   const checkedType = useRef<HTMLInputElement>(null);
   const lastCheck = useRef(0);
 
@@ -189,7 +192,9 @@ export function AddNodeForm({
       const body = requestOf();
       if (!body) return;
       const json = JSON.stringify(body);
-      attempt = attempt?.json === json ? attempt : { json, key: crypto.randomUUID(), body };
+      const label =
+        body.type === 'scripture' && passage.state === 'resolved' ? passage.reference.label : null;
+      attempt = attempt?.json === json ? attempt : { json, key: crypto.randomUUID(), body, label };
       frozen.current = attempt;
     }
     setPending(true);
@@ -197,7 +202,7 @@ export function AddNodeForm({
     try {
       const created = await createNode(study.id, attempt.body, attempt.key);
       frozen.current = null;
-      onCreated(created);
+      onCreated(created, attempt.label);
     } catch (error) {
       const definite = error instanceof ApiError && error.status < 500 && error.status !== 429;
       if (definite) frozen.current = null;
@@ -209,24 +214,18 @@ export function AddNodeForm({
 
   function problemOf(error: unknown, definite: boolean): Problem {
     if (!definite || !(error instanceof ApiError)) {
-      return { kind: 'message', text: ADD_NODE_COPY.unknown, retry: true };
+      return { text: ADD_NODE_COPY.unknown, retry: true };
     }
     if (error.status === 409) {
       void onReload();
-      return { kind: 'message', text: ADD_NODE_COPY.conflict };
+      return { text: ADD_NODE_COPY.conflict };
     }
-    if (error.code === SCRIPTURE_NODE_EXISTS && passage.state === 'resolved') {
-      const existing = nodes.find((node) => node.referenceId === passage.reference.id);
-      return { kind: 'exists', label: passage.reference.label, nodeId: existing?.id ?? null };
-    }
-    if (error.code === NODE_LIMIT_EXCEEDED) return { kind: 'message', text: ADD_NODE_COPY.limit };
-    if (error.code === REFERENCE_NOT_FOUND) {
-      return { kind: 'message', text: ADD_NODE_COPY.reference };
-    }
+    if (error.code === NODE_LIMIT_EXCEEDED) return { text: ADD_NODE_COPY.limit };
+    if (error.code === REFERENCE_NOT_FOUND) return { text: ADD_NODE_COPY.reference };
     if (error.code === STUDY_ARCHIVED || error.code === STUDY_TRASHED) {
       // The section turns read-only and says why; this form closes with it.
       onLocked();
-      return { kind: 'message', text: ADD_NODE_COPY.failed };
+      return { text: ADD_NODE_COPY.failed };
     }
     if (error.status === 400) {
       const body = error.body as { fieldErrors?: Record<string, string[]> } | undefined;
@@ -236,7 +235,7 @@ export function AddNodeForm({
         ),
       );
     }
-    return { kind: 'message', text: ADD_NODE_COPY.failed };
+    return { text: ADD_NODE_COPY.failed };
   }
 
   const isStatement = type === 'question' || type === 'conclusion';
@@ -407,29 +406,12 @@ export function AddNodeForm({
 
         {problem ? (
           <div role="alert" className="flex flex-wrap items-center gap-3">
-            {problem.kind === 'exists' ? (
-              <>
-                <p>{problem.label} is already in this study.</p>
-                {problem.nodeId ? (
-                  <button
-                    type="button"
-                    onClick={() => problem.nodeId && onShow(problem.nodeId)}
-                    className="underline"
-                  >
-                    Show it
-                  </button>
-                ) : null}
-              </>
-            ) : (
-              <>
-                <p>{problem.text}</p>
-                {problem.retry ? (
-                  <button type="button" onClick={() => void submit(true)} className="underline">
-                    Retry
-                  </button>
-                ) : null}
-              </>
-            )}
+            <p>{problem.text}</p>
+            {problem.retry ? (
+              <button type="button" onClick={() => void submit(true)} className="underline">
+                Retry
+              </button>
+            ) : null}
           </div>
         ) : null}
 

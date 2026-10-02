@@ -609,23 +609,41 @@ describe('buildOpenApiDocument', () => {
           ),
         },
         '/studies/{studyId}/nodes': {
-          post: noteOperation(
-            [
-              'REFERENCE_NOT_FOUND',
-              'SCRIPTURE_NODE_EXISTS',
-              'never fetched',
-              'The server sets origin',
-              'scripture_added_to_graph',
-              'NODE_LIMIT_EXCEEDED',
-              'The response carries no text',
-              ...MUTATION,
-            ],
-            [idempotencyHeader, studyId],
-            201,
-            'The new node, without its text',
-            'CreateNodeResponse',
-            'CreateNodeRequest',
-          ),
+          post: {
+            ...noteOperation(
+              [
+                'REFERENCE_NOT_FOUND',
+                'focused_existing',
+                'contentRevision unchanged',
+                'scripture_revisited',
+                'explicit_duplicate',
+                'canonicalNodeId',
+                'never fetched',
+                'The server sets origin',
+                'scripture_added_to_graph',
+                'NODE_LIMIT_EXCEEDED',
+                'The response carries no text',
+                ...MUTATION,
+              ],
+              [idempotencyHeader, studyId],
+              201,
+              'The new node, without its text',
+              'CreateNodeResponse',
+              'CreateNodeRequest',
+            ),
+            responses: {
+              200: {
+                description:
+                  'focused_existing: the existing canonical Scripture node, without its text',
+                content: json('CreateNodeResponse'),
+              },
+              201: {
+                description: 'The new node, without its text',
+                content: json('CreateNodeResponse'),
+              },
+              default: errorResponse,
+            },
+          },
           get: noteOperation(
             ['oldest first', '160 characters', SAME_404],
             [studyId],

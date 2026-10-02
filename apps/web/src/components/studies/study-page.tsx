@@ -4,7 +4,7 @@ import type { StudyResponse } from '@bible-artisan/contracts';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { NodesSection } from '@/components/nodes/nodes-section';
 import { NotesPanel } from '@/components/notes/notes-panel';
@@ -87,6 +87,8 @@ function StudyDetails({
   // discards it (BIB-22, BIB-23).
   const [unsavedEdits, setUnsavedEdits] = useState(false);
   const [unsavedNote, setUnsavedNote] = useState(false);
+  // `?node=<id>` (BIB-26, e.g. the reader's "Show in study"): an opaque id, selected if listed.
+  const nodeParam = useSearchParams().get('node');
   const showOriginal =
     study.originalQuestion !== null && study.originalQuestion.nodeId !== study.mainQuestion?.nodeId;
   return (
@@ -150,7 +152,7 @@ function StudyDetails({
         <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
       ) : null}
       {/* BIB-25: the study's typed nodes, readable in every state. */}
-      <NodesSection study={study} onReload={onReload} />
+      <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
       <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
       <p className="text-muted">
         The study is saved. The workspace for its graph, thread and summary arrives in a later
