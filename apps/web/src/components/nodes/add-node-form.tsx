@@ -6,28 +6,21 @@ import {
   type CreateNodeResponse,
   MAX_NODE_TEXT_LENGTH,
   MAX_QUESTION_LENGTH,
-  NODE_LIMIT_EXCEEDED,
   NODE_TYPE_NAMES,
-  type NodeSummary,
   OBSERVATION_KIND_NAMES,
   OBSERVATION_KINDS,
   type ObservationKind,
   type ReferenceCandidate,
-  REFERENCE_NOT_FOUND,
-  SCRIPTURE_NODE_EXISTS,
   type ScriptureReference,
-  STUDY_ARCHIVED,
   STUDY_NODE_TYPES,
-  STUDY_TRASHED,
   type StudyNodeType,
   type StudyResponse,
 } from '@bible-artisan/contracts';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
-import { ApiError } from '@/lib/api-client';
+import { addProblemText, isLifecycleRefusal, useAddNode } from '@/lib/add-node';
 import { classifyError, REFERENCE_ERROR_COPY } from '@/lib/api-errors';
 import { fetchTranslations, resolveReference, TRANSLATIONS_QUERY_KEY } from '@/lib/bible';
-import { createNode } from '@/lib/nodes';
 import {
   EMPTY_SOURCE,
   type FieldErrors,
@@ -37,12 +30,8 @@ import {
   TextAreaField,
 } from './node-fields';
 
+/** The form's own copy; an add's outcomes and refusals are `NODE_ADD_COPY`'s. */
 export const ADD_NODE_COPY = {
-  conflict: 'The study changed somewhere else, so the node was not added. Press Create again.',
-  unknown: "Couldn't confirm the node was added. Retry won't add it twice.",
-  limit: 'This study holds the most nodes it can (2,000), so the node was not added.',
-  reference: "That passage isn't available in an active translation.",
-  failed: "Couldn't add the node.",
   notReference: "That isn't a Bible reference. Try a book and chapter, for example Rom 9:1.",
   resolveFailed: "Couldn't check the passage. Try again.",
   unresolved: 'Resolve the passage before creating the node.',
@@ -55,30 +44,30 @@ type Passage =
   | { state: 'ambiguous'; candidates: ReferenceCandidate[] }
   | { state: 'invalid'; message: string };
 
-type Problem =
-  | { kind: 'message'; text: string; retry?: boolean }
-  | { kind: 'exists'; label: string; nodeId: string | null };
+interface Problem {
+  text: string;
+  retry?: boolean;
+}
 
 /**
  * The inline Add node form (BIB-25): a Type radio group of the six types, then that type's
  * fields. A Scripture node is made only from a passage the server resolved (never from typed
- * text). Each request is frozen with its Idempotency-Key and resent verbatim after an unknown
- * outcome; a changed draft is a new request with a new key. Everything typed stays on a refusal.
+ * text). Requests go through `useAddNode`: each is frozen with its Idempotency-Key and Retry
+ * resends it verbatim after an unknown outcome; Create is a new request with a new key. Everything typed stays on a refusal.
+ * A passage the study already holds is not a refusal (BIB-26): the server answers
+ * `focused_existing`, and `onCreated` gets every outcome with the passage's label.
  */
 export function AddNodeForm({
   study,
-  nodes,
   onCreated,
   onCancel,
-  onShow,
   onLocked,
   onReload,
 }: {
   study: StudyResponse;
-  nodes: readonly NodeSummary[];
-  onCreated: (created: CreateNodeResponse) => void;
+  /** `label`: the resolved passage's reference label for a Scripture node, else null. */
+  onCreated: (created: CreateNodeResponse, label: string | null) => void;
   onCancel: () => void;
-  onShow: (nodeId: string) => void;
   onLocked: () => void;
   onReload: () => Promise<unknown>;
 }) {
@@ -91,9 +80,9 @@ export function AddNodeForm({
   const [passageText, setPassageText] = useState('');
   const [passage, setPassage] = useState<Passage>({ state: 'unchecked' });
   const [errors, setErrors] = useState<FieldErrors>({});
-  const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<Problem | null>(null);
-  const frozen = useRef<{ json: string; key: string; body: CreateNodeRequest } | null>(null);
+  const add = useAddNode<string | null>(study.id);
+  const { pending } = add;
   const checkedType = useRef<HTMLInputElement>(null);
   const lastCheck = useRef(0);
 
@@ -183,60 +172,38 @@ export function AddNodeForm({
   }
 
   async function submit(retry = false) {
-    if (pending) return;
-    let attempt = frozen.current;
-    if (!retry || attempt === null) {
+    let request: ReturnType<typeof add.send>;
+    if (retry) {
+      // Verbatim: the frozen body, revision and Idempotency-Key, whatever changed since.
+      request = add.retry();
+    } else {
       const body = requestOf();
       if (!body) return;
-      const json = JSON.stringify(body);
-      attempt = attempt?.json === json ? attempt : { json, key: crypto.randomUUID(), body };
-      frozen.current = attempt;
+      const label =
+        body.type === 'scripture' && passage.state === 'resolved' ? passage.reference.label : null;
+      request = add.send(body, label);
     }
-    setPending(true);
+    if (!request) return;
     setProblem(null);
-    try {
-      const created = await createNode(study.id, attempt.body, attempt.key);
-      frozen.current = null;
-      onCreated(created);
-    } catch (error) {
-      const definite = error instanceof ApiError && error.status < 500 && error.status !== 429;
-      if (definite) frozen.current = null;
-      setProblem(problemOf(error, definite));
-    } finally {
-      setPending(false);
+    const result = await request;
+    if (result.ok) {
+      onCreated(result.node, result.meta);
+      return;
     }
-  }
-
-  function problemOf(error: unknown, definite: boolean): Problem {
-    if (!definite || !(error instanceof ApiError)) {
-      return { kind: 'message', text: ADD_NODE_COPY.unknown, retry: true };
-    }
-    if (error.status === 409) {
-      void onReload();
-      return { kind: 'message', text: ADD_NODE_COPY.conflict };
-    }
-    if (error.code === SCRIPTURE_NODE_EXISTS && passage.state === 'resolved') {
-      const existing = nodes.find((node) => node.referenceId === passage.reference.id);
-      return { kind: 'exists', label: passage.reference.label, nodeId: existing?.id ?? null };
-    }
-    if (error.code === NODE_LIMIT_EXCEEDED) return { kind: 'message', text: ADD_NODE_COPY.limit };
-    if (error.code === REFERENCE_NOT_FOUND) {
-      return { kind: 'message', text: ADD_NODE_COPY.reference };
-    }
-    if (error.code === STUDY_ARCHIVED || error.code === STUDY_TRASHED) {
-      // The section turns read-only and says why; this form closes with it.
+    const { problem: reason } = result;
+    if (reason.kind === 'conflict') void onReload();
+    if (isLifecycleRefusal(reason)) {
+      // The section turns read-only, says why and takes focus; this form closes with it.
       onLocked();
-      return { kind: 'message', text: ADD_NODE_COPY.failed };
+      return;
     }
-    if (error.status === 400) {
-      const body = error.body as { fieldErrors?: Record<string, string[]> } | undefined;
-      setErrors(
-        Object.fromEntries(
-          Object.keys(body?.fieldErrors ?? {}).map((key) => [key, 'Check this field.']),
-        ),
-      );
+    if (reason.kind === 'invalid') {
+      setErrors(Object.fromEntries(reason.fields.map((key) => [key, 'Check this field.'])));
     }
-    return { kind: 'message', text: ADD_NODE_COPY.failed };
+    setProblem({
+      text: addProblemText(reason, 'Create'),
+      retry: reason.kind === 'unknown',
+    });
   }
 
   const isStatement = type === 'question' || type === 'conclusion';
@@ -407,29 +374,12 @@ export function AddNodeForm({
 
         {problem ? (
           <div role="alert" className="flex flex-wrap items-center gap-3">
-            {problem.kind === 'exists' ? (
-              <>
-                <p>{problem.label} is already in this study.</p>
-                {problem.nodeId ? (
-                  <button
-                    type="button"
-                    onClick={() => problem.nodeId && onShow(problem.nodeId)}
-                    className="underline"
-                  >
-                    Show it
-                  </button>
-                ) : null}
-              </>
-            ) : (
-              <>
-                <p>{problem.text}</p>
-                {problem.retry ? (
-                  <button type="button" onClick={() => void submit(true)} className="underline">
-                    Retry
-                  </button>
-                ) : null}
-              </>
-            )}
+            <p>{problem.text}</p>
+            {problem.retry ? (
+              <button type="button" onClick={() => void submit(true)} className="underline">
+                Retry
+              </button>
+            ) : null}
           </div>
         ) : null}
 

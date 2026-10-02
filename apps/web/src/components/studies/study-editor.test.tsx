@@ -9,6 +9,7 @@ const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useParams: () => ({ studyId: STUDY_ID }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 const ME = {

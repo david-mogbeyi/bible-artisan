@@ -13,6 +13,7 @@ import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/lib/api-client';
 import { captureAnchor } from '@/lib/anchors';
 import { type ChapterTarget, fetchPassage, passageQueryKey } from '@/lib/bible';
+import { AddToStudy } from './add-to-study';
 import { type CodePointRange, codePointRuns } from './code-point-runs';
 import { ProblemAlert } from './problem-alert';
 import {
@@ -403,7 +404,14 @@ export function BibleReader({
               capturedActions={
                 study
                   ? (captured) => (
-                      <CapturedActions study={study} captured={captured} onAnnounce={announce} />
+                      <CapturedActions
+                        study={study}
+                        captured={captured}
+                        onAnnounce={announce}
+                        extraActions={
+                          <AddToStudy study={study} captured={captured} onAnnounce={announce} />
+                        }
+                      />
                     )
                   : undefined
               }

@@ -74,7 +74,8 @@ const isEditable = (node: NodeResponse): node is EditableNode =>
  * One node's detail (BIB-25): type, origin and status or kind as separate text fields, the full
  * content with its whitespace, and the times. A Scripture node links to the reader in this study
  * (the reader shows the verse text; this panel never does). Observations, thoughts and sources of
- * an active study can be edited; "Saved" is announced only after the server's 200.
+ * an active study can be edited; "Saved" is announced only after the server's 200. A deliberate
+ * duplicate Scripture node (BIB-26) says "Duplicate of <passage>" with "Show the original".
  */
 export function NodeDetail({
   studyId,
@@ -84,6 +85,8 @@ export function NodeDetail({
   onFocused,
   onSaved,
   onLocked,
+  labelOf,
+  onShowNode,
 }: {
   studyId: string;
   nodeId: string;
@@ -92,6 +95,10 @@ export function NodeDetail({
   onFocused: () => void;
   onSaved: () => void;
   onLocked: () => void;
+  /** Another listed node's label, for "Duplicate of …". */
+  labelOf: (nodeId: string) => string | null;
+  /** Selects another node and focuses its heading. */
+  onShowNode: (nodeId: string) => void;
 }) {
   const headingId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
@@ -132,6 +139,13 @@ export function NodeDetail({
       <h3 id={headingId} ref={heading} tabIndex={-1} className="font-serif text-xl">
         {NODE_TYPE_NAMES[data.type]}
       </h3>
+      {data.canonicalNodeId ? (
+        <DuplicateOf
+          canonicalNodeId={data.canonicalNodeId}
+          label={labelOf(data.canonicalNodeId)}
+          onShow={onShowNode}
+        />
+      ) : null}
       <dl className="flex flex-col gap-2">
         <Row label="Type">{NODE_TYPE_NAMES[data.type]}</Row>
         <Row label="Origin">{NODE_ORIGIN_NAMES[data.origin]}</Row>
@@ -151,6 +165,33 @@ export function NodeDetail({
         />
       ) : null}
     </section>
+  );
+}
+
+/** A duplicate's link back to its canonical node, in text (WCAG 1.4.1: never color alone). */
+function DuplicateOf({
+  canonicalNodeId,
+  label,
+  onShow,
+}: {
+  canonicalNodeId: string;
+  label: string | null;
+  onShow: (nodeId: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <p>
+        <span className="rounded border border-ink px-1">Duplicate</span> of{' '}
+        {label ?? 'another node in this study'}
+      </p>
+      <button
+        type="button"
+        onClick={() => onShow(canonicalNodeId)}
+        className="rounded border border-accent px-3 py-1 text-accent"
+      >
+        Show the original
+      </button>
+    </div>
   );
 }
 

@@ -19,7 +19,15 @@ import {
 } from '@bible-artisan/contracts';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
-import { type FormEvent, type KeyboardEvent, useEffect, useId, useRef, useState } from 'react';
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from 'react';
 import {
   annotationListsKey,
   annotationsQueryKey,
@@ -145,7 +153,7 @@ function ColorName({ color }: { color: HighlightColor }) {
  * Whether an outcome is unknown is the shared rule (`isRetryable`): a network failure, a 5xx, a
  * 429 or any envelope marked `retryable: true` keeps the key; a definite refusal drops it.
  */
-function useAttempt() {
+export function useAttempt() {
   const attempt = useRef<{ body: string; key: string } | null>(null);
   return {
     keyFor(body: unknown): string {
@@ -279,7 +287,7 @@ function HighlightFields({
 }
 
 /** After a study change commits: the cached study adopts the new revision. */
-function useStudyRevision(studyId: string) {
+export function useStudyRevision(studyId: string) {
   const queryClient = useQueryClient();
   return (revision: number) =>
     queryClient.setQueryData<StudyResponse>(studyQueryKey(studyId), (old) =>
@@ -288,17 +296,21 @@ function useStudyRevision(studyId: string) {
 }
 
 /**
- * Highlight and Add note for the captured selection (the anchor the server checked). Highlight
- * opens a small form; Add note creates an empty note on this passage in the study.
+ * Highlight, Add note and Add to study for the captured selection (the anchor the server
+ * checked). Highlight opens a small form; Add note creates an empty note on this passage in the
+ * study; Add to study (BIB-26, passed in as `extraActions`) adds the passage's Scripture node.
  */
 export function CapturedActions({
   study,
   captured,
   onAnnounce,
+  extraActions,
 }: {
   study: ReaderStudy;
   captured: CaptureAnchorResponse;
   onAnnounce: (text: string) => void;
+  /** More actions on the selection, in the same row (only while the study is writable). */
+  extraActions?: ReactNode;
 }) {
   const queryClient = useQueryClient();
   const adoptRevision = useStudyRevision(study.id);
@@ -441,6 +453,7 @@ export function CapturedActions({
         >
           Add note
         </button>
+        {extraActions}
       </div>
       {open ? (
         <form

@@ -10,7 +10,6 @@ import {
   nodeLabel,
   type NodeResponse,
   type ScriptureReference,
-  SCRIPTURE_NODE_EXISTS,
   type Source,
   type SourceCitation,
   updateNodeRequestSchema,
@@ -37,18 +36,23 @@ import { StudyRevisionService } from '../study/study-revision.service';
 
 type CreateNodeBody = z.output<typeof createNodeRequestSchema>;
 type UpdateNodeBody = z.output<typeof updateNodeRequestSchema>;
+type ScriptureBody = Extract<CreateNodeBody, { type: 'scripture' }>;
 type NodeValues = NewNodeValues;
 
 /**
  * Node events (BIB-25), one per mutation, ids and enums only: never text, titles, citations,
  * excerpts, URLs or labels (PRD section 23, NFR-PRIV-001). Intended visibility, for BIB-55's
- * column: all thread-visible. `question_created` is the Study module's event with BIB-20's shape
+ * column: all thread-visible. BIB-26: `scripture_added_to_graph` carries `duplicateOfNodeId`
+ * (the canonical node an explicit duplicate copies, else null), and `scripture_revisited`
+ * `{nodeId, referenceId}` records a deliberate Add of a reference the study already holds (the
+ * PRD section 10 "another visit event"; not a reader-open visit, which BIB-55 records). `question_created` is the Study module's event with BIB-20's shape
  * (`branchId`: the initial branch a blank study's first question roots, else null; see
  * `StudyGraphService.ensureInitialBranch`). `source_created`, `thought_updated` and
  * `source_updated` are not in PRD section 13's list and are named by analogy.
  */
 export const NODE_EVENTS = {
   scripture: 'scripture_added_to_graph',
+  scriptureRevisited: 'scripture_revisited',
   question: QUESTION_CREATED,
   observation: 'observation_created',
   thought: 'thought_created',
@@ -97,7 +101,11 @@ function createdEvent(node: StudyNode, branchId: string | null) {
     case 'scripture':
       return {
         eventType: NODE_EVENTS.scripture,
-        payload: { nodeId: node.id, referenceId: node.scriptureReferenceId },
+        payload: {
+          nodeId: node.id,
+          referenceId: node.scriptureReferenceId,
+          duplicateOfNodeId: node.canonicalNodeId,
+        },
       };
     case 'question':
       return {
@@ -182,8 +190,9 @@ export class NodesService {
   /**
    * `POST /studies/:studyId/nodes`. A new node is a study change: `expectedRevision` is the
    * study's, checked first (so of two creates from one revision, one is 409 before any rule) and
-   * bumped. The node cap (`StudyGraphService.addNode`, shared with every node-creating path) and
-   * the duplicate-Scripture guard are checked under the study lock. A question on a study without
+   * bumped. The node cap (`StudyGraphService.addNode`, shared with every node-creating path) is
+   * checked under the study lock, and so is a Scripture reference's canonical node
+   * (`addScripture`). `content_revision` moves only when a node is created. A question on a study without
    * a branch (a blank one) roots its initial branch (`StudyGraphService.ensureInitialBranch`),
    * reported as the event's `branchId`.
    * A Scripture reference is validated before the transaction, as study creation does: reference
@@ -200,20 +209,80 @@ export class NodesService {
     if (body.type === 'scripture') await this.requireReference(body.referenceId);
     return this.mutations.execute(ownerId, mutation, {
       studyId,
-      bumpsContentRevision: true,
+      // A focused existing Scripture node changes no content (PRD section 24); every created
+      // node bumps it below.
+      bumpsContentRevision: false,
       work: async (m) => {
         const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
-        if (body.type === 'scripture') await requireNewScripture(m, body.referenceId);
+        if (body.type === 'scripture') return this.addScripture(m, body, studyRevision);
         const node = await this.graph.addNode(m, newNodeValues(body));
+        m.bumpContentRevision();
         const branchId = node.type === 'question' ? await this.graph.ensureInitialBranch(m) : null;
         const event = await m.appendEvent(createdEvent(node, branchId));
         const response: CreateNodeResponse = {
           ...mutationBody(node, event.sequence),
           studyRevision,
+          outcome: 'created',
+          canonicalNodeId: null,
         };
         return { status: 201, body: response };
       },
     });
+  }
+
+  /**
+   * The Scripture branch of `create` (BIB-26; FR-GRAPH-002/003), under the study lock after the
+   * revision check. The study's live canonical node for this exact reference (found from the
+   * locked study and owner, never from a client-supplied id) decides the outcome:
+   * - none: a new canonical node, 201 `created` (whatever the policy, so a stale "Add a separate
+   *   copy" never fails);
+   * - one, `focus_existing` (the default): nothing is written to `study_node` and
+   *   `content_revision` stays; one `scripture_revisited` event records the deliberate return,
+   *   200 `focused_existing` with the existing node's fields;
+   * - one, `explicit_duplicate`: a new node naming it as `canonical_node_id` (subject to the
+   *   node cap like any node), 201 `explicit_duplicate`.
+   * The partial unique index is the database backstop; the study lock means this path never
+   * trips it, so a violation would be a bug and stays a 500.
+   */
+  private async addScripture(m: StudyMutation, body: ScriptureBody, studyRevision: number) {
+    // Only live canonical rows count. When a canonical node is soft-deleted, promoting its oldest
+    // live duplicate to canonical is BIB-31's responsibility (node delete/restore), not this path's.
+    const canonical = await StudyNode.findOne({
+      where: {
+        studyId: m.studyId,
+        ownerId: m.ownerId,
+        type: 'scripture',
+        scriptureReferenceId: body.referenceId,
+        canonicalNodeId: null,
+        deletedAt: null,
+      },
+    });
+    if (canonical && body.duplicatePolicy !== 'explicit_duplicate') {
+      const event = await m.appendEvent({
+        eventType: NODE_EVENTS.scriptureRevisited,
+        payload: { nodeId: canonical.id, referenceId: body.referenceId },
+      });
+      const response: CreateNodeResponse = {
+        ...mutationBody(canonical, event.sequence),
+        studyRevision,
+        outcome: 'focused_existing',
+        canonicalNodeId: null,
+      };
+      return { status: 200, body: response };
+    }
+    const node = await this.graph.addNode(m, {
+      ...newNodeValues(body),
+      canonicalNodeId: canonical?.id ?? null,
+    });
+    m.bumpContentRevision();
+    const event = await m.appendEvent(createdEvent(node, null));
+    const response: CreateNodeResponse = {
+      ...mutationBody(node, event.sequence),
+      studyRevision,
+      outcome: canonical ? 'explicit_duplicate' : 'created',
+      canonicalNodeId: node.canonicalNodeId,
+    };
+    return { status: 201, body: response };
   }
 
   /**
@@ -285,6 +354,7 @@ export class NodesService {
         status: node.questionStatus ?? node.conclusionStatus,
         observationKind: node.observationKind,
         referenceId: node.scriptureReferenceId,
+        canonicalNodeId: node.canonicalNodeId,
         revision: node.revision,
         createdAt: node.createdAt.toISOString(),
         updatedAt: node.updatedAt.toISOString(),
@@ -299,6 +369,7 @@ export class NodesService {
       id: node.id,
       studyId: node.studyId,
       origin: node.origin,
+      canonicalNodeId: node.canonicalNodeId,
       revision: node.revision,
       createdAt: node.createdAt.toISOString(),
       updatedAt: node.updatedAt.toISOString(),
@@ -415,22 +486,4 @@ async function lockedNode(m: StudyMutation, nodeId: string, expectedRevision: nu
   if (!node) throw new NotFoundError();
   if (node.revision !== expectedRevision) throw new RevisionConflictError(node.revision);
   return node;
-}
-
-/**
- * At most one live Scripture node per reference in a study, checked under the study lock. A
- * placeholder for BIB-26's canonical dedupe, which replaces this refusal with "focus existing".
- * Overlapping ranges, and the same range in another edition, are other references.
- */
-async function requireNewScripture(m: StudyMutation, referenceId: string): Promise<void> {
-  const existing = await StudyNode.count({
-    where: {
-      studyId: m.studyId,
-      ownerId: m.ownerId,
-      deletedAt: null,
-      type: 'scripture',
-      scriptureReferenceId: referenceId,
-    },
-  });
-  if (existing > 0) throw new NodeRuleError(SCRIPTURE_NODE_EXISTS);
 }

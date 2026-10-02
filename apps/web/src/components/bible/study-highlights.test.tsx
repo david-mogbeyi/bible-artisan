@@ -5,9 +5,11 @@ import type {
   CaptureAnchorResponse,
   ScriptureAnchor,
 } from '@bible-artisan/contracts';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chapter, OTHER_TRANSLATION, TRANSLATION } from '@/test/bible-fixtures';
+import { NODE_ADD_COPY } from '@/lib/add-node';
 import { studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { BibleReader } from './bible-reader';
@@ -137,19 +139,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const readerElement = (study: ReaderStudy | null) => (
+  <BibleReader
+    translations={[TRANSLATION, OTHER_TRANSLATION]}
+    editionId={TRANSLATION.id}
+    referenceId={PASSAGE_ID}
+    onOpenChapter={vi.fn()}
+    onOpenReference={vi.fn()}
+    onChangeEdition={vi.fn()}
+    focusRequest={null}
+    study={study}
+  />
+);
+
 async function renderReader(study: ReaderStudy | null = STUDY) {
-  const view = renderWithQuery(
-    <BibleReader
-      translations={[TRANSLATION, OTHER_TRANSLATION]}
-      editionId={TRANSLATION.id}
-      referenceId={PASSAGE_ID}
-      onOpenChapter={vi.fn()}
-      onOpenReference={vi.fn()}
-      onChangeEdition={vi.fn()}
-      focusRequest={null}
-      study={study}
-    />,
-  );
+  const view = renderWithQuery(readerElement(study));
   await screen.findByRole('heading', { name: 'Psalms 3' });
   return view;
 }
@@ -481,5 +485,253 @@ describe('highlights in the reader (BIB-24)', () => {
       highlight: screen.queryByRole('button', { name: 'Highlight' }),
       requests: requests.filter((r) => r.route.includes('/annotations')),
     }).toStrictEqual({ region: null, highlight: null, requests: [] });
+  });
+});
+
+describe('Add to study in the reader (BIB-26)', () => {
+  const NODES = `POST /studies/${STUDY_ID}/nodes`;
+  const NODE_ID = 'eeeeeeee-2222-4333-8444-555555555555';
+  const COPY_ID = 'ffffffff-2222-4333-8444-555555555555';
+  const nodePosts = () => requests.filter((r) => r.route === NODES);
+  const answer = (status: number, overrides: Record<string, unknown>) =>
+    jsonResponse(status, {
+      id: NODE_ID,
+      studyId: STUDY_ID,
+      type: 'scripture',
+      origin: 'scripture',
+      revision: 1,
+      referenceId: ref(3).id,
+      createdAt: T,
+      updatedAt: T,
+      lastEventSequence: '9',
+      studyRevision: 8,
+      outcome: 'created',
+      canonicalNodeId: null,
+      ...overrides,
+    });
+
+  /** Ticks verse 3, captures it, and returns the focused Add to study button. */
+  let view: Awaited<ReturnType<typeof renderReader>>;
+  /** The same reader, now given `study` (e.g. a revision that moved elsewhere). */
+  const rerenderReader = (study: ReaderStudy) =>
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>{readerElement(study)}</QueryClientProvider>,
+    );
+
+  async function captureVerse3() {
+    reply(LIST, jsonResponse(200, { items: [] }));
+    view = await renderReader();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 3' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Capture' }));
+    const button = await screen.findByRole('button', { name: 'Add to study' });
+    button.focus();
+    return button;
+  }
+
+  it('adds the captured passage by keyboard, announces it and links to the node in the study', async () => {
+    reply(NODES, answer(201, {}));
+    const button = await captureVerse3();
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('status'))).toContain('Added Psalms 3:3 to the study.'),
+    );
+    expect(document.activeElement).toBe(button);
+    expect(screen.getByRole('link', { name: 'Show in study' }).getAttribute('href')).toBe(
+      `/studies/${STUDY_ID}?node=${NODE_ID}`,
+    );
+    expect(nodePosts()).toStrictEqual([
+      {
+        route: NODES,
+        body: { type: 'scripture', referenceId: ref(3).id, expectedRevision: 7 },
+        key: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      },
+    ]);
+  });
+
+  it('says a passage already in the study was focused and its visit recorded, and adds a separate copy on request', async () => {
+    reply(
+      NODES,
+      answer(200, { outcome: 'focused_existing' }),
+      answer(201, {
+        id: COPY_ID,
+        outcome: 'explicit_duplicate',
+        canonicalNodeId: NODE_ID,
+        studyRevision: 9,
+      }),
+    );
+    const button = await captureVerse3();
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('status'))).toContain(
+        'Psalms 3:3 is already in this study. Your visit was recorded.',
+      ),
+    );
+    expect(screen.getByRole('link', { name: 'Show in study' }).getAttribute('href')).toBe(
+      `/studies/${STUDY_ID}?node=${NODE_ID}`,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add a separate copy' }));
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('status'))).toContain('Added a duplicate of Psalms 3:3.'),
+    );
+    expect(document.activeElement).toBe(button);
+    expect(screen.queryByRole('button', { name: 'Add a separate copy' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Show in study' }).getAttribute('href')).toBe(
+      `/studies/${STUDY_ID}?node=${COPY_ID}`,
+    );
+    const [first, second] = nodePosts();
+    expect({
+      bodies: [first?.body, second?.body],
+      newKey: first?.key !== second?.key,
+    }).toStrictEqual({
+      bodies: [
+        { type: 'scripture', referenceId: ref(3).id, expectedRevision: 7 },
+        {
+          type: 'scripture',
+          referenceId: ref(3).id,
+          // The study revision the first Add moved to.
+          expectedRevision: 8,
+          duplicatePolicy: 'explicit_duplicate',
+        },
+      ],
+      newKey: true,
+    });
+  });
+
+  it('after a study conflict reads the study again and asks to press Add to study again, which sends the current revision with a new key', async () => {
+    reply(
+      NODES,
+      jsonResponse(409, {
+        code: 'REVISION_CONFLICT',
+        message: 'Revision conflict',
+        retryable: false,
+        correlationId: 'c',
+        currentRevision: 9,
+      }),
+      answer(200, { outcome: 'focused_existing', studyRevision: 10 }),
+    );
+    reply(
+      `GET /studies/${STUDY_ID}`,
+      jsonResponse(200, {
+        id: STUDY_ID,
+        title: 'Conscience',
+        description: null,
+        lifecycle: 'active',
+        pinned: false,
+        revision: 9,
+        contentRevision: 5,
+        startingReference: null,
+        mainQuestion: null,
+        originalQuestion: null,
+        tags: [],
+        branchId: null,
+        purgeAt: null,
+        createdAt: T,
+      }),
+    );
+    const button = await captureVerse3();
+    fireEvent.click(button);
+    expect(textOf(await screen.findByRole('alert'))).toBe(NODE_ADD_COPY.conflict('Add to study'));
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('status'))).toContain('Your visit was recorded.'),
+    );
+    const [first, second] = nodePosts();
+    expect({
+      revisions: nodePosts().map((p) => (p.body as { expectedRevision: number }).expectedRevision),
+      newKey: first?.key !== second?.key,
+    }).toStrictEqual({ revisions: [7, 9], newKey: true });
+  });
+
+  it('retries an unknown outcome with the same Idempotency-Key and body', async () => {
+    reply(
+      NODES,
+      jsonResponse(503, {
+        code: 'TRANSIENT_CONFLICT',
+        message: 'x',
+        retryable: true,
+        correlationId: 'c',
+      }),
+      answer(201, {}),
+    );
+    const button = await captureVerse3();
+    fireEvent.click(button);
+    const alert = await screen.findByRole('alert');
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('status'))).toContain('Added Psalms 3:3 to the study.'),
+    );
+    const [first, second] = nodePosts();
+    expect([second?.key === first?.key, second?.body]).toStrictEqual([true, first?.body]);
+  });
+
+  it('Retry after a lost "Add a separate copy" response resends the identical body and key after the study moved elsewhere, so no second duplicate', async () => {
+    reply(
+      NODES,
+      answer(200, { outcome: 'focused_existing' }),
+      jsonResponse(503, {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'x',
+        retryable: true,
+        correlationId: 'c',
+      }),
+      answer(201, {
+        id: COPY_ID,
+        outcome: 'explicit_duplicate',
+        canonicalNodeId: NODE_ID,
+        studyRevision: 9,
+      }),
+    );
+    const button = await captureVerse3();
+    fireEvent.click(button);
+    fireEvent.click(await screen.findByRole('button', { name: NODE_ADD_COPY.separateCopy }));
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toContain(NODE_ADD_COPY.unknown);
+    // The study moved somewhere else while the outcome was unknown.
+    rerenderReader({ ...STUDY, revision: 12 });
+    fireEvent.click(
+      within(await screen.findByRole('alert')).getByRole('button', { name: 'Retry' }),
+    );
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('status'))).toContain(NODE_ADD_COPY.duplicate('Psalms 3:3')),
+    );
+    const [, lost, retried] = nodePosts();
+    expect(nodePosts()).toHaveLength(3);
+    expect(lost?.body).toStrictEqual({
+      type: 'scripture',
+      referenceId: ref(3).id,
+      expectedRevision: 8,
+      duplicatePolicy: 'explicit_duplicate',
+    });
+    expect(retried).toStrictEqual(lost);
+  });
+
+  it('says a phrase adds the verse containing it', async () => {
+    reply(LIST, jsonResponse(200, { items: [] }));
+    await renderReader();
+    fireEvent.click(screen.getByRole('button', { name: 'Select a phrase' }));
+    const form = screen.getByRole('form', { name: 'Select a phrase' });
+    fireEvent.click(within(form).getByRole('button', { name: 'Select phrase' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Capture' }));
+    const button = await screen.findByRole('button', { name: 'Add to study' });
+    const hint = document.getElementById(button.getAttribute('aria-describedby') ?? '');
+    expect(textOf(hint)).toBe('Adds Psalms 3:1 (the verse containing your phrase)');
+  });
+
+  it('offers no Add to study in an archived study or outside a study', async () => {
+    reply(LIST, jsonResponse(200, { items: [] }));
+    const view = await renderReader({ ...STUDY, lifecycle: 'archived' });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 3' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Capture' }));
+    await screen.findByText(/This study is archived/);
+    expect(screen.queryByRole('button', { name: 'Add to study' })).toBeNull();
+    view.unmount();
+
+    await renderReader(null);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 3' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Capture' }));
+    await screen.findByText(/Captured\./);
+    expect(screen.queryByRole('button', { name: 'Add to study' })).toBeNull();
+    expect(nodePosts()).toStrictEqual([]);
   });
 });
