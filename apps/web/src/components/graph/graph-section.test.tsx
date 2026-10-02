@@ -287,6 +287,61 @@ describe('GraphSection (BIB-28)', () => {
     expect(saves()).toHaveLength(2);
   });
 
+  it('holds a later move while a conflict is refetching and resending, then saves it on the newer revision', async () => {
+    const conflict = jsonResponse(409, {
+      code: 'REVISION_CONFLICT',
+      message: 'Revision conflict',
+      retryable: false,
+      correlationId: 'x',
+      currentRevision: 7,
+    });
+    patchReplies.push(
+      conflict,
+      jsonResponse(200, { viewRevision: 8, lastEventSequence: '12' }),
+      jsonResponse(200, { viewRevision: 9, lastEventSequence: '13' }),
+    );
+    await openGraph();
+    let answer!: (response: Response) => void;
+    const refetch = new Promise<Response>((resolve) => (answer = resolve));
+    graphReplies.push(
+      () => refetch,
+      () => jsonResponse(200, { ...GRAPH, viewRevision: 9 }),
+    );
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'Enter' });
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowDown' });
+    await waitFor(() => expect(graphReads).toBe(2));
+
+    // Another move while the refetch is still open: its debounce passes, but nothing is sent.
+    fireEvent.keyDown(canvasNode(OBS), { key: 'Enter' });
+    fireEvent.keyDown(canvasNode(OBS), { key: 'ArrowDown' });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
+    expect(saves()).toHaveLength(1);
+
+    act(() => answer(jsonResponse(200, { ...GRAPH, viewRevision: 7 })));
+    await waitFor(() => expect(saves()).toHaveLength(3));
+    expect(saves().map((s) => s.body)).toStrictEqual([
+      { expectedRevision: 5, positions: [{ nodeId: Q, x: 0, y: 5 }] },
+      { expectedRevision: 7, positions: [{ nodeId: Q, x: 0, y: 5 }] },
+      { expectedRevision: 8, positions: [{ nodeId: O, x: 0, y: 205 }] },
+    ]);
+    expect(await screen.findByText('Layout saved')).toBeTruthy();
+  });
+
+  it('stops saying "Layout saved" as soon as a new move is waiting to be saved', async () => {
+    patchReplies.push(
+      jsonResponse(200, { viewRevision: 6, lastEventSequence: '9' }),
+      jsonResponse(200, { viewRevision: 7, lastEventSequence: '10' }),
+    );
+    await openGraph();
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'Enter' });
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowDown' });
+    expect(await screen.findByText('Layout saved')).toBeTruthy();
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowDown' });
+    expect(screen.queryByText('Layout saved')).toBeNull();
+    expect(screen.getByText('Saving layout…')).toBeTruthy();
+    expect(await screen.findByText('Layout saved')).toBeTruthy();
+  });
+
   it('a second conflict in a row keeps the position unsaved and queued, offers Reload, and never says "Layout saved" until it is saved', async () => {
     const conflict = () =>
       jsonResponse(409, {

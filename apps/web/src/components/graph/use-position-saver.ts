@@ -107,75 +107,85 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
     async (first: Frozen, { keepalive = false }: SendOptions = {}): Promise<void> => {
       let request = first;
       let conflictRetried = false;
-      // At most two passes: the request, then one resend after a stale view revision.
-      for (;;) {
-        inFlight.current = true;
-        setStatus({ state: 'saving' });
-        try {
-          const response = await savePositions(studyId, request.body, request.key, { keepalive });
-          inFlight.current = false;
-          acknowledge(response.viewRevision, request.body.positions);
-          if (store.getState().pendingIds.size > 0) await flushRef.current();
-          else setStatus({ state: 'saved' });
-          return;
-        } catch (error) {
-          inFlight.current = false;
-          const ids = request.body.positions.map((p) => p.nodeId);
-          if (error instanceof ApiError && error.status === 409) {
-            if (conflictRetried) {
-              // Still unsaved: queued for the next save (on a fresh revision) until Reload.
-              store.getState().requeue(ids);
-              setStatus({ state: 'conflict' });
-              return;
+      // In flight until this request is fully handled, including a 409/404 refetch and resend, so
+      // a move whose debounce fires meanwhile waits instead of racing on the same view revision.
+      inFlight.current = true;
+      try {
+        return await attempt();
+      } finally {
+        inFlight.current = false;
+      }
+
+      async function attempt(): Promise<void> {
+        // At most two passes: the request, then one resend after a stale view revision.
+        for (;;) {
+          setStatus({ state: 'saving' });
+          try {
+            const response = await savePositions(studyId, request.body, request.key, { keepalive });
+            acknowledge(response.viewRevision, request.body.positions);
+            inFlight.current = false;
+            if (store.getState().pendingIds.size > 0) await flushRef.current();
+            else setStatus({ state: 'saved' });
+            return;
+          } catch (error) {
+            const ids = request.body.positions.map((p) => p.nodeId);
+            if (error instanceof ApiError && error.status === 409) {
+              if (conflictRetried) {
+                // Still unsaved: queued for the next save (on a fresh revision) until Reload.
+                store.getState().requeue(ids);
+                setStatus({ state: 'conflict' });
+                return;
+              }
+              try {
+                await refetchGraph();
+              } catch {
+                store.getState().requeue(ids);
+                setStatus({ state: 'failed' });
+                return;
+              }
+              const local = store.getState().localPositions;
+              const positions = request.body.positions.map((p) => ({ ...p, ...local[p.nodeId] }));
+              request = {
+                body: { expectedRevision: viewRevision(), positions },
+                key: crypto.randomUUID(),
+              };
+              conflictRetried = true;
+              continue;
             }
-            try {
-              await refetchGraph();
-            } catch {
-              store.getState().requeue(ids);
+            if (error instanceof ApiError && error.status === 404) {
+              // A node is gone (or the study is): drop what no longer exists and resend the rest.
+              try {
+                const graph = await refetchGraph();
+                const live = new Set(graph.nodes.map((node) => node.id));
+                const gone = ids.filter((id) => !live.has(id));
+                store.getState().forget(gone);
+                store.getState().requeue(ids.filter((id) => live.has(id)));
+                if (gone.length > 0) {
+                  inFlight.current = false;
+                  if (store.getState().pendingIds.size > 0) await flushRef.current();
+                  else setStatus({ state: 'removed' });
+                  return;
+                }
+              } catch {
+                store.getState().requeue(ids);
+              }
               setStatus({ state: 'failed' });
               return;
             }
-            const local = store.getState().localPositions;
-            const positions = request.body.positions.map((p) => ({ ...p, ...local[p.nodeId] }));
-            request = {
-              body: { expectedRevision: viewRevision(), positions },
-              key: crypto.randomUUID(),
-            };
-            conflictRetried = true;
-            continue;
-          }
-          if (error instanceof ApiError && error.status === 404) {
-            // A node is gone (or the study is): drop what no longer exists and resend the rest.
-            try {
-              const graph = await refetchGraph();
-              const live = new Set(graph.nodes.map((node) => node.id));
-              const gone = ids.filter((id) => !live.has(id));
-              store.getState().forget(gone);
-              store.getState().requeue(ids.filter((id) => live.has(id)));
-              if (gone.length > 0) {
-                if (store.getState().pendingIds.size > 0) await flushRef.current();
-                else setStatus({ state: 'removed' });
-                return;
-              }
-            } catch {
-              store.getState().requeue(ids);
+            if (
+              error instanceof ApiError &&
+              error.status === 422 &&
+              LIFECYCLE_CODES.has(error.code ?? '')
+            ) {
+              setStatus({ state: 'idle' });
+              onLocked();
+              return;
             }
+            if (isRetryable(classifyError(error))) frozen.current = request;
+            else store.getState().requeue(ids);
             setStatus({ state: 'failed' });
             return;
           }
-          if (
-            error instanceof ApiError &&
-            error.status === 422 &&
-            LIFECYCLE_CODES.has(error.code ?? '')
-          ) {
-            setStatus({ state: 'idle' });
-            onLocked();
-            return;
-          }
-          if (isRetryable(classifyError(error))) frozen.current = request;
-          else store.getState().requeue(ids);
-          setStatus({ state: 'failed' });
-          return;
         }
       }
     },
@@ -239,6 +249,10 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
   const save = useCallback(
     (positions: Record<string, XY>, { arrangement = false }: { arrangement?: boolean } = {}) => {
       store.getState().move(positions, { together: arrangement });
+      // Queued is not saved: never leave "Layout saved" up while a move waits for its debounce.
+      setStatus((current) =>
+        current.state === 'failed' || current.state === 'conflict' ? current : { state: 'saving' },
+      );
       if (timer.current) clearTimeout(timer.current);
       if (arrangement) {
         void flush();
