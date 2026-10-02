@@ -12,6 +12,15 @@ import {
 import { StudyPage } from './study-page';
 
 const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
+const EMPTY_GRAPH = {
+  studyId: STUDY_ID,
+  contentRevision: 1,
+  viewRevision: 1,
+  nodes: [],
+  edges: [],
+  branches: [],
+  positions: [],
+};
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useParams: () => ({ studyId: STUDY_ID }),
@@ -87,6 +96,8 @@ beforeEach(() => {
       // The page's notes panel (BIB-23): no notes in these tests.
       if (path.includes('/notes')) return Promise.resolve(jsonResponse(200, { items: [] }));
       // The page's Nodes section (BIB-25): no nodes in these tests.
+      // The page's Graph section (BIB-28): an empty graph in these tests.
+      if (path.endsWith('/graph')) return Promise.resolve(jsonResponse(200, EMPTY_GRAPH));
       if (path.includes('/nodes')) return Promise.resolve(jsonResponse(200, { items: [] }));
       const method = init.method ?? 'GET';
       const queue = method === 'GET' ? reads : writes;

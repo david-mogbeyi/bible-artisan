@@ -742,6 +742,39 @@ describe('buildOpenApiDocument', () => {
             'EdgeStateRequest',
           ),
         },
+        '/studies/{studyId}/graph': {
+          get: noteOperation(
+            [
+              'one transaction',
+              'GET /nodes',
+              'without its note',
+              'viewRevision',
+              'Library-independent',
+              SAME_404,
+            ],
+            [studyId],
+            200,
+            "The study's graph",
+            'GraphResponse',
+          ),
+        },
+        '/studies/{studyId}/positions': {
+          patch: noteOperation(
+            [
+              '1-100 live nodes',
+              'view revision',
+              'contentRevision never move',
+              'Only the sent nodes change',
+              'node_position_saved',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId],
+            200,
+            'The new view revision',
+            'SavePositionsResponse',
+            'SavePositionsRequest',
+          ),
+        },
         '/bible/translations': {
           get: {
             description:
@@ -902,6 +935,9 @@ describe('buildOpenApiDocument', () => {
       'EdgeStateRequest',
       'EdgeMutationResponse',
       'EdgeListResponse',
+      'GraphResponse',
+      'SavePositionsRequest',
+      'SavePositionsResponse',
       'NoteBlock',
       'NoteListItem',
     ]);

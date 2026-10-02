@@ -105,6 +105,12 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'study_node_position_study_owner_fk',
+        table: 'study_node_position',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'study_node_study_owner_fk',
         table: 'study_node',
         columns: ['owner_id', 'study_id'],
@@ -113,6 +119,12 @@ describe('schema (composite-key owner isolation)', () => {
       {
         name: 'study_tag_study_owner_fk',
         table: 'study_tag',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
+        name: 'study_view_state_study_owner_fk',
+        table: 'study_view_state',
         columns: ['owner_id', 'study_id'],
         refs: ['owner_id', 'id'],
       },
@@ -851,6 +863,122 @@ describe('schema (composite-key owner isolation)', () => {
         { bind: [studyId], type: QueryTypes.SELECT },
       );
       expect(row).toStrictEqual({ edges: 0, nodes: 0 });
+    });
+  });
+  describe('study_node_position and study_view_state (BIB-28)', () => {
+    async function insertThought(studyId: string, ownerId: string): Promise<string> {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO study_node (id, study_id, owner_id, type, origin, body)
+         VALUES ($1, $2, $3, 'thought', 'user', 'T')`,
+        { bind: [id, studyId, ownerId], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    const insertPosition = (studyId: string, ownerId: string, nodeId: string, x = 0, y = 0) =>
+      db.query(
+        `INSERT INTO study_node_position (study_id, owner_id, node_id, x, y)
+         VALUES ($1, $2, $3, $4, $5)`,
+        { bind: [studyId, ownerId, nodeId, x, y], type: QueryTypes.INSERT },
+      );
+
+    const violation = (code: string, constraint?: string) => ({
+      parent: expect.objectContaining(constraint ? { code, constraint } : { code }),
+    });
+
+    it("refuses a position for another study's node, another owner's node, or naming another owner", async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const own = await insertThought(studyId, owner);
+      const otherStudy = await insertStudy(owner);
+      const elsewhere = await insertThought(otherStudy, owner);
+      const stranger = await insertUser();
+      const strangerStudy = await insertStudy(stranger);
+      const foreign = await insertThought(strangerStudy, stranger);
+      for (const nodeId of [elsewhere, foreign]) {
+        await expect(insertPosition(studyId, owner, nodeId)).rejects.toMatchObject(
+          violation('23503', 'study_node_position_node_fk'),
+        );
+      }
+      await expect(insertPosition(studyId, stranger, own)).rejects.toMatchObject(
+        violation('23503'),
+      );
+      await insertPosition(studyId, owner, own);
+      await expect(insertPosition(studyId, owner, own)).rejects.toMatchObject(
+        violation('23505', 'study_node_position_pkey'),
+      );
+    });
+
+    it('refuses coordinates outside ±1,000,000, NaN and the infinities', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const node = await insertThought(studyId, owner);
+      for (const [x, y] of [
+        [1_000_000.5, 0],
+        [0, -1_000_001],
+        ['NaN', 0],
+        [0, 'Infinity'],
+        ['-Infinity', 0],
+      ] as const) {
+        await expect(
+          db.query(
+            `INSERT INTO study_node_position (study_id, owner_id, node_id, x, y)
+             VALUES ($1, $2, $3, $4::double precision, $5::double precision)`,
+            { bind: [studyId, owner, node, String(x), String(y)], type: QueryTypes.INSERT },
+          ),
+        ).rejects.toMatchObject(violation('23514', 'study_node_position_bounds_check'));
+      }
+      await insertPosition(studyId, owner, node, 1_000_000, -1_000_000);
+    });
+
+    it('keeps one view state per study, refuses one naming another owner, and a revision below 1', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const stranger = await insertUser();
+      const insert = (ownerId: string, revision = 1) =>
+        db.query(
+          `INSERT INTO study_view_state (study_id, owner_id, revision) VALUES ($1, $2, $3)`,
+          { bind: [studyId, ownerId, revision], type: QueryTypes.INSERT },
+        );
+      await expect(insert(stranger)).rejects.toMatchObject(
+        violation('23503', 'study_view_state_study_owner_fk'),
+      );
+      await expect(insert(owner, 0)).rejects.toMatchObject(
+        violation('23514', 'study_view_state_revision_check'),
+      );
+      await insert(owner);
+      await expect(insert(owner)).rejects.toMatchObject(
+        violation('23505', 'study_view_state_study_key'),
+      );
+    });
+
+    it('a hard node delete removes its position; a soft delete keeps it; a study purge removes positions and view state in one statement', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const [a, b, c] = [
+        await insertThought(studyId, owner),
+        await insertThought(studyId, owner),
+        await insertThought(studyId, owner),
+      ];
+      for (const node of [a, b, c]) await insertPosition(studyId, owner, node);
+      await db.query(
+        `INSERT INTO study_view_state (study_id, owner_id, revision) VALUES ($1, $2, 4)`,
+        { bind: [studyId, owner], type: QueryTypes.INSERT },
+      );
+      await db.query(`DELETE FROM study_node WHERE id = $1`, { bind: [a] });
+      await db.query(`UPDATE study_node SET deleted_at = now() WHERE id = $1`, { bind: [b] });
+      const count = async () => {
+        const [row] = await db.query<{ positions: number; viewStates: number }>(
+          `SELECT (SELECT count(*)::int FROM study_node_position WHERE study_id = $1) AS positions,
+                  (SELECT count(*)::int FROM study_view_state WHERE study_id = $1) AS "viewStates"`,
+          { bind: [studyId], type: QueryTypes.SELECT },
+        );
+        return row;
+      };
+      expect(await count()).toStrictEqual({ positions: 2, viewStates: 1 });
+      await db.query(`DELETE FROM study WHERE id = $1`, { bind: [studyId] });
+      expect(await count()).toStrictEqual({ positions: 0, viewStates: 0 });
     });
   });
 });

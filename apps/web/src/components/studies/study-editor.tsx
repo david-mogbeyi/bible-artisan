@@ -23,6 +23,7 @@ import {
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { invalidateGraph } from '@/lib/graph';
 import { ApiError } from '@/lib/api-client';
 import { nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey, updateStudy } from '@/lib/studies';
@@ -330,6 +331,7 @@ export function StudyEditor({
       // branch: refresh the node list (the Nodes section and the Notes "Attach to" select).
       if (attempt.body.mainQuestion !== undefined) {
         void queryClient.invalidateQueries({ queryKey: nodesQueryKey(study.id) });
+        void invalidateGraph(queryClient, study.id);
       }
       const { expectedRevision: _revision, ...sent } = attempt.body;
       const oldBase = latestBase.current;

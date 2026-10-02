@@ -6,11 +6,13 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { GraphSection } from '@/components/graph/graph-section';
 import { NodesSection } from '@/components/nodes/nodes-section';
 import { NotesPanel } from '@/components/notes/notes-panel';
 import { RequireAuth } from '@/components/require-auth';
 import { classifyError } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
+import { GraphViewProvider } from '@/lib/graph-store';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
 import { StudyEditor } from './study-editor';
 import { StudyLifecycleActions } from './study-lifecycle-actions';
@@ -25,8 +27,9 @@ const LOAD_COPY: ProblemCopy = {
  * `/studies/:id` (BIB-19, BIB-20, BIB-22): a minimal page that reads back the study and edits its
  * title, description, main question, pin and tags, so a study can be opened, organized and
  * reloaded. It archives, unarchives, trashes and restores the study; an archived or trashed study
- * stays readable but has no editor. Its typed nodes (BIB-25) and notes (BIB-23) are listed below
- * the editor. The canvas, thread and summary arrive with later tickets. A missing or another user's study, or one past its trash window, shows the same
+ * stays readable but has no editor. Its graph canvas (BIB-28), typed nodes (BIB-25) and notes
+ * (BIB-23) follow the editor; the canvas and the Nodes list share one selection. The thread and
+ * summary arrive with later tickets. A missing or another user's study, or one past its trash window, shows the same
  * neutral unavailable state.
  */
 export function StudyPage() {
@@ -151,12 +154,17 @@ function StudyDetails({
       {study.lifecycle === 'active' ? (
         <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
       ) : null}
-      {/* BIB-25: the study's typed nodes, readable in every state. */}
-      <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
+      <GraphViewProvider>
+        {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide. */}
+        <div className="w-[min(72rem,calc(100vw-2rem))] self-center">
+          <GraphSection study={study} />
+        </div>
+        {/* BIB-25: the study's typed nodes, readable in every state. */}
+        <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
+      </GraphViewProvider>
       <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
       <p className="text-muted">
-        The study is saved. The workspace for its graph, thread and summary arrives in a later
-        release.
+        The study is saved. Its thread and summary arrive in a later release.
       </p>
       <nav aria-label="Study" className="flex flex-wrap gap-4">
         {/* BIB-24: the reader with this study's highlights (opaque ids only in the URL). */}

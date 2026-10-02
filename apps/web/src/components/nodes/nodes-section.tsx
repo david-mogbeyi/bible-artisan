@@ -17,6 +17,8 @@ import {
   scriptureRequest,
   useAddNode,
 } from '@/lib/add-node';
+import { invalidateGraph } from '@/lib/graph';
+import { useGraphView, useGraphViewStore } from '@/lib/graph-store';
 import { listNodes, nodeStateText, nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { AddNodeForm } from './add-node-form';
@@ -51,7 +53,8 @@ const LOAD_COPY: ProblemCopy = {
 
 /**
  * The study's typed graph nodes (BIB-25) as a plain, keyboard-first list with one open node's
- * detail; the canvas (BIB-28) and the full List View (BIB-29) build on the same API later. Each
+ * detail; the canvas (BIB-28) shares its selection, and the full List View (BIB-29) builds on the
+ * same API later. Each
  * entry says its type, origin, and status or kind in words, never by color alone. An active
  * study can add nodes and edit observations, thoughts and sources; an archived or trashed one is
  * read-only. Node text appears only in the page, never in the URL or browser storage.
@@ -72,7 +75,10 @@ export function NodesSection({
 }) {
   const queryClient = useQueryClient();
   const headingId = useId();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Shared with the canvas (BIB-28): the last selected node is the one whose detail is open.
+  const graphView = useGraphViewStore();
+  const selectedId = useGraphView((s) => s.selectedNodeIds.at(-1) ?? null);
+  const selectionSource = useGraphView((s) => s.selectionSource);
   const [adding, setAdding] = useState(false);
   /** The study revision a write was refused at for the study's lifecycle (BIB-22), if any. */
   const [lockedAt, setLockedAt] = useState<number | null>(null);
@@ -115,7 +121,7 @@ export function NodesSection({
   }, [adding]);
 
   const select = (nodeId: string, focus: boolean) => {
-    setSelectedId(nodeId);
+    graphView.getState().select([nodeId], 'list');
     setFocusDetail(focus);
     // The revisit status is about the node it focused: another node drops it.
     setRevisit((current) => (current && current.nodeId !== nodeId ? null : current));
@@ -133,6 +139,7 @@ export function NodesSection({
       old && node.studyRevision > old.revision ? { ...old, revision: node.studyRevision } : old,
     );
     void queryClient.invalidateQueries({ queryKey: nodesQueryKey(study.id) });
+    void invalidateGraph(queryClient, study.id);
     void invalidateLibrary(queryClient);
     setAdding(false);
     select(node.id, true);
@@ -267,7 +274,8 @@ export function NodesSection({
           studyId={study.id}
           nodeId={shownId}
           editable={editable}
-          focusOnLoad={focusDetail}
+          // A node picked on the canvas opens without taking focus from the canvas.
+          focusOnLoad={focusDetail && (selectedId === null || selectionSource === 'list')}
           onFocused={onFocused}
           onSaved={() => setAnnouncement('Saved')}
           onLocked={lock}

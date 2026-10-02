@@ -11,6 +11,8 @@ import { NoteVersion } from './models/note-version.model';
 import { Note } from './models/note.model';
 import { ScriptureReference } from './models/scripture-reference.model';
 import { StudyEdge } from './models/study-edge.model';
+import { StudyNodePosition } from './models/study-node-position.model';
+import { StudyViewState } from './models/study-view-state.model';
 import { StudyBranch } from './models/study-branch.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
@@ -85,6 +87,8 @@ export function createDatabase(
       NoteVersion,
       Annotation,
       StudyEdge,
+      StudyViewState,
+      StudyNodePosition,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

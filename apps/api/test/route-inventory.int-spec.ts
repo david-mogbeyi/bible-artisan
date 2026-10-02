@@ -317,6 +317,22 @@ const ROUTES: Record<string, Access> = {
       test: 'DELETE /v1/studies/:studyId/edges/:edgeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  // Graph snapshot and layout (BIB-28): Bob's calls on Alice's study, absent, malformed and
+  // past-window studies, and Alice's node under his own study.
+  'GET /v1/studies/:studyId/graph': {
+    access: 'private',
+    crossUserTest: {
+      file: 'graph.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/graph gives another user the same neutral 404 as an absent, malformed or past-window study',
+    },
+  },
+  'PATCH /v1/studies/:studyId/positions': {
+    access: 'private',
+    crossUserTest: {
+      file: 'graph.int-spec.ts',
+      test: 'PATCH /v1/studies/:studyId/positions gives another user the same neutral 404 as an absent or malformed study, writing nothing',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

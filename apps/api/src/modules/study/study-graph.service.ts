@@ -48,6 +48,23 @@ export class StudyGraphService {
    * waits for its first question. Callers report the returned id as `branchId` on the event of
    * the change that created it.
    */
+  /**
+   * The study's branches, oldest first (ties by id), for Graph's snapshot (BIB-28). Study owns
+   * `study_branch`, so other modules read it here. The caller has already resolved the study as
+   * the owner's (`StudyAccessService`); both ids are in the filter regardless. Inside a managed
+   * transaction the query joins it.
+   */
+  async listBranches(ownerId: string, studyId: string): Promise<StudyBranch[]> {
+    return StudyBranch.findAll({
+      where: { studyId, ownerId },
+      attributes: ['id', 'rootNodeId', 'createdAt'],
+      order: [
+        ['createdAt', 'ASC'],
+        ['id', 'ASC'],
+      ],
+    });
+  }
+
   async ensureInitialBranch(m: StudyMutation): Promise<string | null> {
     const scope = { studyId: m.studyId, ownerId: m.ownerId };
     if ((await StudyBranch.count({ where: scope })) > 0) return null;

@@ -24,6 +24,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { invalidateGraph } from '@/lib/graph';
 import { ApiError } from '@/lib/api-client';
 import { bibleHref, fetchTranslations, TRANSLATIONS_QUERY_KEY } from '@/lib/bible';
 import { fetchNode, formatNodeTime, nodeQueryKey, nodesQueryKey, updateNode } from '@/lib/nodes';
@@ -389,6 +390,7 @@ function EditNode({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nodeQueryKey(studyId, node.id) }),
         queryClient.invalidateQueries({ queryKey: nodesQueryKey(studyId) }),
+        invalidateGraph(queryClient, studyId),
         // An edit is study activity: the library's "recent" order moves, as after a create.
         invalidateLibrary(queryClient),
       ]);

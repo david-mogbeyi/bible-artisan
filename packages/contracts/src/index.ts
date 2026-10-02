@@ -14,3 +14,4 @@ export * from './note';
 export * from './annotation';
 export * from './node';
 export * from './edge';
+export * from './graph';

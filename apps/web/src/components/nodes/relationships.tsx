@@ -27,6 +27,7 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { type KeyboardEvent, type Ref, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { invalidateGraph } from '@/lib/graph';
 import { ApiError } from '@/lib/api-client';
 import { classifyError, isRetryable } from '@/lib/api-errors';
 import {
@@ -217,6 +218,8 @@ export function Relationships({
       queryClient.invalidateQueries({ queryKey: edgesQueryKey(studyId, edge.sourceNodeId) }),
       queryClient.invalidateQueries({ queryKey: edgesQueryKey(studyId, edge.targetNodeId) }),
       queryClient.invalidateQueries({ queryKey: studyQueryKey(studyId), exact: true }),
+      // The canvas draws every live edge (BIB-28).
+      invalidateGraph(queryClient, studyId),
       invalidateLibrary(queryClient),
     ]);
   }
