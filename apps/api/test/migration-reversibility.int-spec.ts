@@ -31,6 +31,9 @@ const CANONICAL_REFUSED =
 /** BIB-27's typed relationships migration. */
 const EDGE_MIGRATION = '20261002090447_create_study_edge.ts';
 const EDGE_REFUSED = 'study edge drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-28's graph layout migration. */
+const LAYOUT_MIGRATION = '20261002103229_add_graph_layout.ts';
+const LAYOUT_REFUSED = 'graph layout drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'annotation',
@@ -49,7 +52,9 @@ const DOMAIN_TABLES = [
   'study_edge',
   'study_event',
   'study_node',
+  'study_node_position',
   'study_tag',
+  'study_view_state',
   'tag',
   'user',
 ];
@@ -236,12 +241,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-27's typed relationships) is the first
-      // `down` toward the corpus and refuses before anything commits.
+      // No opt-in at all: the newest migration (BIB-28's graph layout) is the first `down`
+      // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: EDGE_REFUSED,
+        message: LAYOUT_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -323,6 +328,69 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies the graph layout (BIB-28) only with the study-data opt-in; both tables and their keys, FKs and CHECKs come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const layoutSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid IN ('study_node_position'::regclass, 'study_view_state'::regclass)
+         UNION ALL
+         SELECT indexname FROM pg_indexes
+          WHERE tablename IN ('study_node_position', 'study_view_state')
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      // A stored layout for the seeded studies' nodes.
+      await db.query(
+        `INSERT INTO study_node_position (study_id, owner_id, node_id, x, y)
+         SELECT study_id, owner_id, id, 10, 20 FROM study_node WHERE owner_id = $1`,
+        { bind: [userId], type: QueryTypes.INSERT },
+      );
+      await db.query(
+        `INSERT INTO study_view_state (study_id, owner_id, revision)
+         SELECT id, owner_id, 2 FROM study WHERE owner_id = $1`,
+        { bind: [userId], type: QueryTypes.INSERT },
+      );
+      const schemaBefore = await layoutSchema();
+      expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'study_node_position_bounds_check',
+        'study_node_position_node_fk',
+        'study_node_position_pkey',
+        'study_node_position_pkey',
+        'study_node_position_study_owner_fk',
+        'study_view_state_pkey',
+        'study_view_state_pkey',
+        'study_view_state_revision_check',
+        'study_view_state_study_key',
+        'study_view_state_study_key',
+        'study_view_state_study_owner_fk',
+      ]);
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(LAYOUT_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: LAYOUT_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, ['study_node_position', 'study_view_state'])).toStrictEqual([
+        'study_node_position',
+        'study_view_state',
+      ]);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['study_node_position', 'study_view_state'])).toStrictEqual([]);
+      expect(await recordedMigrations(db)).toStrictEqual(before.slice(0, -1));
+      await migrator.up();
+      expect(await layoutSchema()).toStrictEqual(schemaBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies typed relationships (BIB-27) only with the study-data opt-in; the table, constraints, indexes and identity trigger come back', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
@@ -366,6 +434,8 @@ describe('migration reversibility', () => {
         'study_edge_target_node_fk',
         'study_edge_type_check',
       ]);
+      // Past BIB-28's step (which refuses first, from latest), the edge migration's own guard refuses.
+      await withStudyDataDropAllowed(() => migrator.down({ to: LAYOUT_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(EDGE_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -698,7 +768,7 @@ describe('migration reversibility', () => {
         'note_version_note_id_version_number_key',
       ]);
       const before = await recordedMigrations(db);
-      // Past BIB-27's, BIB-26's, BIB-25's and BIB-24's steps (which refuse first, from latest), note's own
+      // Past BIB-28's, BIB-27's, BIB-26's, BIB-25's and BIB-24's steps (which refuse first, from latest), note's own
       // guard refuses too.
       await withStudyDataDropAllowed(() => migrator.down({ to: ANNOTATION_MIGRATION }));
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -712,7 +782,8 @@ describe('migration reversibility', () => {
             name !== ANNOTATION_MIGRATION &&
             name !== TYPED_NODES_MIGRATION &&
             name !== CANONICAL_MIGRATION &&
-            name !== EDGE_MIGRATION,
+            name !== EDGE_MIGRATION &&
+            name !== LAYOUT_MIGRATION,
         ),
       );
       expect(

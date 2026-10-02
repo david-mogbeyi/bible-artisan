@@ -17,6 +17,8 @@ import {
   scriptureRequest,
   useAddNode,
 } from '@/lib/add-node';
+import { invalidateGraph } from '@/lib/graph';
+import { useGraphView, useGraphViewStore } from '@/lib/graph-store';
 import { listNodes, nodeStateText, nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { AddNodeForm } from './add-node-form';
@@ -28,6 +30,7 @@ export const NODES_COPY = {
   readOnly: 'This study is read-only, so its nodes are too.',
   locked:
     'This study was archived or moved to the trash somewhere else, so nothing was saved. Reload to see it.',
+  held: "Your edit to this node isn't saved, so it stays open. Save or cancel it to follow the graph selection.",
 } as const;
 
 /** "Duplicate", the text badge a deliberate duplicate Scripture node carries (never color alone). */
@@ -51,7 +54,8 @@ const LOAD_COPY: ProblemCopy = {
 
 /**
  * The study's typed graph nodes (BIB-25) as a plain, keyboard-first list with one open node's
- * detail; the canvas (BIB-28) and the full List View (BIB-29) build on the same API later. Each
+ * detail; the canvas (BIB-28) shares its selection, and the full List View (BIB-29) builds on the
+ * same API later. Each
  * entry says its type, origin, and status or kind in words, never by color alone. An active
  * study can add nodes and edit observations, thoughts and sources; an archived or trashed one is
  * read-only. Node text appears only in the page, never in the URL or browser storage.
@@ -59,6 +63,10 @@ const LOAD_COPY: ProblemCopy = {
  * BIB-26: adding a passage the study already holds selects its node and says so, with "Add a
  * separate copy" for a deliberate duplicate; duplicates carry a "Duplicate" text badge. The page's
  * `?node=<id>` (an opaque id only) selects that node once the list has it, else is ignored.
+ *
+ * BIB-28: a selection change on the canvas (another node, blank space, Escape) never discards an
+ * open edit with unsaved changes: that node's detail stays open, saying so, until it is saved or
+ * cancelled.
  */
 export function NodesSection({
   study,
@@ -72,7 +80,10 @@ export function NodesSection({
 }) {
   const queryClient = useQueryClient();
   const headingId = useId();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Shared with the canvas (BIB-28): the last selected node is the one whose detail is open.
+  const graphView = useGraphViewStore();
+  const selectedId = useGraphView((s) => s.selectedNodeIds.at(-1) ?? null);
+  const selectionSource = useGraphView((s) => s.selectionSource);
   const [adding, setAdding] = useState(false);
   /** The study revision a write was refused at for the study's lifecycle (BIB-22), if any. */
   const [lockedAt, setLockedAt] = useState<number | null>(null);
@@ -80,6 +91,8 @@ export function NodesSection({
   const [focusDetail, setFocusDetail] = useState(initialNodeId !== null);
   const [announcement, setAnnouncement] = useState('');
   const [revisit, setRevisit] = useState<Revisit | null>(null);
+  /** The open detail's edit holds unsaved changes (NodeDetail's `onUnsavedChange`). */
+  const [detailUnsaved, setDetailUnsaved] = useState(false);
   const addButton = useRef<HTMLButtonElement>(null);
   const returnToAdd = useRef(false);
   const lockedAlert = useRef<HTMLDivElement>(null);
@@ -108,6 +121,18 @@ export function NodesSection({
     queryFn: () => listNodes(study.id),
   });
 
+  // The `?node=` node becomes the shared selection once the list has it, unless something was
+  // picked first. Only once: clearing the selection later never brings it back.
+  const initialApplied = useRef(false);
+  useEffect(() => {
+    if (initialApplied.current || !initialNodeId || !nodes.data) return;
+    initialApplied.current = true;
+    if (graphView.getState().selectedNodeIds.length > 0) return;
+    if (nodes.data.items.some((node) => node.id === initialNodeId)) {
+      graphView.getState().select([initialNodeId], 'list');
+    }
+  }, [graphView, initialNodeId, nodes.data]);
+
   useEffect(() => {
     if (adding || !returnToAdd.current) return;
     returnToAdd.current = false;
@@ -115,7 +140,7 @@ export function NodesSection({
   }, [adding]);
 
   const select = (nodeId: string, focus: boolean) => {
-    setSelectedId(nodeId);
+    graphView.getState().select([nodeId], 'list');
     setFocusDetail(focus);
     // The revisit status is about the node it focused: another node drops it.
     setRevisit((current) => (current && current.nodeId !== nodeId ? null : current));
@@ -133,6 +158,7 @@ export function NodesSection({
       old && node.studyRevision > old.revision ? { ...old, revision: node.studyRevision } : old,
     );
     void queryClient.invalidateQueries({ queryKey: nodesQueryKey(study.id) });
+    void invalidateGraph(queryClient, study.id);
     void invalidateLibrary(queryClient);
     setAdding(false);
     select(node.id, true);
@@ -158,9 +184,13 @@ export function NodesSection({
   }
 
   const items = nodes.data?.items ?? [];
-  // Until the user picks a node, the `?node=` one is selected once the list has it.
-  const shownId =
-    selectedId ?? (items.some((node) => node.id === initialNodeId) ? initialNodeId : null);
+  // The open detail follows the selection, except that a canvas selection change keeps a detail
+  // with an unsaved edit open (`held`) until the edit is saved or cancelled.
+  const [openId, setOpenId] = useState<string | null>(selectedId);
+  const held =
+    openId !== null && openId !== selectedId && detailUnsaved && selectionSource === 'canvas';
+  if (openId !== selectedId && !held) setOpenId(selectedId);
+  const shownId = held ? openId : selectedId;
   const labelOf = (nodeId: string) => items.find((node) => node.id === nodeId)?.label ?? null;
 
   return (
@@ -261,13 +291,19 @@ export function NodesSection({
         </ul>
       )}
 
+      {held ? (
+        <p role="status" className="text-sm">
+          {NODES_COPY.held}
+        </p>
+      ) : null}
       {shownId ? (
         <NodeDetail
           key={shownId}
           studyId={study.id}
           nodeId={shownId}
           editable={editable}
-          focusOnLoad={focusDetail}
+          // A node picked on the canvas opens without taking focus from the canvas.
+          focusOnLoad={focusDetail && (selectedId === null || selectionSource === 'list')}
           onFocused={onFocused}
           onSaved={() => setAnnouncement('Saved')}
           onLocked={lock}
@@ -276,6 +312,7 @@ export function NodesSection({
           nodes={items}
           studyRevision={study.revision}
           onReload={onReload}
+          onUnsavedChange={setDetailUnsaved}
         />
       ) : null}
     </section>

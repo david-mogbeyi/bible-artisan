@@ -24,6 +24,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { invalidateGraph } from '@/lib/graph';
 import { ApiError } from '@/lib/api-client';
 import { bibleHref, fetchTranslations, TRANSLATIONS_QUERY_KEY } from '@/lib/bible';
 import { fetchNode, formatNodeTime, nodeQueryKey, nodesQueryKey, updateNode } from '@/lib/nodes';
@@ -79,6 +80,8 @@ const isEditable = (node: NodeResponse): node is EditableNode =>
  * an active study can be edited; "Saved" is announced only after the server's 200. A deliberate
  * duplicate Scripture node (BIB-26) says "Duplicate of <passage>" with "Show the original".
  * Its Relationships (BIB-27) list, connect, edit and remove this node's typed relationships.
+ * It reports an open edit with unsaved changes (`onUnsavedChange`), so the section keeps it open
+ * when the canvas selection moves away (BIB-28).
  */
 export function NodeDetail({
   studyId,
@@ -93,6 +96,7 @@ export function NodeDetail({
   nodes,
   studyRevision,
   onReload,
+  onUnsavedChange,
 }: {
   studyId: string;
   nodeId: string;
@@ -111,6 +115,8 @@ export function NodeDetail({
   studyRevision: number;
   /** Re-reads the study after a connect refused for a stale study revision. */
   onReload: () => Promise<unknown>;
+  /** Told whether an open edit holds changes not yet saved (a changed draft or a save pending). */
+  onUnsavedChange?: (unsaved: boolean) => void;
 }) {
   const headingId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
@@ -174,6 +180,7 @@ export function NodeDetail({
           onSaved={onSaved}
           onLocked={onLocked}
           refetch={() => node.refetch()}
+          onUnsavedChange={onUnsavedChange}
         />
       ) : null}
       <Relationships
@@ -312,12 +319,14 @@ function EditNode({
   onSaved,
   onLocked,
   refetch,
+  onUnsavedChange,
 }: {
   studyId: string;
   node: EditableNode;
   onSaved: () => void;
   onLocked: () => void;
   refetch: () => Promise<unknown>;
+  onUnsavedChange?: (unsaved: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const kindId = useId();
@@ -334,6 +343,12 @@ function EditNode({
   } | null>(null);
   const frozen = useRef<{ json: string; key: string; body: UpdateNodeRequest } | null>(null);
   const returnFocus = useRef(false);
+
+  const unsaved = editing && (pending || JSON.stringify(draft) !== JSON.stringify(draftOf(base)));
+  useEffect(() => {
+    onUnsavedChange?.(unsaved);
+  }, [unsaved, onUnsavedChange]);
+  useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
 
   useEffect(() => {
     if (editing || !returnFocus.current) return;
@@ -389,6 +404,7 @@ function EditNode({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nodeQueryKey(studyId, node.id) }),
         queryClient.invalidateQueries({ queryKey: nodesQueryKey(studyId) }),
+        invalidateGraph(queryClient, studyId),
         // An edit is study activity: the library's "recent" order moves, as after a create.
         invalidateLibrary(queryClient),
       ]);

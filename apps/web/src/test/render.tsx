@@ -1,15 +1,23 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, type RenderResult } from '@testing-library/react';
+import { type queries, render, type RenderResult } from '@testing-library/react';
 import type { ReactElement } from 'react';
+import { GraphViewProvider } from '@/lib/graph-store';
 
-/** Renders with a fresh, non-retrying TanStack Query client. */
+/**
+ * Renders with a fresh, non-retrying TanStack Query client and a fresh canvas view store (the
+ * study page provides one to its Graph and Nodes sections, BIB-28).
+ */
 export function renderWithQuery(ui: ReactElement): RenderResult & { queryClient: QueryClient } {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return {
     queryClient,
-    ...render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>),
+    // As `wrapper`, so a test's own `rerender(<QueryClientProvider …>)` keeps the same tree.
+    ...render<typeof queries>(
+      <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+      { wrapper: GraphViewProvider },
+    ),
   };
 }
 

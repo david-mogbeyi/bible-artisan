@@ -23,6 +23,8 @@ import { Note } from '../src/database/models/note.model';
 import { ScriptureReference } from '../src/database/models/scripture-reference.model';
 import { StudyBranch } from '../src/database/models/study-branch.model';
 import { StudyEdge } from '../src/database/models/study-edge.model';
+import { StudyNodePosition } from '../src/database/models/study-node-position.model';
+import { StudyViewState } from '../src/database/models/study-view-state.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { StudyTag } from '../src/database/models/study-tag.model';
@@ -830,6 +832,66 @@ describe('Sequelize models against the real schema', () => {
     }
     await Study.destroy({ where: { id: study.id } });
     expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it("creates a StudyViewState and StudyNodePositions through the models and reads them back with DB defaults; a position cannot name another study's node or break its bounds (BIB-28)", async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const node = await StudyNode.create({ ...scope, ...THOUGHT });
+    const elsewhere = await StudyNode.create({ studyId: other.id, ownerId: owner.id, ...THOUGHT });
+
+    const viewState = await StudyViewState.create(scope);
+    expect(
+      (await StudyViewState.findByPk(viewState.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      ...scope,
+      revision: 1,
+      createdAt: expect.any(Date),
+      updatedAt: expect.any(Date),
+    });
+
+    await StudyNodePosition.create({ ...scope, nodeId: node.id, x: 12.5, y: -7 });
+    expect(
+      (
+        await StudyNodePosition.findOne({
+          where: { studyId: study.id, nodeId: node.id },
+          rejectOnEmpty: true,
+        })
+      ).get({ plain: true }),
+    ).toStrictEqual({
+      ...scope,
+      nodeId: node.id,
+      x: 12.5,
+      y: -7,
+      updatedAt: expect.any(Date),
+    });
+    await expect(
+      StudyNodePosition.create({ ...scope, nodeId: elsewhere.id, x: 0, y: 0 }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(
+      StudyNodePosition.create({
+        studyId: other.id,
+        ownerId: owner.id,
+        nodeId: node.id,
+        x: 0,
+        y: 0,
+      }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(
+      StudyNodePosition.create({
+        studyId: other.id,
+        ownerId: owner.id,
+        nodeId: elsewhere.id,
+        x: 2e6,
+        y: 0,
+      }),
+    ).rejects.toBeInstanceOf(DatabaseError);
+    await Study.destroy({ where: { id: study.id } });
+    expect(await StudyNodePosition.count({ where: { studyId: study.id } })).toBe(0);
+    expect(await StudyViewState.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('creates an AuthChallenge with only required fields and reads it back with defaults', async () => {

@@ -9,6 +9,7 @@ import {
   type NodeMutationResponse,
   nodeLabel,
   type NodeResponse,
+  type NodeSummary,
   type ScriptureReference,
   type Source,
   type SourceCitation,
@@ -335,6 +336,16 @@ export class NodesService {
    */
   async list(ownerId: string, studyId: string): Promise<NodeListResponse> {
     await this.access.requireOwnedStudy(ownerId, studyId);
+    return { items: await this.liveSummaries(ownerId, studyId) };
+  }
+
+  /**
+   * Every live node of a study the caller has already resolved as the owner's, as list items:
+   * the one mapping `GET /nodes` and `GET /graph` (BIB-28) share, so they cannot drift. Two
+   * statements whatever the node count (the nodes, then one batched reference lookup); inside a
+   * managed transaction both join it.
+   */
+  async liveSummaries(ownerId: string, studyId: string): Promise<NodeSummary[]> {
     const nodes = await StudyNode.findAll({
       where: { studyId, ownerId, deletedAt: null },
       order: [
@@ -345,21 +356,19 @@ export class NodesService {
     const references = await this.references.storedReferences(
       nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
     );
-    return {
-      items: nodes.map((node) => ({
-        id: node.id,
-        type: node.type,
-        origin: node.origin,
-        label: nodeLabel(node, references),
-        status: node.questionStatus ?? node.conclusionStatus,
-        observationKind: node.observationKind,
-        referenceId: node.scriptureReferenceId,
-        canonicalNodeId: node.canonicalNodeId,
-        revision: node.revision,
-        createdAt: node.createdAt.toISOString(),
-        updatedAt: node.updatedAt.toISOString(),
-      })),
-    };
+    return nodes.map((node) => ({
+      id: node.id,
+      type: node.type,
+      origin: node.origin,
+      label: nodeLabel(node, references),
+      status: node.questionStatus ?? node.conclusionStatus,
+      observationKind: node.observationKind,
+      referenceId: node.scriptureReferenceId,
+      canonicalNodeId: node.canonicalNodeId,
+      revision: node.revision,
+      createdAt: node.createdAt.toISOString(),
+      updatedAt: node.updatedAt.toISOString(),
+    }));
   }
 
   /** `GET /studies/:studyId/nodes/:nodeId`: one live node with its full typed content. */

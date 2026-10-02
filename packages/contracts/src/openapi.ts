@@ -75,6 +75,12 @@ import {
   MAX_EDGES_PER_STUDY,
   updateEdgeRequestSchema,
 } from './edge';
+import {
+  graphResponseSchema,
+  MAX_POSITIONS_PER_REQUEST,
+  savePositionsRequestSchema,
+  savePositionsResponseSchema,
+} from './graph';
 import { createStudyRequestSchema, createStudyResponseSchema, studyResponseSchema } from './study';
 import {
   DEFAULT_LIBRARY_LIMIT,
@@ -743,6 +749,29 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/studies/{studyId}/graph': {
+        get: {
+          description: `Returns one consistent snapshot of the study's graph, read in one transaction: every live node (exactly the GET /nodes items), every live edge between live nodes without its note, the study's branches (id and root), the stored positions of live nodes, contentRevision and viewRevision (the layout's revision, 1 before the first position save). Library-independent metadata only. Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam],
+          responses: {
+            200: jsonResponse("The study's graph", 'GraphResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/positions': {
+        patch: {
+          description: `Saves the canvas positions of 1-${MAX_POSITIONS_PER_REQUEST} live nodes of the study, each node once, coordinates finite and within ±1,000,000. expectedRevision is the view revision from GET /graph or the last save (missing 428, stale 409 with currentRevision): positions are presentation, so the study revision and contentRevision never move and a content edit never conflicts with a layout save. Only the sent nodes change. A node that is not a live node of this study is 404 with nothing written. One internal node_position_saved event (ids and counts only). An archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NODE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam],
+          requestBody: jsonBody('SavePositionsRequest'),
+          responses: {
+            200: jsonResponse('The new view revision', 'SavePositionsResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/bible/translations': {
         get: {
           description:
@@ -827,6 +856,9 @@ function buildDocument(): OpenApiDocument {
         EdgeStateRequest: toInputSchema(edgeStateRequestSchema),
         EdgeMutationResponse: toSchema(edgeMutationResponseSchema),
         EdgeListResponse: toSchema(edgeListResponseSchema),
+        GraphResponse: toSchema(graphResponseSchema),
+        SavePositionsRequest: toInputSchema(savePositionsRequestSchema),
+        SavePositionsResponse: toSchema(savePositionsResponseSchema),
         // Filled while the entries above were converted.
         ...hoisted,
       },

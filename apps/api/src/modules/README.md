@@ -122,6 +122,45 @@ return this.mutations.execute(ownerId, mutation, {
   through `m` after it: a programming error, 500, everything rolled back. Not allowed in `create`.
   Writes that bypass `m` cannot be tracked, so an unchanged work must not make any.
 
+### A presentation revision (BIB-28): checking a row that is not the study
+
+Some study state is presentation, not content: the graph layout. Its saves must still be
+revision-safe, idempotent, lifecycle-guarded and recorded (rules 3-4), but must never move the
+study's revision or `content_revision`, or a drag in one tab would 409 a note save in another.
+No pipeline extension is needed for that: give the presentation state its own revisioned row and
+check _that_ row.
+
+```ts
+return this.mutations.execute(ownerId, mutation, {
+  studyId,
+  bumpsContentRevision: false,                  // presentation never bumps content
+  work: async (m) => {
+    const row = (await StudyViewState.findOne({ where: { studyId: m.studyId, ownerId: m.ownerId } }))
+      ?? (await m.createChild(StudyViewState, {}));            // first save: revision 1, under the lock
+    const view = await m.updateWithExpectedRevision(StudyViewState, {   // 404 / 409 currentRevision
+      id: row.id, expectedRevision, values: {},
+    });
+    …                                                          // the presentation write
+    const event = await m.appendEvent({ eventType: 'node_position_saved', payload: { … } });
+    return { status: 200, body: { viewRevision: view.revision, lastEventSequence: event.sequence } };
+  },
+});
+```
+
+- `updateWithExpectedRevision` already accepts any study-scoped child with `id` and `revision`,
+  and only `Study` itself moves `study.revision`. With `bumpsContentRevision: false` and no
+  `m.bumpContentRevision()`, the pipeline writes only `last_event_sequence` and `last_activity_at`
+  (positions are deliberate work on the study, so the library's "recent" order follows them).
+- The lazily created row needs no `ON CONFLICT`: every mutation of the study queues on the study
+  row lock first, so two first saves serialize (the second finds the row, then 409s). The unique
+  key is the backstop. A stale first save rolls the created row back with everything else.
+- The 409's `currentRevision` is the presentation row's revision, and the client resends against
+  it. Reads that pair rows with that revision (`GET /graph`) run in one REPEATABLE READ, read-only
+  transaction so both describe one moment.
+- Tested in `test/graph.int-spec.ts`: study revision, content revision, nodes and edges unchanged
+  by a save; a content edit with a revision held from before the save succeeds; two concurrent
+  first saves give one 200 and one 409; a snapshot read interleaved with a save is consistent.
+
 ### Creating a study (BIB-19): `MutationService.create`
 
 A new study has no row to lock and no revision a client could have seen, so creation has its own

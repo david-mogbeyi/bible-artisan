@@ -31,6 +31,21 @@ export class StudyGraphService {
   }
 
   /**
+   * The study's branches, oldest first (ties by id), for Graph's snapshot (BIB-28). The caller
+   * has already resolved the study as the owner's; both ids are in the filter regardless.
+   */
+  async listBranches(ownerId: string, studyId: string): Promise<StudyBranch[]> {
+    return StudyBranch.findAll({
+      where: { studyId, ownerId },
+      attributes: ['id', 'rootNodeId', 'createdAt'],
+      order: [
+        ['createdAt', 'ASC'],
+        ['id', 'ASC'],
+      ],
+    });
+  }
+
+  /**
    * Creates the study's initial branch if it has none yet, and returns its id (null when a branch
    * already exists or there is nothing to root one at). PRD section 10, as BIB-19 decided it: the
    * initial branch is rooted at the study's first question, else at its passage. Precisely:

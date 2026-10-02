@@ -1593,6 +1593,87 @@ describe('content-redacted operational logs', () => {
     await expectLogged(removed, { method: 'DELETE', route: itemRoute, status: 200 });
   });
 
+  it('logs the graph snapshot and position saves (BIB-28) without coordinates, labels, ids or keys, on success and on refusals', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ blank: true })
+      .expect(201);
+    const graphStudyId = track((created.body as { studyId: string }).studyId);
+    const graphRoute = '/v1/studies/:studyId/graph';
+    const positionsRoute = '/v1/studies/:studyId/positions';
+    const send = (method: 'get' | 'post' | 'patch', path: string, body?: object) => {
+      const req = withPrivateChannels(http()[method](`${path}${query()}`), cookie).set(
+        'Idempotency-Key',
+        track(randomUUID()),
+      );
+      return body ? req.send(body) : req;
+    };
+    const node = await send('post', `/v1/studies/${graphStudyId}/nodes`, {
+      expectedRevision: 1,
+      type: 'thought',
+      text: track(`SENTINEL-graph-node-${randomUUID()}`),
+    }).expect(201);
+    const nodeId = track((node.body as { id: string }).id);
+    const positions = `/v1/studies/${graphStudyId}/positions`;
+    // Coordinates the owner's own reads return: tracked for the log check only.
+    const x = 734519.25;
+    const y = -412731.5;
+    track(String(x));
+    track(String(Math.abs(y)));
+
+    const saved = await send('patch', positions, {
+      expectedRevision: 1,
+      positions: [{ nodeId, x, y }],
+    });
+    await expectLogged(saved, { method: 'PATCH', route: positionsRoute, status: 200 });
+    const stale = await send('patch', positions, {
+      expectedRevision: 1,
+      positions: [{ nodeId, x, y }],
+    });
+    await expectLogged(
+      stale,
+      { method: 'PATCH', route: positionsRoute, status: 409 },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 2,
+        }),
+      },
+    );
+    const absent = await send('patch', positions, {
+      expectedRevision: 2,
+      positions: [{ nodeId: track(randomUUID()), x, y }],
+    });
+    await expectLogged(
+      absent,
+      { method: 'PATCH', route: positionsRoute, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+    const invalid = await send('patch', positions, {
+      expectedRevision: 2,
+      positions: [{ nodeId, x, y, label: secret('position-label') }],
+    });
+    await expectLogged(
+      invalid,
+      { method: 'PATCH', route: positionsRoute, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: expect.any(Object) as Record<string, string[]>,
+        }),
+      },
+    );
+    const read = await withPrivateChannels(
+      http().get(`/v1/studies/${graphStudyId}/graph${query()}`),
+      cookie,
+    );
+    await expectLogged(read, { method: 'GET', route: graphRoute, status: 200 });
+    expect((read.body as { positions: unknown }).positions).toStrictEqual([{ nodeId, x, y }]);
+  });
+
   it('logs a request the client aborted with no status, never a default 200', async () => {
     const correlationId = randomUUID();
     // The probe holds its transaction for 1 s; the client gives up after 200 ms.
