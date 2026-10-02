@@ -659,7 +659,7 @@ describe('GraphSection (BIB-28)', () => {
       expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
     );
     fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowRight' });
-    expect(await screen.findByText(GRAPH_COPY.readOnly)).toBeTruthy();
+    expect(textOf(await screen.findByRole('alert'))).toContain(GRAPH_COPY.locked);
     expect(screen.queryByRole('button', { name: 'Arrange selection' })).toBeNull();
     expect(canvasNode('Question: What is conscience?, Open').classList.contains('draggable')).toBe(
       false,
@@ -669,7 +669,11 @@ describe('GraphSection (BIB-28)', () => {
 
   it('is read-only below 900 px and says the Nodes list has everything', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
-    await openGraph();
+    graphReplies.push(() => jsonResponse(200, GRAPH));
+    renderWithQuery(<GraphSection study={STUDY} />);
+    // Below 900 px the section opens in List View (BIB-29); the canvas is one press away.
+    fireEvent.click(await screen.findByRole('button', { name: 'Graph', pressed: false }));
+    await screen.findByRole('group', { name: 'Study graph' });
     expect(screen.getByText(GRAPH_COPY.narrow)).toBeTruthy();
     expect(description()).toBe(`${GRAPH_COPY.readOnlyInstructions} ${GRAPH_COPY.narrow}`);
     expect(screen.queryByRole('button', { name: 'Arrange selection' })).toBeNull();

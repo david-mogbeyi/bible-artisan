@@ -54,8 +54,7 @@ const LOAD_COPY: ProblemCopy = {
 
 /**
  * The study's typed graph nodes (BIB-25) as a plain, keyboard-first list with one open node's
- * detail; the canvas (BIB-28) shares its selection, and the full List View (BIB-29) builds on the
- * same API later. Each
+ * detail; the canvas (BIB-28) and the Graph section's List View (BIB-29) share its selection. Each
  * entry says its type, origin, and status or kind in words, never by color alone. An active
  * study can add nodes and edit observations, thoughts and sources; an archived or trashed one is
  * read-only. Node text appears only in the page, never in the URL or browser storage.
@@ -66,7 +65,7 @@ const LOAD_COPY: ProblemCopy = {
  *
  * BIB-28: a selection change on the canvas (another node, blank space, Escape) never discards an
  * open edit with unsaved changes: that node's detail stays open, saying so, until it is saved or
- * cancelled.
+ * cancelled. BIB-29: the same holds for List View's Open and Show and for Back / Forward.
  */
 export function NodesSection({
   study,
@@ -84,11 +83,11 @@ export function NodesSection({
   const graphView = useGraphViewStore();
   const selectedId = useGraphView((s) => s.selectedNodeIds.at(-1) ?? null);
   const selectionSource = useGraphView((s) => s.selectionSource);
+  // Whether the open detail's heading takes focus when it loads (the user asked to see it).
+  const focusDetail = useGraphView((s) => s.focusDetail);
   const [adding, setAdding] = useState(false);
   /** The study revision a write was refused at for the study's lifecycle (BIB-22), if any. */
   const [lockedAt, setLockedAt] = useState<number | null>(null);
-  // Focus the `?node=` node's heading when it opens (the user came to see it).
-  const [focusDetail, setFocusDetail] = useState(initialNodeId !== null);
   const [announcement, setAnnouncement] = useState('');
   const [revisit, setRevisit] = useState<Revisit | null>(null);
   /** The open detail's edit holds unsaved changes (NodeDetail's `onUnsavedChange`). */
@@ -102,10 +101,11 @@ export function NodesSection({
   const editable = study.lifecycle === 'active' && !locked;
   const lock = () => setLockedAt(study.revision);
   /**
-   * A lifecycle refusal from an add control that unmounts with it (the Add node form, "Add a
-   * separate copy"): the section-level alert says why and takes focus, so focus is never dropped.
+   * A lifecycle refusal from a control that unmounts with it (the Add node form, "Add a separate
+   * copy", the Connect dialog): the section-level alert says why and takes focus, so focus is never
+   * dropped.
    */
-  const lockFromAdd = () => {
+  const lockAndAlert = () => {
     focusLockedAlert.current = true;
     lock();
   };
@@ -129,7 +129,8 @@ export function NodesSection({
     initialApplied.current = true;
     if (graphView.getState().selectedNodeIds.length > 0) return;
     if (nodes.data.items.some((node) => node.id === initialNodeId)) {
-      graphView.getState().select([initialNodeId], 'list');
+      // Its heading takes focus when it opens (the user came to see it).
+      graphView.getState().select([initialNodeId], 'list', { focusDetail: true });
     }
   }, [graphView, initialNodeId, nodes.data]);
 
@@ -140,12 +141,11 @@ export function NodesSection({
   }, [adding]);
 
   const select = (nodeId: string, focus: boolean) => {
-    graphView.getState().select([nodeId], 'list');
-    setFocusDetail(focus);
+    graphView.getState().select([nodeId], 'list', { focusDetail: focus });
     // The revisit status is about the node it focused: another node drops it.
     setRevisit((current) => (current && current.nodeId !== nodeId ? null : current));
   };
-  const onFocused = useCallback(() => setFocusDetail(false), []);
+  const onFocused = useCallback(() => graphView.getState().detailFocused(), [graphView]);
 
   function cancelAdd() {
     returnToAdd.current = true;
@@ -184,11 +184,12 @@ export function NodesSection({
   }
 
   const items = nodes.data?.items ?? [];
-  // The open detail follows the selection, except that a canvas selection change keeps a detail
-  // with an unsaved edit open (`held`) until the edit is saved or cancelled.
+  // The open detail follows the selection, except that a selection change in the Graph section
+  // (the canvas, List View, Back / Forward) keeps a detail with an unsaved edit open (`held`) until
+  // the edit is saved or cancelled.
   const [openId, setOpenId] = useState<string | null>(selectedId);
   const held =
-    openId !== null && openId !== selectedId && detailUnsaved && selectionSource === 'canvas';
+    openId !== null && openId !== selectedId && detailUnsaved && selectionSource !== 'list';
   if (openId !== selectedId && !held) setOpenId(selectedId);
   const shownId = held ? openId : selectedId;
   const labelOf = (nodeId: string) => items.find((node) => node.id === nodeId)?.label ?? null;
@@ -238,7 +239,7 @@ export function NodesSection({
           study={study}
           onCreated={created}
           onCancel={cancelAdd}
-          onLocked={lockFromAdd}
+          onLocked={lockAndAlert}
           onReload={onReload}
         />
       ) : null}
@@ -248,7 +249,7 @@ export function NodesSection({
           study={study}
           revisit={revisit}
           onCreated={(node) => created(node, revisit.label)}
-          onLocked={lockFromAdd}
+          onLocked={lockAndAlert}
           onReload={onReload}
         />
       ) : null}
@@ -302,16 +303,18 @@ export function NodesSection({
           studyId={study.id}
           nodeId={shownId}
           editable={editable}
-          // A node picked on the canvas opens without taking focus from the canvas.
-          focusOnLoad={focusDetail && (selectedId === null || selectionSource === 'list')}
+          // A node picked on the canvas opens without taking focus from the canvas, and a held
+          // edit keeps focus where the user is.
+          focusOnLoad={
+            !held && focusDetail && (selectedId === null || selectionSource !== 'canvas')
+          }
           onFocused={onFocused}
           onSaved={() => setAnnouncement('Saved')}
-          onLocked={lock}
+          onLocked={lockAndAlert}
           labelOf={labelOf}
           onShowNode={(nodeId) => select(nodeId, true)}
           nodes={items}
           studyRevision={study.revision}
-          onReload={onReload}
           onUnsavedChange={setDetailUnsaved}
         />
       ) : null}

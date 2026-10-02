@@ -155,9 +155,10 @@ function StudyDetails({
         <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
       ) : null}
       <GraphViewProvider>
-        {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide. */}
+        {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide.
+            BIB-29: or the same graph as List View (the default below 900 px). */}
         <div className="w-[min(72rem,calc(100vw-2rem))] self-center">
-          <GraphSection study={study} />
+          <GraphSection study={study} onReload={onReload} />
         </div>
         {/* BIB-25: the study's typed nodes, readable in every state. */}
         <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />

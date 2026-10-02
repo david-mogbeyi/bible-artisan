@@ -16,6 +16,10 @@ const TYPE_ICONS: Record<StudyNodeType, string> = {
   source: '§',
 };
 
+/** Visible (and a pointer target) only while the node is connectable. */
+const handleClass = (connectable: boolean) =>
+  connectable ? '!h-3 !w-3 !border-canvas !bg-accent' : 'opacity-0';
+
 /** True below 50% zoom: a boolean, so zooming re-renders a node only when it crosses the line. */
 const compactSelector = (state: { transform: [number, number, number] }) =>
   state.transform[2] < 0.5;
@@ -24,10 +28,11 @@ const compactSelector = (state: { transform: [number, number, number] }) =>
  * One study node on the canvas (BIB-28), memoized: it re-renders only when its data object (built
  * once per snapshot), its selection or the 50% zoom line changes. Everything is text: type, label,
  * origin, status or kind, "Duplicate", "Branch root" and "Selected", never color or position
- * alone. Below 50% zoom only the type, label and status show (PRD section 12). Handles exist only
- * so edges can attach; nothing is connectable here (drag-to-connect is BIB-29's).
+ * alone. Below 50% zoom only the type, label, status and "Selected" show (PRD section 12). Edges
+ * attach to the handles; on an editable study at full width they show and start a drag-to-connect
+ * (BIB-29), a pointer shortcut whose keyboard path is "Connect…". They are never in the tab order.
  */
-function GraphNodeComponent({ data, selected }: NodeProps<GraphFlowNode>) {
+function GraphNodeComponent({ data, selected, isConnectable }: NodeProps<GraphFlowNode>) {
   const compact = useStore(compactSelector);
   const { summary, branchRoot } = data;
   const state = nodeStateText(summary);
@@ -37,7 +42,12 @@ function GraphNodeComponent({ data, selected }: NodeProps<GraphFlowNode>) {
         selected ? 'border-2 border-accent' : 'border-ink'
       }`}
     >
-      <Handle type="target" position={Position.Top} isConnectable={false} className="opacity-0" />
+      <Handle
+        type="target"
+        position={Position.Top}
+        isConnectable={isConnectable}
+        className={handleClass(isConnectable)}
+      />
       <p className="flex flex-wrap items-center gap-1 font-medium">
         <span aria-hidden="true">{TYPE_ICONS[summary.type]}</span>
         <span>{NODE_TYPE_NAMES[summary.type]}</span>
@@ -47,18 +57,18 @@ function GraphNodeComponent({ data, selected }: NodeProps<GraphFlowNode>) {
         {state ? <span>· {state}</span> : null}
       </p>
       <p className="line-clamp-2 break-words">{summary.label}</p>
-      {!compact ? (
-        <p className="flex flex-wrap gap-1">
-          {summary.canonicalNodeId ? <span className="rounded border px-1">Duplicate</span> : null}
-          {branchRoot ? <span className="rounded border px-1">Branch root</span> : null}
-          {selected ? <span className="rounded border border-accent px-1">Selected</span> : null}
-        </p>
-      ) : null}
+      <p className="flex flex-wrap gap-1">
+        {!compact && summary.canonicalNodeId ? (
+          <span className="rounded border px-1">Duplicate</span>
+        ) : null}
+        {!compact && branchRoot ? <span className="rounded border px-1">Branch root</span> : null}
+        {selected ? <span className="rounded border border-accent px-1">Selected</span> : null}
+      </p>
       <Handle
         type="source"
         position={Position.Bottom}
-        isConnectable={false}
-        className="opacity-0"
+        isConnectable={isConnectable}
+        className={handleClass(isConnectable)}
       />
     </div>
   );

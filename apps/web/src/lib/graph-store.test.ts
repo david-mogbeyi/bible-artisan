@@ -33,3 +33,27 @@ describe('graph view store: the pending-save queue (BIB-28)', () => {
     expect(store.getState().takePending(100)).toStrictEqual(ids('a', 100));
   });
 });
+
+describe('graph view store: selection history and view mode (BIB-29)', () => {
+  it('adds an entry only when the selection becomes exactly one node, and steps without adding', () => {
+    const store = createGraphViewStore();
+    const live = new Set(['a', 'b', 'c']);
+    store.getState().select(['a'], 'canvas');
+    store.getState().select(['a', 'b'], 'canvas');
+    store.getState().select([], 'canvas');
+    store.getState().select(['b'], 'list');
+    expect(store.getState().history).toStrictEqual({ ids: ['a', 'b'], index: 1 });
+    expect(store.getState().stepHistory(-1, live)).toBe('a');
+    expect(store.getState().selectedNodeIds).toStrictEqual(['a']);
+    expect(store.getState().history).toStrictEqual({ ids: ['a', 'b'], index: 0 });
+    expect(store.getState().stepHistory(-1, live)).toBeNull();
+    expect(store.getState().selectedNodeIds).toStrictEqual(['a']);
+  });
+
+  it('starts in List View below 900 px and in Graph otherwise', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
+    expect(createGraphViewStore().getState().viewMode).toBe('list');
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    expect(createGraphViewStore().getState().viewMode).toBe('graph');
+  });
+});

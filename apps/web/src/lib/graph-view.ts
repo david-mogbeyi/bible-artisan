@@ -24,6 +24,9 @@ export const NODE_HEIGHT = 96;
 const GAP = 40;
 const FALLBACK_COLUMNS = 5;
 
+/** Below this width the canvas is read-only (PRD section 11: no drag editing on phones). */
+export const MIN_EDIT_WIDTH = 900;
+
 /** Arrange works on one atomic save's worth of nodes (PRD section 24 batch maximum). */
 export const MAX_ARRANGE_NODES = 100;
 
@@ -230,9 +233,9 @@ export function nodeAccessibleName(summary: NodeSummary): string {
 const flowNodeByData = new WeakMap<GraphNodeData, GraphFlowNode>();
 
 /**
- * React Flow nodes for the visible nodes. A node whose data, position, selection and movability
- * are unchanged is the same object as last time, so React Flow and the memoized node component
- * skip it: moving or saving one node touches only that node.
+ * React Flow nodes for the visible nodes. A node whose data, position, selection, movability and
+ * connectability are unchanged is the same object as last time, so React Flow and the memoized
+ * node component skip it: moving or saving one node touches only that node.
  */
 export function toFlowNodes(
   nodes: readonly NodeSummary[],
@@ -241,6 +244,8 @@ export function toFlowNodes(
   visible: ReadonlySet<string>,
   selected: ReadonlySet<string>,
   movable: boolean,
+  /** Its handles start a drag-to-connect (BIB-29): editable and wide only. */
+  connectable = false,
 ): GraphFlowNode[] {
   const result: GraphFlowNode[] = [];
   for (const summary of nodes) {
@@ -254,7 +259,8 @@ export function toFlowNodes(
       kept.position.x === position.x &&
       kept.position.y === position.y &&
       kept.selected === isSelected &&
-      kept.draggable === movable
+      kept.draggable === movable &&
+      kept.connectable === connectable
     ) {
       result.push(kept);
       continue;
@@ -266,7 +272,7 @@ export function toFlowNodes(
       data: nodeDataItem,
       selected: isSelected,
       draggable: movable,
-      connectable: false,
+      connectable,
       deletable: false,
       ariaLabel: nodeAccessibleName(summary),
       width: NODE_WIDTH,
@@ -276,6 +282,14 @@ export function toFlowNodes(
     result.push(node);
   }
   return result;
+}
+
+/**
+ * Whether a handle drop may open the Connect dialog (BIB-29): never from a node onto itself
+ * (FR-GRAPH-005; the server refuses self-relationships too).
+ */
+export function isValidConnection(connection: { source: string; target: string }): boolean {
+  return connection.source !== connection.target;
 }
 
 /**

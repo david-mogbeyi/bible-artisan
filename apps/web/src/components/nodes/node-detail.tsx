@@ -95,7 +95,6 @@ export function NodeDetail({
   onShowNode,
   nodes,
   studyRevision,
-  onReload,
   onUnsavedChange,
 }: {
   studyId: string;
@@ -109,12 +108,10 @@ export function NodeDetail({
   labelOf: (nodeId: string) => string | null;
   /** Selects another node and focuses its heading. */
   onShowNode: (nodeId: string) => void;
-  /** The study's live nodes, for the Relationships labels and "Other node" (BIB-27). */
+  /** The study's live nodes, for the Relationships labels and the Connect dialog (BIB-27, BIB-29). */
   nodes: NodeSummary[];
   /** The study's current revision: connecting is a study change. */
   studyRevision: number;
-  /** Re-reads the study after a connect refused for a stale study revision. */
-  onReload: () => Promise<unknown>;
   /** Told whether an open edit holds changes not yet saved (a changed draft or a save pending). */
   onUnsavedChange?: (unsaved: boolean) => void;
 }) {
@@ -190,7 +187,6 @@ export function NodeDetail({
         studyRevision={studyRevision}
         editable={editable}
         onLocked={onLocked}
-        onReload={onReload}
         onShowNode={onShowNode}
       />
     </section>

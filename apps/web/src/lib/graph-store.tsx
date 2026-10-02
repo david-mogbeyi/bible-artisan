@@ -3,7 +3,25 @@
 import type { StudyNodeType } from '@bible-artisan/contracts';
 import { createContext, type ReactNode, useContext, useState } from 'react';
 import { createStore, type StoreApi, useStore } from 'zustand';
-import type { FocusOption, Positions, XY } from './graph-view';
+import { type FocusOption, MIN_EDIT_WIDTH, type Positions, type XY } from './graph-view';
+import {
+  EMPTY_HISTORY,
+  pushSelection,
+  type SelectionHistory,
+  stepBack,
+  stepForward,
+} from './selection-history';
+
+/** Where a selection change came from (see `GraphViewState.selectionSource`). */
+export type SelectionSource = 'canvas' | 'graph' | 'list';
+
+/** The Graph section's two presentations of the same snapshot (BIB-29). */
+export type GraphViewMode = 'graph' | 'list';
+
+/** List below the canvas's editing width, where the canvas is read-only (NFR-ACCESS-003). */
+function defaultViewMode(): GraphViewMode {
+  return typeof window !== 'undefined' && window.innerWidth < MIN_EDIT_WIDTH ? 'list' : 'graph';
+}
 
 /**
  * One study page's canvas interaction state (BIB-28, AGENTS.md: "canvas selection, drafts, and
@@ -12,10 +30,25 @@ import type { FocusOption, Positions, XY } from './graph-view';
  * or browser storage). Saved zoom, filters and selection are BIB-34's.
  */
 export interface GraphViewState {
-  /** Shared by the canvas and the Nodes list; the last one is the node whose detail is open. */
+  /**
+   * Shared by the canvas, List View and the Nodes list, in selection order; the last one is the
+   * node whose detail is open.
+   */
   selectedNodeIds: string[];
-  /** Where the latest selection came from: the list pans the canvas, the canvas never steals focus. */
-  selectionSource: 'canvas' | 'list';
+  /**
+   * Where the latest selection came from. 'list': a pick in the Nodes list, which pans the canvas
+   * to it. 'graph': an explicit pick in the Graph section (List View's Open and Show, Back /
+   * Forward), which pans the canvas to it but, like any graph selection change, keeps an unsaved
+   * node edit open. 'canvas': a canvas click or a List View checkbox, which never pans or steals
+   * focus and keeps an unsaved node edit open.
+   */
+  selectionSource: SelectionSource;
+  /** The selection asked for the open node's detail heading to take focus once it loads. */
+  focusDetail: boolean;
+  /** Back / Forward (BIB-29): every change to exactly one node, from any source. */
+  history: SelectionHistory;
+  /** Canvas or List View (BIB-29). */
+  viewMode: GraphViewMode;
   hiddenTypes: ReadonlySet<StudyNodeType>;
   focus: FocusOption | null;
   /** Positions moved or arranged in this session, over the snapshot's (saved or not yet). */
@@ -25,7 +58,15 @@ export interface GraphViewState {
   /** The latest arrangement's ids still queued: they are saved together, in one request. */
   pendingGroup: ReadonlySet<string>;
 
-  select: (ids: string[], source: 'canvas' | 'list') => void;
+  select: (ids: string[], source: SelectionSource, options?: { focusDetail?: boolean }) => void;
+  /** The detail heading took focus (or no longer should). */
+  detailFocused: () => void;
+  /**
+   * Selects the previous (`-1`) or next (`+1`) history entry still in the snapshot, without adding
+   * one. Returns the selected id, or null at that end.
+   */
+  stepHistory: (delta: -1 | 1, live: ReadonlySet<string>) => string | null;
+  setViewMode: (mode: GraphViewMode) => void;
   toggleType: (type: StudyNodeType) => void;
   setFocus: (focus: FocusOption | null) => void;
   /**
@@ -51,13 +92,40 @@ export function createGraphViewStore(): GraphViewStore {
   return createStore<GraphViewState>()((set, get) => ({
     selectedNodeIds: [],
     selectionSource: 'canvas',
+    focusDetail: false,
+    history: EMPTY_HISTORY,
+    viewMode: defaultViewMode(),
     hiddenTypes: new Set(),
     focus: null,
     localPositions: {},
     pendingIds: new Set(),
     pendingGroup: new Set(),
 
-    select: (ids, source) => set({ selectedNodeIds: ids, selectionSource: source }),
+    select: (ids, source, { focusDetail = false } = {}) =>
+      set(({ history }) => ({
+        selectedNodeIds: ids,
+        selectionSource: source,
+        focusDetail,
+        // Multi-select and clearing neither add an entry nor drop the forward ones.
+        history: ids.length === 1 ? pushSelection(history, ids[0] as string) : history,
+      })),
+    detailFocused: () => set({ focusDetail: false }),
+    stepHistory: (delta, live) => {
+      const { history } = get();
+      const next = (delta === -1 ? stepBack : stepForward)(history, live);
+      set(
+        next.id
+          ? {
+              history: next.history,
+              selectedNodeIds: [next.id],
+              selectionSource: 'graph',
+              focusDetail: false,
+            }
+          : { history: next.history },
+      );
+      return next.id;
+    },
+    setViewMode: (viewMode) => set({ viewMode }),
     toggleType: (type) =>
       set(({ hiddenTypes }) => {
         const next = new Set(hiddenTypes);

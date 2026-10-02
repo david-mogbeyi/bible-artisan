@@ -10,11 +10,15 @@ import {
   edgeMutationResponseSchema,
   type EdgeType,
   IDEMPOTENCY_KEY_HEADER,
+  isSymmetricEdgeType,
   NODE_TYPE_NAMES,
   type StudyNodeType,
   type UpdateEdgeRequest,
 } from '@bible-artisan/contracts';
+import type { QueryClient } from '@tanstack/react-query';
 import { apiFetch } from './api-client';
+import { invalidateGraph } from './graph';
+import { invalidateLibrary, studyQueryKey } from './studies';
 
 /**
  * Typed relationship data access (BIB-27). Notes travel only in request and response bodies; URLs
@@ -80,6 +84,24 @@ export function deleteEdge(
   });
 }
 
+/**
+ * After any relationship change: both endpoints' lists, the study's counters, the graph snapshot
+ * (the canvas and List View draw every live edge) and the library order.
+ */
+export async function invalidateEdgeChange(
+  queryClient: QueryClient,
+  studyId: string,
+  edge: Pick<Edge, 'sourceNodeId' | 'targetNodeId'>,
+): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: edgesQueryKey(studyId, edge.sourceNodeId) }),
+    queryClient.invalidateQueries({ queryKey: edgesQueryKey(studyId, edge.targetNodeId) }),
+    queryClient.invalidateQueries({ queryKey: studyQueryKey(studyId), exact: true }),
+    invalidateGraph(queryClient, studyId),
+    invalidateLibrary(queryClient),
+  ]);
+}
+
 /** "this observation": how a sentence names the node whose detail is open. */
 export function thisNode(type: StudyNodeType): string {
   return `this ${NODE_TYPE_NAMES[type].toLowerCase()}`;
@@ -98,4 +120,20 @@ export function edgeSentence(source: string, type: EdgeType, target: string): st
 /** The other endpoint of `edge`, seen from `nodeId`. */
 export function otherEnd(edge: Pick<Edge, 'sourceNodeId' | 'targetNodeId'>, nodeId: string) {
   return edge.sourceNodeId === nodeId ? edge.targetNodeId : edge.sourceNodeId;
+}
+
+/**
+ * A relationship as one sentence from `node`'s side (BIB-29 List View, as node detail reads it):
+ * "This observation supports Conclusion: …" or "Scripture: Romans 8:16 supports this observation".
+ * A two-way type reads the same from either node.
+ */
+export function sentenceFrom(
+  edge: Pick<Edge, 'sourceNodeId' | 'targetNodeId' | 'type'>,
+  node: { id: string; type: StudyNodeType },
+  otherName: string,
+): string {
+  const incoming = edge.targetNodeId === node.id && !isSymmetricEdgeType(edge.type);
+  return incoming
+    ? edgeSentence(otherName, edge.type, thisNode(node.type))
+    : edgeSentence(thisNode(node.type), edge.type, otherName);
 }
