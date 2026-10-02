@@ -83,11 +83,13 @@ New or changed logs (content-free), correlation behavior, health checks. Write `
 
 ## Testing and verification
 
-| Command or check   | Result          | Coverage/purpose                                               |
-| ------------------ | --------------- | -------------------------------------------------------------- |
-| `pnpm check`       | Passed / failed | format, lint, typecheck, unit, integration (PostgreSQL), build |
-| `git diff --check` | …               | whitespace                                                     |
-| Manual: …          | …               | UI flow, keyboard-only, narrow viewport                        |
+| Command or check           | Result          | Coverage/purpose                                    |
+| -------------------------- | --------------- | --------------------------------------------------- |
+| `pnpm check:local`         | Passed / failed | format, lint, typecheck, unit, build                |
+| `test:integration <specs>` | Passed / failed | affected integration specs (PostgreSQL), named here |
+| CI                         | Pending / green | full integration suite                              |
+| `git diff --check`         | …               | whitespace                                          |
+| Manual: …                  | …               | UI flow, keyboard-only, narrow viewport             |
 
 List the exact commands actually run, with truthful results. Do not claim CI success until the workflow is terminal and green.
 
@@ -142,7 +144,7 @@ Safe application and migration rollback steps, including irreversible data limit
 - [ ] No private content, secrets, or OTPs in logs, analytics, or errors
 - [ ] AI output cannot become canonical without explicit acceptance (when applicable)
 - [ ] UI is keyboard-operable with visible focus, non-drag alternatives, and truthful save states (when applicable)
-- [ ] `pnpm check` and `git diff --check` pass
+- [ ] `pnpm check:local`, affected integration specs, and `git diff --check` pass
 - [ ] Self-review passes A and B complete
 - [ ] No sibling-ticket or unrelated work included
 - [ ] No debug artifacts, broad suppressions, or generated build output committed

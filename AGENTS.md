@@ -27,7 +27,8 @@ packages/contracts  Zod DTO schemas + inferred types shared by API and web. No D
 | `pnpm --filter @bible-artisan/api dev:worker`                   | Run the worker                                                                                         |
 | `pnpm test`                                                     | Unit tests (all packages)                                                                              |
 | `pnpm test:integration`                                         | API integration tests on `DATABASE_URL_TEST` (migrated automatically)                                  |
-| `pnpm check`                                                    | Everything CI runs. Must pass before opening a PR                                                      |
+| `pnpm check`                                                    | Everything CI runs, including the full integration suite                                               |
+| `pnpm check:local`                                              | `pnpm check` minus integration tests. Run it plus the affected integration specs before opening a PR   |
 | `pnpm --filter @bible-artisan/api db:migrate:make <snake_name>` | New migration file                                                                                     |
 | `pnpm db:migrate`                                               | Apply pending migrations (hand-written Sequelize model classes stay in sync by hand — no codegen step) |
 
@@ -63,7 +64,7 @@ Two repository skills live in `.agents/skills/` (canonical, tool-agnostic). The 
 | Step     | Claude Code                   | Codex                     | What it does                                                                                                                                   |
 | -------- | ----------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1. Groom | `/bib-prepare BIB-10`         | `$prepare BIB-10`         | Rewrites the Linear ticket so it's implementation-ready: scope, out-of-scope, reuse, contract, UI states, tests, ACs. Never writes code.       |
-| 2. Build | `/bib-do-ticket <linear url>` | `$do-ticket <linear url>` | Plans, branches (Linear's `gitBranchName`), implements, runs `pnpm check`, commits, opens the PR, moves the ticket to In Review. Never merges. |
+| 2. Build | `/bib-do-ticket <linear url>` | `$do-ticket <linear url>` | Plans, branches (Linear's `gitBranchName`), implements, runs local checks, commits, opens the PR, moves the ticket to In Review. Never merges. |
 
 The Claude commands are prefixed `bib-` because a user-level `do-ticket` skill (the chop-awoof one) would otherwise shadow a project skill with the same name.
 
@@ -73,3 +74,9 @@ Conventions:
 - Commit messages and PR titles use `[BIB-<n>] Imperative summary`. PR bodies include `Closes BIB-<n>`.
 - Build in dependency order: Epic 1 foundation (BIB-9, then BIB-10…BIB-13) first, then BIB-14 (corpus) before any reader, search, or Scripture-node ticket. Epic keys don't match their numbers: BIB-2 is Epic 1 and BIB-1 is Epic 2.
 - Each Given/When/Then acceptance criterion maps to at least one automated test or a recorded manual check.
+
+Running tickets back to back:
+
+- **Groom ahead.** While ticket N is being built, groom ticket N+1. Grooming only edits Linear, so the two can't collide. Start N+1's build only after N is merged.
+- **Local tests.** Before opening a PR, run `pnpm check:local`, `git diff --check`, and only the affected integration specs: `pnpm --filter @bible-artisan/api test:integration <file-substrings>`. "Affected" means the specs for the modules you touched, plus `route-inventory` when routes change, `log-redaction` when new code logs, and `migration-reversibility` and `models` when a migration or model changes. CI runs the full suite. A PR merges only on green CI, and a CI failure is fixed on the same branch.
+- **Review gate before merge, scaled to risk.** Do a full review, and review again after fixes, when the ticket touches owner isolation, migrations or composite FKs, mutation + StudyEvent atomicity, revisions or idempotency, deletion or purge, or anything that could lose user data. For UI-only or read-only tickets, do one lighter pass for correctness and log privacy, and review again only if it found a real defect. Never skip the gate.
