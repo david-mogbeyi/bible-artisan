@@ -14,6 +14,7 @@ import { requireExpectedRevision } from '../../common/revision/expected-revision
 import { parseBody } from '../../common/validation/parse-body';
 import { DATABASE } from '../../database/database.module';
 import type { Database } from '../../database/database';
+import { StudyBranchMember } from '../../database/models/study-branch-member.model';
 import { StudyEdge } from '../../database/models/study-edge.model';
 import { StudyNode } from '../../database/models/study-node.model';
 import { StudyNodePosition } from '../../database/models/study-node-position.model';
@@ -81,6 +82,23 @@ export class GraphService {
           ],
         });
         const branches = await this.studyGraph.listBranches(ownerId, studyId);
+        // Every branch's members in one statement (BIB-60), oldest membership first.
+        const members = await StudyBranchMember.findAll({
+          where: scope,
+          attributes: ['branchId', 'nodeId'],
+          order: [
+            ['createdAt', 'ASC'],
+            ['nodeId', 'ASC'],
+          ],
+        });
+        const membersOf = new Map<string, string[]>();
+        for (const member of members) {
+          // A member whose node was soft-deleted keeps its row (BIB-31's restore); never returned.
+          if (!live.has(member.nodeId)) continue;
+          const list = membersOf.get(member.branchId);
+          if (list) list.push(member.nodeId);
+          else membersOf.set(member.branchId, [member.nodeId]);
+        }
         const positions = await StudyNodePosition.findAll({
           where: scope,
           attributes: ['nodeId', 'x', 'y'],
@@ -107,6 +125,8 @@ export class GraphService {
           branches: branches.map((branch) => ({
             id: branch.id,
             rootNodeId: branch.rootNodeId,
+            memberNodeIds: membersOf.get(branch.id) ?? [],
+            revision: branch.revision,
             createdAt: branch.createdAt.toISOString(),
           })),
           positions: positions

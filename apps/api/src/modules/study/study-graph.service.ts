@@ -10,8 +10,8 @@ import { StudyNode } from '../../database/models/study-node.model';
 export type NewNodeValues = Omit<CreationAttributes<StudyNode>, 'studyId' | 'ownerId'>;
 
 /**
- * The rules every path that adds to a study's graph shares (Study owns `study_node` and
- * `study_branch`), so study creation (BIB-19), a study edit's new main question (BIB-20) and the
+ * The rules every path that adds to a study's graph shares (Study created `study_node` and
+ * `study_branch`; Graph starts the other branches and owns their membership, BIB-60), so study creation (BIB-19), a study edit's new main question (BIB-20) and the
  * node API (BIB-25) cannot drift apart. Every method runs inside a mutation's work, under the
  * study row lock, so its counts cannot race another writer of the study.
  */
@@ -31,13 +31,14 @@ export class StudyGraphService {
   }
 
   /**
-   * The study's branches, oldest first (ties by id), for Graph's snapshot (BIB-28). The caller
-   * has already resolved the study as the owner's; both ids are in the filter regardless.
+   * The study's branches, oldest first (ties by id), for Graph's snapshot (BIB-28; with their
+   * revision since BIB-60). The caller has already resolved the study as the owner's; both ids are
+   * in the filter regardless.
    */
   async listBranches(ownerId: string, studyId: string): Promise<StudyBranch[]> {
     return StudyBranch.findAll({
       where: { studyId, ownerId },
-      attributes: ['id', 'rootNodeId', 'createdAt'],
+      attributes: ['id', 'rootNodeId', 'revision', 'createdAt'],
       order: [
         ['createdAt', 'ASC'],
         ['id', 'ASC'],

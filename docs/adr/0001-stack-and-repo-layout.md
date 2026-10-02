@@ -798,6 +798,20 @@ The study page draws its live graph with React Flow, from one library-independen
 
 **Not in BIB-28:** branch revision, membership, creation and branch tools (BIB-60), List View, Connect dialog, drag-to-connect and selection history (BIB-29), saved zoom/filters/selection (BIB-34), phone tabs (BIB-38), benchmarks and cursor reads above 500 nodes (BIB-52), the offline save queue (BIB-35).
 
+## Addendum (2026-10-02, BIB-60): branches and branch membership
+
+Branches become editable (PRD sections 8, 10, 12, 23, 24; FR-GRAPH-008/009). A branch is a navigation grouping: its nodes are its root plus its member rows, a node may be in many branches, and membership never implies or constrains an edge.
+
+**Revision semantics (decided).** Starting a branch (`POST /studies/:id/branches`) creates a study child, so it checks and moves `study.revision` like node, edge and note creation (modules README rule 4). Changing members (`PATCH /studies/:id/branches/:branchId/members`) checks only the branch's own `revision`, so a membership toggle never 409s a content edit in another tab. Neither moves `content_revision`: PRD section 18's staleness triggers do not include branches. Both append an event, so `last_activity_at` moves.
+
+**Events.** `branch_created {branchId, rootNodeId}` is intended thread-visible (starting a second branch is a deliberate act, section 10); `branch_members_changed {branchId, addedNodeIds, removedNodeIds}` (the net change) is intended internal-only, like `node_position_saved`. Ids only; `branchId` lives in the payload until BIB-55 adds `study_event.branch_id` and the visibility column.
+
+**Schema.** `study_branch` gains `revision` (CHECK >= 1), UNIQUE (owner_id, study_id, id) (the member FK target) and `study_branch_root_key` UNIQUE (study_id, root_node_id): **one branch per root**, so a branch needs no label (it is named "Branch: " + its root's label) and the number of branches is bounded by the node cap. New `study_branch_member` (PK (branch_id, node_id); composite FKs to `study` (cascade), `study_branch (owner_id, study_id, id)` and `study_node (owner_id, study_id, id)` (both NO ACTION); index (owner_id, study_id, node_id)). Removing a member deletes its row; the event keeps the history. No label, parent, deletion or `added_event_id` yet. `down` is guarded by `ALLOW_STUDY_DATA_DROP` (now the first refusal from latest) and keeps branches.
+
+**Ownership and the BIB-33 seam.** Study keeps `ensureInitialBranch` (the only creator of the initial branch, unchanged) and `listBranches`. Graph starts every other branch and owns `study_branch_member`. `changeBranchMembers(m, branch, { add, remove }) → { addedNodeIds, removedNodeIds }` in `graph/branches.service.ts` is the single membership writer, callable inside any study mutation: every id must be a live node of the study (else 404), adding the root or a member and removing a non-member are no-ops, then one insert and one delete. It checks no revision and appends no event; the members route wraps it with the branch revision check, the event, and 422 `BRANCH_UNCHANGED` when the net change is empty. BIB-33's automatic membership calls the same function and decides for itself what an empty change means. Consequence of one-branch-per-root, accepted: a study whose first branch was started manually at a passage gets no automatic initial branch when its first question arrives; the user can start one there.
+
+**Web.** View options stay client-only in the BIB-28 store (`soloBranchId`, `collapsedBranchIds`) and in the one `visibility()`, so List View follows show-only and collapse automatically. Collapse hides a branch's members that belong to no other non-collapsed branch (roots always stay; a collapsed root says "+N hidden"); show-only intersects with type filters and focus. Arrange a branch reuses BIB-28's `arrange` with the root as anchor. Node detail's Branches group (checkboxes and "Start a branch here") is the keyboard path for membership.
+
 ## Notes
 
 - **TypeScript is pinned to 6.0.x, not 7.x.** TypeScript 7 is the native (Go) compiler, and `typescript-eslint` 8.x supports `<6.1`. Revisit when type-aware lint supports 7.
