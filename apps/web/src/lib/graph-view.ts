@@ -34,6 +34,12 @@ export interface XY {
 
 export type Positions = Readonly<Record<string, XY>>;
 
+/**
+ * The snapshot's content, without its layout: what everything derived here is keyed on, so a
+ * position save (a new `positions` and `viewRevision`) rebuilds nothing but moved nodes.
+ */
+export type GraphContent = Pick<GraphResponse, 'nodes' | 'edges' | 'branches'>;
+
 /** What a canvas node renders: the summary, and whether it roots a branch. Built once per snapshot. */
 export interface GraphNodeData extends Record<string, unknown> {
   summary: NodeSummary;
@@ -48,8 +54,8 @@ function byAge(a: NodeSummary, b: NodeSummary): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
-export function storedPositions(graph: GraphResponse): Record<string, XY> {
-  return Object.fromEntries(graph.positions.map((p) => [p.nodeId, { x: p.x, y: p.y }]));
+export function storedPositions(positions: GraphResponse['positions']): Record<string, XY> {
+  return Object.fromEntries(positions.map((p) => [p.nodeId, { x: p.x, y: p.y }]));
 }
 
 /**
@@ -151,7 +157,7 @@ export interface Visibility {
  * focused node stays visible even if its type is filtered. An edge is drawn only when both of its
  * nodes are visible (`toFlowEdges`).
  */
-export function visibility(graph: GraphResponse, options: ViewOptions): Visibility {
+export function visibility(graph: GraphContent, options: ViewOptions): Visibility {
   const byType = graph.nodes.filter((node) => !options.hiddenTypes.has(node.type));
   const hiddenByFilters = graph.nodes.length - byType.length;
   const focusNode = options.focus
@@ -193,11 +199,24 @@ export function visibilityText(total: number, view: Visibility, focused: boolean
   return parts.join(' · ');
 }
 
-/** The data objects canvas nodes render, built once per snapshot so memoized nodes stay put. */
-export function nodeData(graph: GraphResponse): Map<string, GraphNodeData> {
+/** The last data object built for a summary (query results keep unchanged summaries' identity). */
+const dataBySummary = new WeakMap<NodeSummary, GraphNodeData>();
+
+/**
+ * The data objects canvas nodes render. A node whose summary and branch-root flag are unchanged
+ * keeps its data object, so its memoized canvas node does not re-render.
+ */
+export function nodeData(graph: Omit<GraphContent, 'edges'>): Map<string, GraphNodeData> {
   const roots = new Set(graph.branches.map((branch) => branch.rootNodeId));
   return new Map(
-    graph.nodes.map((summary) => [summary.id, { summary, branchRoot: roots.has(summary.id) }]),
+    graph.nodes.map((summary) => {
+      const branchRoot = roots.has(summary.id);
+      const kept = dataBySummary.get(summary);
+      if (kept?.branchRoot === branchRoot) return [summary.id, kept];
+      const data = { summary, branchRoot };
+      dataBySummary.set(summary, data);
+      return [summary.id, data];
+    }),
   );
 }
 
@@ -207,8 +226,16 @@ export function nodeAccessibleName(summary: NodeSummary): string {
   return `${nodeOptionText(summary, 200)}${state ? `, ${state}` : ''}`;
 }
 
+/** The last flow node built for a data object, reused while nothing it shows has changed. */
+const flowNodeByData = new WeakMap<GraphNodeData, GraphFlowNode>();
+
+/**
+ * React Flow nodes for the visible nodes. A node whose data, position, selection and movability
+ * are unchanged is the same object as last time, so React Flow and the memoized node component
+ * skip it: moving or saving one node touches only that node.
+ */
 export function toFlowNodes(
-  graph: GraphResponse,
+  nodes: readonly NodeSummary[],
   data: ReadonlyMap<string, GraphNodeData>,
   positions: Positions,
   visible: ReadonlySet<string>,
@@ -216,23 +243,37 @@ export function toFlowNodes(
   movable: boolean,
 ): GraphFlowNode[] {
   const result: GraphFlowNode[] = [];
-  for (const summary of graph.nodes) {
+  for (const summary of nodes) {
     const nodeDataItem = data.get(summary.id);
     const position = positions[summary.id];
     if (!visible.has(summary.id) || !nodeDataItem || !position) continue;
-    result.push({
+    const isSelected = selected.has(summary.id);
+    const kept = flowNodeByData.get(nodeDataItem);
+    if (
+      kept &&
+      kept.position.x === position.x &&
+      kept.position.y === position.y &&
+      kept.selected === isSelected &&
+      kept.draggable === movable
+    ) {
+      result.push(kept);
+      continue;
+    }
+    const node: GraphFlowNode = {
       id: summary.id,
       type: 'study',
       position,
       data: nodeDataItem,
-      selected: selected.has(summary.id),
+      selected: isSelected,
       draggable: movable,
       connectable: false,
       deletable: false,
       ariaLabel: nodeAccessibleName(summary),
       width: NODE_WIDTH,
       height: NODE_HEIGHT,
-    });
+    };
+    flowNodeByData.set(nodeDataItem, node);
+    result.push(node);
   }
   return result;
 }
@@ -241,7 +282,10 @@ export function toFlowNodes(
  * Edges between visible nodes. Directed types get an arrowhead toward the target; two-way types
  * none. Each carries its relationship in words (label and accessible name), never color alone.
  */
-export function toFlowEdges(graph: GraphResponse, visible: ReadonlySet<string>): Edge[] {
+export function toFlowEdges(
+  graph: Omit<GraphContent, 'branches'>,
+  visible: ReadonlySet<string>,
+): Edge[] {
   const names = new Map(graph.nodes.map((node) => [node.id, nodeOptionText(node)]));
   return graph.edges
     .filter((edge) => visible.has(edge.sourceNodeId) && visible.has(edge.targetNodeId))
@@ -268,7 +312,7 @@ export function toFlowEdges(graph: GraphResponse, visible: ReadonlySet<string>):
  */
 export function arrange(
   ids: readonly string[],
-  graph: GraphResponse,
+  graph: Omit<GraphContent, 'branches'>,
   current: Positions,
 ): Record<string, XY> {
   const set = new Set(ids);
@@ -303,7 +347,10 @@ export function arrange(
  * focused on its main question node, else its oldest branch's root, else its oldest node. Null
  * for a smaller study, which opens in full.
  */
-export function focusStart(graph: GraphResponse, mainQuestionNodeId: string | null): string | null {
+export function focusStart(
+  graph: Omit<GraphContent, 'edges'>,
+  mainQuestionNodeId: string | null,
+): string | null {
   if (graph.nodes.length <= FOCUSED_VIEW_NODE_THRESHOLD) return null;
   const live = new Set(graph.nodes.map((node) => node.id));
   if (mainQuestionNodeId && live.has(mainQuestionNodeId)) return mainQuestionNodeId;

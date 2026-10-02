@@ -81,7 +81,7 @@ describe('toFlowNodes / toFlowEdges', () => {
       [id(2)]: { x: 10, y: 20 },
       [id(3)]: { x: 5, y: 5 },
     };
-    const nodes = toFlowNodes(g, nodeData(g), positions, all, new Set([id(2)]), true);
+    const nodes = toFlowNodes(g.nodes, nodeData(g), positions, all, new Set([id(2)]), true);
     expect(
       nodes.map((n) => ({
         id: n.id,
@@ -125,7 +125,47 @@ describe('toFlowNodes / toFlowEdges', () => {
         connectable: false,
       },
     ]);
-    expect(toFlowNodes(g, nodeData(g), positions, all, new Set(), false)[0]?.draggable).toBe(false);
+    expect(toFlowNodes(g.nodes, nodeData(g), positions, all, new Set(), false)[0]?.draggable).toBe(
+      false,
+    );
+  });
+
+  it("keeps unmoved nodes' data and flow objects when a save is acknowledged, rebuilding only the moved node", () => {
+    const before = graph({
+      ...g,
+      positions: [
+        { nodeId: id(1), x: 0, y: 0 },
+        { nodeId: id(2), x: 10, y: 20 },
+        { nodeId: id(3), x: 5, y: 5 },
+      ],
+    });
+    const at = (gr: GraphResponse) =>
+      Object.fromEntries(gr.positions.map((p) => [p.nodeId, { x: p.x, y: p.y }]));
+    const data = nodeData(before);
+    const first = toFlowNodes(before.nodes, data, at(before), all, new Set(), true);
+    // The acknowledgement: a new response with the same content, a new view revision and the
+    // moved node's saved position.
+    const acknowledged: GraphResponse = {
+      ...before,
+      viewRevision: 2,
+      positions: before.positions.map((p) => (p.nodeId === id(2) ? { ...p, x: 40 } : p)),
+    };
+    const ackData = nodeData(acknowledged);
+    for (const n of [1, 2, 3]) expect(ackData.get(id(n))).toBe(data.get(id(n)));
+    const second = toFlowNodes(acknowledged.nodes, ackData, at(acknowledged), all, new Set(), true);
+    expect(second[0]).toBe(first[0]);
+    expect(second[2]).toBe(first[2]);
+    expect(second[1]).not.toBe(first[1]);
+    expect(second[1]?.position).toStrictEqual({ x: 40, y: 20 });
+    expect(second[1]?.data).toBe(first[1]?.data);
+    // A changed summary (a refetch after an edit) gets a new data object; the others keep theirs.
+    const edited = {
+      ...before,
+      nodes: before.nodes.map((s, i) => (i === 0 ? { ...s, label: 'Why?' } : s)),
+    };
+    const editedData = nodeData(edited);
+    expect(editedData.get(id(1))).not.toBe(data.get(id(1)));
+    expect(editedData.get(id(3))).toBe(data.get(id(3)));
   });
 
   it('gives directed edges an arrowhead and two-way edges none, each with its relationship in words', () => {

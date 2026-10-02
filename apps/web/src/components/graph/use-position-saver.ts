@@ -24,23 +24,39 @@ export type LayoutSaveStatus =
   | { state: 'saved' }
   /** Not saved: `retry` resends the frozen request (unknown outcome) or the queue. */
   | { state: 'failed' }
-  /** A second 409 in a row: another tab keeps moving nodes; Reload takes the server's layout. */
-  | { state: 'conflict' };
+  /**
+   * A second 409 in a row: another tab keeps moving nodes. The positions stay queued (the next
+   * save resends them on the fresh view revision); Reload takes the server's layout instead.
+   */
+  | { state: 'conflict' }
+  /** Every node a save carried was deleted elsewhere, and nothing else is waiting to be saved. */
+  | { state: 'removed' };
+
+/** States in which a local position is not (yet) known to be saved: leaving the page warns. */
+const UNSAVED_STATES = new Set<LayoutSaveStatus['state']>(['saving', 'failed', 'conflict']);
 
 interface Frozen {
   body: SavePositionsRequest & { positions: NodePosition[] };
   key: string;
 }
 
+interface SendOptions {
+  /** The page is going away: the request must outlive it (`fetch` keepalive). */
+  keepalive?: boolean;
+}
+
 const LIFECYCLE_CODES = new Set(['STUDY_ARCHIVED', 'STUDY_TRASHED']);
 
 /**
  * Saves moved positions (BIB-28): the store's pending queue, 300 ms after the last move (or at
- * once for an arrangement), at most 100 per request, one request in flight, each against the
- * latest view revision. A request is frozen with its Idempotency-Key and resent verbatim after an
- * unknown outcome. A stale view revision (another tab moved nodes) refetches the graph and resends
- * the same nodes' latest positions once with a new key: positions are the user's latest gesture,
- * so there is nothing to merge. "Layout saved" is shown only after the server's 200.
+ * once for an arrangement, whose nodes always go in one request), at most 100 per request, one
+ * request in flight, each against the latest view revision. A request is frozen with its
+ * Idempotency-Key and resent verbatim after an unknown outcome. A stale view revision (another tab
+ * moved nodes) refetches the graph and resends the same nodes' latest positions once with a new
+ * key: positions are the user's latest gesture, so there is nothing to merge; a second stale
+ * revision keeps them queued and offers Reload. "Layout saved" is shown only after the server's
+ * 200 and only when nothing else is queued. Leaving (unmount, `pagehide`) sends what is queued at
+ * once; a save held for Retry or in conflict makes the browser ask before the page goes.
  */
 export function usePositionSaver(studyId: string, onLocked: () => void) {
   const store = useGraphViewStore();
@@ -85,10 +101,10 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
   );
 
   // `flush` and `send` call each other; a ref breaks the cycle without re-creating either.
-  const flushRef = useRef<() => Promise<void>>(async () => {});
+  const flushRef = useRef<(options?: SendOptions) => Promise<void>>(async () => {});
 
   const send = useCallback(
-    async (first: Frozen): Promise<void> => {
+    async (first: Frozen, { keepalive = false }: SendOptions = {}): Promise<void> => {
       let request = first;
       let conflictRetried = false;
       // At most two passes: the request, then one resend after a stale view revision.
@@ -96,7 +112,7 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
         inFlight.current = true;
         setStatus({ state: 'saving' });
         try {
-          const response = await savePositions(studyId, request.body, request.key);
+          const response = await savePositions(studyId, request.body, request.key, { keepalive });
           inFlight.current = false;
           acknowledge(response.viewRevision, request.body.positions);
           if (store.getState().pendingIds.size > 0) await flushRef.current();
@@ -107,6 +123,8 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
           const ids = request.body.positions.map((p) => p.nodeId);
           if (error instanceof ApiError && error.status === 409) {
             if (conflictRetried) {
+              // Still unsaved: queued for the next save (on a fresh revision) until Reload.
+              store.getState().requeue(ids);
               setStatus({ state: 'conflict' });
               return;
             }
@@ -135,7 +153,8 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
               store.getState().forget(gone);
               store.getState().requeue(ids.filter((id) => live.has(id)));
               if (gone.length > 0) {
-                await flushRef.current();
+                if (store.getState().pendingIds.size > 0) await flushRef.current();
+                else setStatus({ state: 'removed' });
                 return;
               }
             } catch {
@@ -163,41 +182,65 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
     [acknowledge, onLocked, refetchGraph, store, studyId, viewRevision],
   );
 
-  const flush = useCallback(async () => {
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = null;
-    if (inFlight.current || frozen.current) return;
-    const ids = store.getState().takePending(MAX_POSITIONS_PER_REQUEST);
-    if (ids.length === 0) return;
-    const local = store.getState().localPositions;
-    const positions = ids.flatMap((id) => {
-      const p = local[id];
-      return p ? [{ nodeId: id, x: p.x, y: p.y }] : [];
-    });
-    if (positions.length === 0) return;
-    await send({
-      body: { expectedRevision: viewRevision(), positions },
-      key: crypto.randomUUID(),
-    });
-  }, [send, store, viewRevision]);
+  const flush = useCallback(
+    async (options: SendOptions = {}) => {
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
+      if (inFlight.current || frozen.current) return;
+      const ids = store.getState().takePending(MAX_POSITIONS_PER_REQUEST);
+      if (ids.length === 0) return;
+      const local = store.getState().localPositions;
+      const positions = ids.flatMap((id) => {
+        const p = local[id];
+        return p ? [{ nodeId: id, x: p.x, y: p.y }] : [];
+      });
+      if (positions.length === 0) return;
+      await send(
+        { body: { expectedRevision: viewRevision(), positions }, key: crypto.randomUUID() },
+        options,
+      );
+    },
+    [send, store, viewRevision],
+  );
 
   useEffect(() => {
     flushRef.current = flush;
   }, [flush]);
 
-  useEffect(
-    () => () => {
-      if (timer.current) clearTimeout(timer.current);
-    },
-    [],
-  );
+  // Leaving: the page (pagehide) or the study (unmount, a route change) sends the queued moves
+  // now rather than dropping them with the debounce. The request starts synchronously, with
+  // keepalive so it outlives the page.
+  useEffect(() => {
+    const leave = () => void flushRef.current({ keepalive: true });
+    window.addEventListener('pagehide', leave);
+    return () => {
+      window.removeEventListener('pagehide', leave);
+      leave();
+    };
+  }, []);
 
-  /** Places nodes and queues their save: debounced after a move, at once for an arrangement. */
+  // Unacknowledged layout (a save in flight, held for Retry, or in conflict): the browser asks
+  // before the page goes, as the note editor does (PRD section 27).
+  const unsaved = UNSAVED_STATES.has(status.state);
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [unsaved]);
+
+  /**
+   * Places nodes and queues their save: debounced after a move; at once for an arrangement,
+   * whose nodes go together in one request (after any earlier moves that don't fit with them).
+   */
   const save = useCallback(
-    (positions: Record<string, XY>, { immediate = false }: { immediate?: boolean } = {}) => {
-      store.getState().move(positions);
+    (positions: Record<string, XY>, { arrangement = false }: { arrangement?: boolean } = {}) => {
+      store.getState().move(positions, { together: arrangement });
       if (timer.current) clearTimeout(timer.current);
-      if (immediate) {
+      if (arrangement) {
         void flush();
         return;
       }

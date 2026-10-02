@@ -26,14 +26,19 @@ export function fetchGraph(studyId: string): Promise<GraphResponse> {
   return apiFetch(`${studyPath(studyId)}/graph`, graphResponseSchema);
 }
 
-/** `PATCH /studies/:id/positions`. `expectedRevision` is the **view** revision. */
+/**
+ * `PATCH /studies/:id/positions`. `expectedRevision` is the **view** revision. `keepalive` lets a
+ * save sent while the page goes away finish without it.
+ */
 export function savePositions(
   studyId: string,
   body: SavePositionsRequest,
   idempotencyKey: string,
+  { keepalive = false }: { keepalive?: boolean } = {},
 ): Promise<SavePositionsResponse> {
   return apiFetch(`${studyPath(studyId)}/positions`, savePositionsResponseSchema, {
     method: 'PATCH',
+    keepalive,
     headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
     body: JSON.stringify(body),
   });

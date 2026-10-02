@@ -20,15 +20,24 @@ export interface GraphViewState {
   focus: FocusOption | null;
   /** Positions moved or arranged in this session, over the snapshot's (saved or not yet). */
   localPositions: Positions;
-  /** Node ids whose local position still has to be saved (the pending-save queue). */
+  /** Node ids whose local position still has to be saved (the pending-save queue), oldest first. */
   pendingIds: ReadonlySet<string>;
+  /** The latest arrangement's ids still queued: they are saved together, in one request. */
+  pendingGroup: ReadonlySet<string>;
 
   select: (ids: string[], source: 'canvas' | 'list') => void;
   toggleType: (type: StudyNodeType) => void;
   setFocus: (focus: FocusOption | null) => void;
-  /** Places nodes locally and queues them for saving. */
-  move: (positions: Record<string, XY>) => void;
-  /** Takes up to `max` queued ids off the queue (oldest first) for one request. */
+  /**
+   * Places nodes locally and queues them for saving. `together` (an arrangement, at most one
+   * request's worth) queues them as one group, after everything queued before.
+   */
+  move: (positions: Record<string, XY>, options?: { together?: boolean }) => void;
+  /**
+   * Takes up to `max` queued ids off the queue (oldest first) for one request, never splitting
+   * the group: when everything fits it all goes at once; otherwise the earlier moves go first and
+   * the group goes on its own.
+   */
   takePending: (max: number) => string[];
   /** Puts ids back on the queue (a request that must be resent). */
   requeue: (ids: readonly string[]) => void;
@@ -46,6 +55,7 @@ export function createGraphViewStore(): GraphViewStore {
     focus: null,
     localPositions: {},
     pendingIds: new Set(),
+    pendingGroup: new Set(),
 
     select: (ids, source) => set({ selectedNodeIds: ids, selectionSource: source }),
     toggleType: (type) =>
@@ -55,29 +65,41 @@ export function createGraphViewStore(): GraphViewStore {
         return { hiddenTypes: next };
       }),
     setFocus: (focus) => set({ focus }),
-    move: (positions) =>
-      set(({ localPositions, pendingIds }) => ({
-        localPositions: { ...localPositions, ...positions },
-        pendingIds: new Set([...pendingIds, ...Object.keys(positions)]),
-      })),
+    move: (positions, { together = false } = {}) =>
+      set(({ localPositions, pendingIds, pendingGroup }) => {
+        const ids = Object.keys(positions);
+        const moved = new Set(ids);
+        return {
+          localPositions: { ...localPositions, ...positions },
+          pendingIds: together
+            ? new Set([...[...pendingIds].filter((id) => !moved.has(id)), ...ids])
+            : new Set([...pendingIds, ...ids]),
+          pendingGroup: together ? moved : pendingGroup,
+        };
+      }),
     takePending: (max) => {
-      const ids = [...get().pendingIds].slice(0, max);
-      set(({ pendingIds }) => {
-        const next = new Set(pendingIds);
-        for (const id of ids) next.delete(id);
-        return { pendingIds: next };
+      const { pendingIds, pendingGroup } = get();
+      const queued = [...pendingIds];
+      const earlier = queued.filter((id) => !pendingGroup.has(id));
+      const ids =
+        queued.length <= max || earlier.length === 0 ? queued.slice(0, max) : earlier.slice(0, max);
+      const taken = new Set(ids);
+      set({
+        pendingIds: new Set(queued.filter((id) => !taken.has(id))),
+        pendingGroup: new Set([...pendingGroup].filter((id) => !taken.has(id))),
       });
       return ids;
     },
     requeue: (ids) => set(({ pendingIds }) => ({ pendingIds: new Set([...ids, ...pendingIds]) })),
     forget: (ids) =>
-      set(({ localPositions, pendingIds }) => {
+      set(({ localPositions, pendingIds, pendingGroup }) => {
         const gone = new Set(ids);
         return {
           localPositions: Object.fromEntries(
             Object.entries(localPositions).filter(([id]) => !gone.has(id)),
           ),
           pendingIds: new Set([...pendingIds].filter((id) => !gone.has(id))),
+          pendingGroup: new Set([...pendingGroup].filter((id) => !gone.has(id))),
         };
       }),
   }));

@@ -57,6 +57,10 @@ export const GRAPH_COPY = {
   narrow: 'Moving nodes needs a wider screen. Everything is in the Nodes list below.',
   instructions:
     'Tab moves between nodes. Enter opens a node. Arrow keys move the selected node. Escape clears the selection. Shift+click adds to the selection. Everything here is also in the Nodes list below.',
+  /** Read-only (archived, trashed or narrow): nothing about moving; the reason is described too. */
+  readOnlyInstructions:
+    'Tab moves between nodes. Enter opens a node. Escape clears the selection. Shift+click adds to the selection. Nodes cannot be moved here. Everything here is also in the Nodes list below.',
+  refreshFailed: "Couldn't refresh the graph. It may be out of date.",
   arrangeLimit: `Arrange works on up to ${MAX_ARRANGE_NODES} nodes.`,
   applied: 'Arrangement applied.',
   undone: 'Arrangement undone.',
@@ -102,21 +106,34 @@ export function GraphSection({ study }: { study: StudyResponse }) {
       <h2 id={headingId} className="font-serif text-2xl">
         Graph
       </h2>
-      {graph.isError ? (
+      {graph.data ? (
+        <>
+          {/* A failed background refetch: the canvas stays, with a non-blocking alert. */}
+          {graph.isError ? (
+            <div role="alert" className="flex flex-wrap items-center gap-3 text-sm">
+              <p>{GRAPH_COPY.refreshFailed}</p>
+              <button type="button" onClick={() => void graph.refetch()} className="underline">
+                Retry
+              </button>
+            </div>
+          ) : null}
+          {graph.data.nodes.length === 0 ? (
+            <p className="text-muted">{GRAPH_COPY.empty}</p>
+          ) : (
+            <ReactFlowProvider>
+              <GraphCanvas study={study} graph={graph.data} />
+            </ReactFlowProvider>
+          )}
+        </>
+      ) : graph.isError ? (
         <ProblemAlert error={graph.error} copy={LOAD_COPY} onRetry={() => void graph.refetch()} />
-      ) : !graph.data ? (
+      ) : (
         <div
           role="status"
           className="flex h-[min(70vh,720px)] min-h-[420px] items-center justify-center rounded border border-muted text-muted"
         >
           {GRAPH_COPY.loading}
         </div>
-      ) : graph.data.nodes.length === 0 ? (
-        <p className="text-muted">{GRAPH_COPY.empty}</p>
-      ) : (
-        <ReactFlowProvider>
-          <GraphCanvas study={study} graph={graph.data} />
-        </ReactFlowProvider>
       )}
     </section>
   );
@@ -132,6 +149,7 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
   const store = useGraphViewStore();
   const flow = useReactFlow();
   const instructionsId = useId();
+  const readOnlyId = useId();
   const selectedNodeIds = useGraphView((s) => s.selectedNodeIds);
   const selectionSource = useGraphView((s) => s.selectionSource);
   const hiddenTypes = useGraphView((s) => s.hiddenTypes);
@@ -146,19 +164,26 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
   const saver = usePositionSaver(study.id, lock);
   const { save } = saver;
 
+  // Everything derived is keyed on the snapshot's content, not the whole response: a position
+  // save (new positions and view revision) rebuilds nothing but the moved nodes (graph-view.ts).
+  const content = useMemo(
+    () => ({ nodes: graph.nodes, edges: graph.edges, branches: graph.branches }),
+    [graph.branches, graph.edges, graph.nodes],
+  );
+
   // A study over the threshold opens focused (PRD section 12); "Show all" leaves it.
-  const [largeStart] = useState(() => focusStart(graph, study.mainQuestion?.nodeId ?? null));
+  const [largeStart] = useState(() => focusStart(content, study.mainQuestion?.nodeId ?? null));
   const [largeNotice, setLargeNotice] = useState(largeStart !== null);
   useEffect(() => {
     if (largeStart) store.getState().setFocus({ nodeId: largeStart, depth: FOCUS_DEPTH });
   }, [largeStart, store]);
 
   // Fallback slots for unpositioned nodes, kept for the page session (a slot never jumps).
-  const stored = useMemo(() => storedPositions(graph), [graph]);
+  const stored = useMemo(() => storedPositions(graph.positions), [graph.positions]);
   const [fallback, setFallback] = useState(() => fallbackPositions(graph.nodes, stored));
-  const [placedFor, setPlacedFor] = useState(graph);
-  if (placedFor !== graph) {
-    setPlacedFor(graph);
+  const [placedFor, setPlacedFor] = useState(graph.nodes);
+  if (placedFor !== graph.nodes) {
+    setPlacedFor(graph.nodes);
     setFallback((previous) =>
       fallbackPositions(graph.nodes, { ...stored, ...localPositions }, previous),
     );
@@ -183,16 +208,16 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
     [dragging, fallback, localPositions, preview, stored],
   );
   const view = useMemo(
-    () => visibility(graph, { hiddenTypes, focus }),
-    [focus, graph, hiddenTypes],
+    () => visibility(content, { hiddenTypes, focus }),
+    [content, focus, hiddenTypes],
   );
-  const data = useMemo(() => nodeData(graph), [graph]);
+  const data = useMemo(() => nodeData(content), [content]);
   const selected = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   const nodes = useMemo(
-    () => toFlowNodes(graph, data, positions, view.visible, selected, movable && !preview),
-    [data, graph, movable, positions, preview, selected, view.visible],
+    () => toFlowNodes(content.nodes, data, positions, view.visible, selected, movable && !preview),
+    [content, data, movable, positions, preview, selected, view.visible],
   );
-  const edges = useMemo(() => toFlowEdges(graph, view.visible), [graph, view.visible]);
+  const edges = useMemo(() => toFlowEdges(content, view.visible), [content, view.visible]);
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
@@ -249,7 +274,7 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
       if (position) previous[id] = position;
     }
     setArrangeMessage('');
-    setPreview({ ids, previous, proposed: arrange(ids, graph, positions) });
+    setPreview({ ids, previous, proposed: arrange(ids, content, positions) });
   }
 
   /** Set when a preview closes, so focus returns to Arrange once it is enabled again. */
@@ -269,7 +294,7 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
 
   function applyArrange() {
     if (!preview) return;
-    save(preview.proposed, { immediate: true });
+    save(preview.proposed, { arrangement: true });
     setLastArrangement(preview);
     setPreview(null);
     setArrangeMessage(GRAPH_COPY.applied);
@@ -278,7 +303,7 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
 
   function undoArrange() {
     if (!lastArrangement) return;
-    save(lastArrangement.previous, { immediate: true });
+    save(lastArrangement.previous, { arrangement: true });
     setLastArrangement(null);
     setArrangeMessage(GRAPH_COPY.undone);
   }
@@ -396,10 +421,10 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
           </button>
         </div>
       ) : null}
-      {!editable ? (
-        <p className="text-sm text-muted">{GRAPH_COPY.readOnly}</p>
-      ) : !wide ? (
-        <p className="text-sm text-muted">{GRAPH_COPY.narrow}</p>
+      {!movable ? (
+        <p id={readOnlyId} className="text-sm text-muted">
+          {!editable ? GRAPH_COPY.readOnly : GRAPH_COPY.narrow}
+        </p>
       ) : null}
       {preview ? (
         <div
@@ -440,12 +465,13 @@ function GraphCanvas({ study, graph }: { study: StudyResponse; graph: GraphRespo
       />
 
       <p id={instructionsId} className="sr-only">
-        {GRAPH_COPY.instructions}
+        {movable ? GRAPH_COPY.instructions : GRAPH_COPY.readOnlyInstructions}
       </p>
       <div
         role="group"
         aria-label="Study graph"
-        aria-describedby={instructionsId}
+        // Read-only: the reason (archived, trashed or narrow) is part of the description.
+        aria-describedby={movable ? instructionsId : `${instructionsId} ${readOnlyId}`}
         className="h-[min(70vh,720px)] min-h-[420px] w-full rounded border border-muted"
       >
         <ReactFlow
@@ -521,7 +547,10 @@ function ZoomControls() {
   );
 }
 
-/** "Saving layout…" / "Layout saved" / "Layout not saved" (Retry) / another tab (Reload). */
+/**
+ * "Saving layout…" / "Layout saved" / "Layout not saved" (Retry) / another tab (Reload) / moved
+ * nodes deleted elsewhere. "Layout saved" only when nothing local is unsaved.
+ */
 function LayoutIndicator({
   status,
   onRetry,
@@ -539,8 +568,10 @@ function LayoutIndicator({
         : status.state === 'failed'
           ? 'Layout not saved.'
           : status.state === 'conflict'
-            ? 'Layout changed in another tab.'
-            : '';
+            ? "Couldn't save the layout: it changed in another tab."
+            : status.state === 'removed'
+              ? 'Some moved nodes were removed elsewhere.'
+              : '';
   return (
     <div className="flex flex-wrap items-center gap-3 text-sm">
       <p role="status">{text}</p>

@@ -1,7 +1,7 @@
 import type { GraphResponse, StudyResponse } from '@bible-artisan/contracts';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NodesSection } from '@/components/nodes/nodes-section';
+import { NODES_COPY, NodesSection } from '@/components/nodes/nodes-section';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { GRAPH_COPY, GraphSection } from './graph-section';
 
@@ -145,6 +145,12 @@ const canvas = () => screen.getByRole('group', { name: 'Study graph' });
 /** A canvas node by its accessible name (type, label and status as text). */
 const canvasNode = (name: string | RegExp) => within(canvas()).getByRole('group', { name });
 const status = () => screen.getByText(/^Showing \d+ of \d+ nodes/);
+/** The canvas's accessible description: the text of every element its aria-describedby names. */
+const description = () =>
+  (canvas().getAttribute('aria-describedby') ?? '')
+    .split(' ')
+    .map((idRef) => document.getElementById(idRef)?.textContent ?? '')
+    .join(' ');
 
 async function openGraph(study: StudyResponse = STUDY, graph: GraphResponse = GRAPH) {
   graphReplies.push(() => jsonResponse(200, graph));
@@ -281,7 +287,7 @@ describe('GraphSection (BIB-28)', () => {
     expect(saves()).toHaveLength(2);
   });
 
-  it('a second conflict in a row says another tab changed the layout and offers Reload', async () => {
+  it('a second conflict in a row keeps the position unsaved and queued, offers Reload, and never says "Layout saved" until it is saved', async () => {
     const conflict = () =>
       jsonResponse(409, {
         code: 'REVISION_CONFLICT',
@@ -297,9 +303,173 @@ describe('GraphSection (BIB-28)', () => {
       expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
     );
     fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowLeft' });
-    expect(await screen.findByText('Layout changed in another tab.')).toBeTruthy();
+    expect(
+      await screen.findByText("Couldn't save the layout: it changed in another tab."),
+    ).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
     expect(saves()).toHaveLength(2);
+    expect(screen.queryByText('Layout saved')).toBeNull();
+
+    // Moving another node later saves it together with the still-unsaved one.
+    patchReplies.push(jsonResponse(200, { viewRevision: 10, lastEventSequence: '20' }));
+    fireEvent.click(canvasNode(OBS));
+    await waitFor(() => expect(textOf(canvasNode(OBS))).toContain('Selected'));
+    fireEvent.keyDown(canvasNode(OBS), { key: 'ArrowRight' });
+    expect(await screen.findByText('Layout saved')).toBeTruthy();
+    expect(saves()).toHaveLength(3);
+    const third = saves()[2]?.body as { positions: { nodeId: string }[] };
+    expect(third.positions.map((p) => p.nodeId).sort()).toStrictEqual([Q, O].sort());
+  });
+
+  it('settles the indicator when every node a save carried was deleted elsewhere', async () => {
+    patchReplies.push(
+      jsonResponse(404, { code: 'NOT_FOUND', message: 'x', retryable: false, correlationId: 'x' }),
+    );
+    await openGraph();
+    graphReplies.push(() =>
+      jsonResponse(200, {
+        ...GRAPH,
+        nodes: GRAPH.nodes.filter((n) => n.id !== Q),
+        edges: [],
+        branches: [],
+        positions: GRAPH.positions.filter((p) => p.nodeId !== Q),
+      }),
+    );
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'Enter' });
+    await waitFor(() =>
+      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
+    );
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowRight' });
+    expect(await screen.findByText('Some moved nodes were removed elsewhere.')).toBeTruthy();
+    expect(screen.queryByText('Saving layout…')).toBeNull();
+    expect(saves()).toHaveLength(1);
+  });
+
+  it('sends a move at once when the canvas unmounts within 300 ms of it', async () => {
+    patchReplies.push(jsonResponse(200, { viewRevision: 6, lastEventSequence: '9' }));
+    const view = await openGraph();
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'Enter' });
+    await waitFor(() =>
+      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
+    );
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowRight' });
+    expect(saves()).toStrictEqual([]);
+    view.unmount();
+    expect(saves()).toStrictEqual([
+      {
+        body: { expectedRevision: 5, positions: [{ nodeId: Q, x: 5, y: 0 }] },
+        key: expect.stringMatching(/^[0-9a-f-]{36}$/) as string,
+      },
+    ]);
+    const patch = (fetchMock.mock.calls as [string, RequestInit | undefined][]).find(
+      ([, init]) => init?.method === 'PATCH',
+    );
+    expect(patch?.[1]?.keepalive).toBe(true);
+  });
+
+  it('sends queued moves when the page is hidden, and asks before leaving while a save is held for Retry', async () => {
+    patchReplies.push(new TypeError('network'));
+    await openGraph();
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'Enter' });
+    await waitFor(() =>
+      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
+    );
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowDown' });
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    expect(saves()).toHaveLength(1);
+    expect(await screen.findByText('Layout not saved.')).toBeTruthy();
+    const leaving = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(leaving);
+    expect(leaving.defaultPrevented).toBe(true);
+  });
+
+  it('saves an applied arrangement in one request together with moves still waiting', async () => {
+    patchReplies.push(jsonResponse(200, { viewRevision: 6, lastEventSequence: '9' }));
+    await openGraph();
+    const source = /^Source: A commentary/;
+    fireEvent.click(canvasNode(source));
+    await waitFor(() => expect(textOf(canvasNode(source))).toContain('Selected'));
+    fireEvent.keyDown(canvasNode(source), { key: 'ArrowRight' });
+    fireEvent.keyUp(canvasNode(source), { key: 'ArrowRight' });
+    // Within the 300 ms debounce, arrange two other nodes.
+    fireEvent.click(canvasNode('Question: What is conscience?, Open'));
+    await waitFor(() =>
+      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
+    );
+    fireEvent.keyDown(document, { key: 'Shift' });
+    fireEvent.click(canvasNode(OBS), { shiftKey: true });
+    fireEvent.keyUp(document, { key: 'Shift' });
+    await waitFor(() => expect(textOf(status())).toContain('2 selected'));
+    fireEvent.click(screen.getByRole('button', { name: 'Arrange selection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(await screen.findByText('Layout saved')).toBeTruthy();
+    expect(saves()).toHaveLength(1);
+    const sent = saves()[0]?.body as { positions: { nodeId: string }[] };
+    expect(sent.positions.map((p) => p.nodeId).sort()).toStrictEqual([Q, O, S].sort());
+  });
+
+  it('keeps the canvas when a background refresh fails, with a non-blocking Retry', async () => {
+    const view = await openGraph();
+    graphReplies.push(
+      () =>
+        jsonResponse(503, {
+          code: 'UNAVAILABLE',
+          message: 'x',
+          retryable: true,
+          correlationId: 'x',
+        }),
+      () => jsonResponse(200, GRAPH),
+    );
+    await act(() => view.queryClient.refetchQueries({ queryKey: ['studies', STUDY_ID, 'graph'] }));
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toContain(GRAPH_COPY.refreshFailed);
+    expect(canvasNode('Question: What is conscience?, Open')).toBeTruthy();
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(canvasNode('Question: What is conscience?, Open')).toBeTruthy();
+  });
+
+  it('keeps an unsaved node edit open when the canvas selection is cleared, and closes it once cancelled', async () => {
+    await openGraph();
+    fireEvent.click(canvasNode(OBS));
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByRole('textbox', { name: /^Text/ }), {
+      target: { value: 'An unsaved thought' },
+    });
+    fireEvent.keyDown(canvasNode(OBS), { key: 'Escape' });
+    await waitFor(() => expect(textOf(status())).not.toContain('selected'));
+    expect(screen.getByText(NODES_COPY.held)).toBeTruthy();
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: /^Text/ }).value).toBe(
+      'An unsaved thought',
+    );
+    // Picking another node on the canvas keeps it open too.
+    fireEvent.click(canvasNode('Question: What is conscience?, Open'));
+    await waitFor(() =>
+      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
+    );
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: /^Text/ }).value).toBe(
+      'An unsaved thought',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByRole('heading', { name: 'Question' })).toBeTruthy();
+    expect(screen.queryByText(NODES_COPY.held)).toBeNull();
+  });
+
+  it('selects the ?node= node on the canvas too, and a cleared selection does not bring it back', async () => {
+    graphReplies.push(() => jsonResponse(200, GRAPH));
+    renderWithQuery(
+      <>
+        <GraphSection study={STUDY} />
+        <NodesSection study={STUDY} onReload={() => Promise.resolve()} initialNodeId={O} />
+      </>,
+    );
+    expect(await screen.findByRole('heading', { name: 'Observation' })).toBeTruthy();
+    await waitFor(() => expect(textOf(canvasNode(OBS))).toContain('Selected'));
+    fireEvent.keyDown(canvasNode(OBS), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Observation' })).toBeNull());
+    expect(textOf(status())).not.toContain('selected');
   });
 
   it('resends a save whose outcome is unknown verbatim, with the same key, on Retry', async () => {
@@ -401,6 +571,9 @@ describe('GraphSection (BIB-28)', () => {
   it('keeps an archived study explorable but read-only: no moving and no Arrange', async () => {
     await openGraph({ ...STUDY, lifecycle: 'archived' });
     expect(screen.getByText(GRAPH_COPY.readOnly)).toBeTruthy();
+    // The canvas's description says why it is read-only and never offers moving.
+    expect(description()).toBe(`${GRAPH_COPY.readOnlyInstructions} ${GRAPH_COPY.readOnly}`);
+    expect(description()).not.toContain('Arrow keys');
     expect(screen.queryByRole('button', { name: 'Arrange selection' })).toBeNull();
     const node = canvasNode('Question: What is conscience?, Open');
     expect(node.classList.contains('draggable')).toBe(false);
@@ -443,6 +616,7 @@ describe('GraphSection (BIB-28)', () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
     await openGraph();
     expect(screen.getByText(GRAPH_COPY.narrow)).toBeTruthy();
+    expect(description()).toBe(`${GRAPH_COPY.readOnlyInstructions} ${GRAPH_COPY.narrow}`);
     expect(screen.queryByRole('button', { name: 'Arrange selection' })).toBeNull();
     expect(canvasNode('Question: What is conscience?, Open').classList.contains('draggable')).toBe(
       false,
@@ -487,7 +661,6 @@ describe('GraphSection (BIB-28)', () => {
       expect(screen.getByRole('button', { name })).toBeTruthy();
     }
     expect(screen.getByLabelText('Graph overview')).toBeTruthy();
-    const described = canvas().getAttribute('aria-describedby') ?? '';
-    expect(document.getElementById(described)?.textContent).toBe(GRAPH_COPY.instructions);
+    expect(description()).toBe(GRAPH_COPY.instructions);
   });
 });
