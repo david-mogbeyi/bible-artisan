@@ -12,7 +12,7 @@ Apply only the relevant gates, but decide applicability explicitly. Prefer integ
 - In `apps/api`, use normal imports (not `import type`) for injected classes; Nest DI needs runtime metadata. Use `@Inject(TOKEN)` for symbol tokens.
 - DTOs are Zod schemas in `packages/contracts`, validated at the API boundary and parsed again in the web client.
 - Test naming: unit `*.spec.ts` beside the source; API integration `apps/api/test/**/*.int-spec.ts` (supertest against the real `AppModule` via `test/app.ts`); web `*.test.tsx`.
-- Commands (verify against `package.json` at execution time): `pnpm check`, `pnpm test`, `pnpm test:integration`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm format`, `pnpm db:migrate`, `pnpm --filter @bible-artisan/api db:migrate:make <name>`, `pnpm --filter @bible-artisan/api db:migrate:down`.
+- Commands (verify against `package.json` at execution time): `pnpm check`, `pnpm check:local`, `pnpm test`, `pnpm test:integration`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, `pnpm format`, `pnpm db:migrate`, `pnpm --filter @bible-artisan/api db:migrate:make <name>`, `pnpm --filter @bible-artisan/api db:migrate:down`.
 
 ## API correctness
 
@@ -107,7 +107,7 @@ Only for tickets that own this behavior (BIB-35…BIB-37):
 - API integration tests run against real PostgreSQL. Truncate or isolate the data a test creates; test files run serially.
 - Assert whole API response bodies with a single `toStrictEqual`, using `expect.any(...)` only for genuinely dynamic values inside the full expected object.
 - Use deterministic clocks, IDs, and provider fakes where behavior depends on them.
-- Run `pnpm check` and `git diff --check` before the PR. For UI, run the app and do a manual pass: the flow, keyboard-only, and narrow viewport.
+- Run `pnpm check:local`, the affected integration specs (see SKILL.md section 11), and `git diff --check` before the PR. CI runs the full integration suite. For UI, run the app and do a manual pass: the flow, keyboard-only, and narrow viewport.
 - Record exact commands and results. Only successful commands count as passed.
 
 ## Final diff and delivery

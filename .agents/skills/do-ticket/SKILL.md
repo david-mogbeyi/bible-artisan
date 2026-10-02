@@ -241,12 +241,15 @@ Bible Artisan defaults, after the repository's own rules and newer authoritative
 
 Apply every relevant checklist in [quality-gates.md](references/quality-gates.md). Infer commands from repository configuration; never invent command names.
 
-Run focused tests during development, then the full gate before creating the PR:
+Run focused tests during development, then the local gate before creating the PR:
 
 ```bash
-pnpm check          # format:check, lint, typecheck, unit, integration (real PostgreSQL), build
+pnpm check:local    # format:check, lint, typecheck, unit, build
+pnpm --filter @bible-artisan/api test:integration <file-substrings>   # affected integration specs only (real PostgreSQL)
 git diff --check
 ```
+
+"Affected" means the specs for every module the diff touches, plus `route-inventory` when routes are added or changed, `log-redaction` when new code logs, and `migration-reversibility` and `models` when a migration or model changes. Don't run the full integration suite locally. CI runs it on the PR, and the PR is not mergeable until CI is green.
 
 For UI changes, also run the app (`pnpm dev`) and exercise the flow in a browser if one is available, including a keyboard-only pass and a narrow viewport. Record what was manually verified, and state plainly when browser verification wasn't possible.
 
