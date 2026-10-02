@@ -1,7 +1,8 @@
 import type { Edge, NodeSummary } from '@bible-artisan/contracts';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CONNECT_COPY } from '@/components/graph/connect-dialog';
+import { studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { EDGE_RULE_COPY } from './relationship-controls';
 import { RELATIONSHIPS_COPY, Relationships } from './relationships';
@@ -329,7 +330,8 @@ describe('Relationships', () => {
   });
 
   it('resends the same key and body on Retry after an unknown outcome, and asks to press Connect again after a 409', async () => {
-    renderFor(OBS);
+    const { queryClient } = renderFor(OBS);
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
     await screen.findByText(RELATIONSHIPS_COPY.empty);
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
     const dialog = screen.getByRole('dialog', { name: CONNECT_COPY.title });
@@ -350,6 +352,26 @@ describe('Relationships', () => {
     expect(await within(dialog).findByText(CONNECT_COPY.conflict)).toBeTruthy();
     const [first, retry] = mutations();
     expect(retry).toStrictEqual(first);
+    // The study is re-read, so the next Connect goes out on its current revision.
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toContainEqual(
+      studyQueryKey(STUDY_ID),
+    );
+  });
+
+  it('treats the browser closing the dialog while idle as Cancel: focus returns to Connect, which opens it again', async () => {
+    renderFor(OBS);
+    await screen.findByText(RELATIONSHIPS_COPY.empty);
+    const connect = screen.getByRole('button', { name: 'Connect' });
+    fireEvent.click(connect);
+    const dialog = screen.getByRole<HTMLDialogElement>('dialog', { name: CONNECT_COPY.title });
+    act(() => dialog.close());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(connect);
+    fireEvent.click(connect);
+    expect(screen.getByRole<HTMLDialogElement>('dialog', { name: CONNECT_COPY.title }).open).toBe(
+      true,
+    );
+    expect(mutations()).toStrictEqual([]);
   });
 
   it('closes the dialog and turns read-only through onLocked on a lifecycle refusal, and shows the target rule next to Relationship', async () => {

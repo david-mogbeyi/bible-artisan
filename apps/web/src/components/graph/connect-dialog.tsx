@@ -73,7 +73,8 @@ interface FieldErrors {
  * `POST /edges` on the study's revision with its Idempotency-Key, resent verbatim by Retry after
  * an unknown outcome (BIB-27). It closes only after the server's 201, on Cancel or Escape (never
  * while a request is pending), or on a lifecycle refusal; the caller then returns focus (to its
- * opener, or its locked alert) and announces "Relationship added.".
+ * opener, or its locked alert) and announces "Relationship added.". If the browser closes it
+ * anyway, it reopens while a request is pending and otherwise reports a Cancel.
  *
  * Mounted while open: each opening starts a fresh draft.
  */
@@ -128,10 +129,31 @@ export function ConnectDialog({
     (prefilledFrom.current ? typeRef : fromRef).current?.focus();
   }, []);
 
+  /** Set once the dialog closes itself, so the `close` event its own `close()` fires is ignored. */
+  const closing = useRef(false);
+
   function close(outcome: ConnectOutcome) {
+    closing.current = true;
     // Closed first, so the page outside is no longer inert when the caller moves focus there.
     dialogRef.current?.close();
     onClose(outcome);
+  }
+
+  /**
+   * The browser closed the dialog itself (Chrome can on a repeated Escape, past `cancel`). While
+   * a request is pending it comes straight back, so its result is never shown in a closed dialog;
+   * otherwise it is a Cancel, so the caller drops it (the next opening mounts a fresh one) and
+   * returns focus.
+   */
+  function closedNatively() {
+    if (closing.current) return;
+    const dialog = dialogRef.current;
+    if (request.pending) {
+      if (dialog?.isConnected && !dialog.open) dialog.showModal();
+      return;
+    }
+    closing.current = true;
+    onClose('cancelled');
   }
 
   function cancel() {
@@ -216,6 +238,7 @@ export function ConnectDialog({
         event.preventDefault();
         cancel();
       }}
+      onClose={closedNatively}
       className="m-auto max-h-[calc(100dvh-2rem)] w-[min(36rem,calc(100vw-2rem))] overflow-y-auto rounded border border-muted bg-canvas p-6 text-ink backdrop:bg-black/40"
     >
       <h2 id={titleId} className="font-serif text-2xl">

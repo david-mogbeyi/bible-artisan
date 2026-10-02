@@ -1,7 +1,7 @@
 import type { StudyResponse } from '@bible-artisan/contracts';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NodesSection } from '@/components/nodes/nodes-section';
+import { NODES_COPY, NodesSection } from '@/components/nodes/nodes-section';
 import { nodeAccessibleName } from '@/lib/graph-view';
 import { nodeOptionText } from '@/lib/nodes';
 import { expectNoA11yViolations } from '@/test/axe';
@@ -217,6 +217,44 @@ describe('Graph List View (BIB-29)', () => {
     expect(forward.disabled).toBe(true);
     expect(back.disabled).toBe(false);
     expect(api.mutations()).toStrictEqual([]);
+  });
+
+  it('keeps an unsaved node edit open when Back selects another node', async () => {
+    await openPage();
+    for (const id of [Q, O]) {
+      fireEvent.click(within(row(id)).getByRole('button', { name: /^Open / }));
+    }
+    await screen.findByRole('heading', { name: 'Observation' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByRole('textbox', { name: /^Text/ }), {
+      target: { value: 'An unsaved thought' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to previously selected node' }));
+    await waitFor(() => expect(checkbox(Q).checked).toBe(true));
+    expect(screen.getByText(NODES_COPY.held)).toBeTruthy();
+    expect(screen.getByRole<HTMLTextAreaElement>('textbox', { name: /^Text/ }).value).toBe(
+      'An unsaved thought',
+    );
+    // Cancelling the edit lets the detail follow the selection.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByRole('heading', { name: 'Question' })).toBeTruthy();
+    expect(screen.queryByText(NODES_COPY.held)).toBeNull();
+  });
+
+  it('keeps an unsaved node edit open when List View Open or Show selects another node', async () => {
+    await openPage();
+    fireEvent.click(within(row(O)).getByRole('button', { name: /^Open / }));
+    await screen.findByRole('heading', { name: 'Observation' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    const text = () => screen.getByRole<HTMLTextAreaElement>('textbox', { name: /^Text/ });
+    fireEvent.change(text(), { target: { value: 'An unsaved thought' } });
+    fireEvent.click(within(row(Q)).getByRole('button', { name: /^Open / }));
+    await waitFor(() => expect(checkbox(Q).checked).toBe(true));
+    expect(screen.getByText(NODES_COPY.held)).toBeTruthy();
+    expect(text().value).toBe('An unsaved thought');
+    fireEvent.click(within(row(O)).getByRole('button', { name: `Show ${name(C)}` }));
+    await waitFor(() => expect(checkbox(C).checked).toBe(true));
+    expect(text().value).toBe('An unsaved thought');
   });
 
   it('keeps List View, selection and Back / Forward on an archived study, with no Connect anywhere', async () => {

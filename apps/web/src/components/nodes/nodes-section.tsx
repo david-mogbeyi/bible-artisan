@@ -65,7 +65,7 @@ const LOAD_COPY: ProblemCopy = {
  *
  * BIB-28: a selection change on the canvas (another node, blank space, Escape) never discards an
  * open edit with unsaved changes: that node's detail stays open, saying so, until it is saved or
- * cancelled.
+ * cancelled. BIB-29: the same holds for List View's Open and Show and for Back / Forward.
  */
 export function NodesSection({
   study,
@@ -184,11 +184,12 @@ export function NodesSection({
   }
 
   const items = nodes.data?.items ?? [];
-  // The open detail follows the selection, except that a canvas selection change keeps a detail
-  // with an unsaved edit open (`held`) until the edit is saved or cancelled.
+  // The open detail follows the selection, except that a selection change in the Graph section
+  // (the canvas, List View, Back / Forward) keeps a detail with an unsaved edit open (`held`) until
+  // the edit is saved or cancelled.
   const [openId, setOpenId] = useState<string | null>(selectedId);
   const held =
-    openId !== null && openId !== selectedId && detailUnsaved && selectionSource === 'canvas';
+    openId !== null && openId !== selectedId && detailUnsaved && selectionSource !== 'list';
   if (openId !== selectedId && !held) setOpenId(selectedId);
   const shownId = held ? openId : selectedId;
   const labelOf = (nodeId: string) => items.find((node) => node.id === nodeId)?.label ?? null;
@@ -302,8 +303,11 @@ export function NodesSection({
           studyId={study.id}
           nodeId={shownId}
           editable={editable}
-          // A node picked on the canvas opens without taking focus from the canvas.
-          focusOnLoad={focusDetail && (selectedId === null || selectionSource === 'list')}
+          // A node picked on the canvas opens without taking focus from the canvas, and a held
+          // edit keeps focus where the user is.
+          focusOnLoad={
+            !held && focusDetail && (selectedId === null || selectionSource !== 'canvas')
+          }
           onFocused={onFocused}
           onSaved={() => setAnnouncement('Saved')}
           onLocked={lockAndAlert}

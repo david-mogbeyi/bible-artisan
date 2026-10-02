@@ -174,7 +174,8 @@ describe('Connect dialog (BIB-29)', () => {
   });
 
   it('says what went wrong for a stale study, a node gone elsewhere (clearing it) and the question-target rule', async () => {
-    await openList();
+    const { queryClient } = await openList();
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
     fireEvent.click(rowConnect(S));
     fireEvent.change(field('Relationship'), { target: { value: 'answers' } });
     fireEvent.change(field('To'), { target: { value: O } });
@@ -189,8 +190,13 @@ describe('Connect dialog (BIB-29)', () => {
     expect(within(dialog()).getByText(EDGE_RULE_COPY.targetNotQuestion)).toBeTruthy();
 
     fireEvent.change(field('Relationship'), { target: { value: 'supports' } });
+    invalidate.mockClear();
     fireEvent.click(connect);
     expect(await within(dialog()).findByText(CONNECT_COPY.conflict)).toBeTruthy();
+    // The study is re-read, so the next Connect goes out on its current revision.
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toContainEqual(
+      studyQueryKey(STUDY_ID),
+    );
 
     // The observation was deleted elsewhere: the refetched snapshot no longer has it.
     api.graph = {
@@ -278,6 +284,53 @@ describe('Connect dialog (BIB-29)', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(document.activeElement).toBe(opener);
     expect(api.mutations()).toHaveLength(1);
+  });
+
+  it('reopens when the browser closes it while Connect is pending, and shows the result in it', async () => {
+    await openList();
+    const opener = rowConnect(S);
+    fireEvent.click(opener);
+    fireEvent.change(field('Relationship'), { target: { value: 'supports' } });
+    fireEvent.change(field('To'), { target: { value: O } });
+    let answer!: (response: Response) => void;
+    api.edgeReplies.push(new Promise<Response>((resolve) => (answer = resolve)));
+    fireEvent.click(within(dialog()).getByRole('button', { name: 'Connect' }));
+    await waitFor(() =>
+      expect(within(dialog()).getByRole('button', { name: 'Connecting…' })).toBeTruthy(),
+    );
+    const element = dialog() as HTMLDialogElement;
+    // What Chrome does on a repeated Escape, past the `cancel` handler.
+    act(() => element.close());
+    expect(element.open).toBe(true);
+    expect(dialog()).toBe(element);
+    act(() => answer(jsonResponse(422, envelope('EDGE_LIMIT_EXCEEDED'))));
+    expect(textOf(await within(dialog()).findByRole('alert'))).toBe(CONNECT_COPY.limit);
+    expect(element.open).toBe(true);
+  });
+
+  it('treats the browser closing it while idle as Cancel: focus returns and Connect… opens it again', async () => {
+    await openList();
+    fireEvent.click(screen.getByRole('checkbox', { name: `Select ${name(O)}` }));
+    const connect = screen.getByRole<HTMLButtonElement>('button', { name: 'Connect…' });
+    fireEvent.click(connect);
+    act(() => (dialog() as HTMLDialogElement).close());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(connect);
+    fireEvent.click(connect);
+    expect((dialog() as HTMLDialogElement).open).toBe(true);
+    expect(field('From').value).toBe(O);
+    expect(document.activeElement).toBe(field('Relationship'));
+
+    // The same from a List View row.
+    fireEvent.click(within(dialog()).getByRole('button', { name: 'Cancel' }));
+    const opener = rowConnect(S);
+    fireEvent.click(opener);
+    act(() => (dialog() as HTMLDialogElement).close());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    fireEvent.click(opener);
+    expect(field('From').value).toBe(S);
+    expect(api.mutations()).toStrictEqual([]);
   });
 
   it('prefills From and To from the toolbar in selection order, and needs one or two selected nodes', async () => {

@@ -322,7 +322,7 @@ function GraphCanvas({
     placement.current = { positions, visible: view.visible };
   }, [positions, view.visible]);
   useEffect(() => {
-    if (selectionSource !== 'list' || store.getState().viewMode !== 'graph') return;
+    if (selectionSource === 'canvas' || store.getState().viewMode !== 'graph') return;
     const id = selectedNodeIds.at(-1);
     const position = id ? placement.current.positions[id] : undefined;
     if (!id || !position || !placement.current.visible.has(id)) return;
@@ -749,7 +749,7 @@ function GraphCanvas({
           canConnect={editable}
           headingRef={listHeading}
           onToggle={toggleSelected}
-          onOpen={(nodeId) => store.getState().select([nodeId], 'list', { focusDetail: true })}
+          onOpen={(nodeId) => store.getState().select([nodeId], 'graph', { focusDetail: true })}
           onConnect={(nodeId, opener) => openConnect({ fromId: nodeId, toId: null }, opener)}
         />
       )}

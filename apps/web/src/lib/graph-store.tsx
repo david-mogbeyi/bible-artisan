@@ -12,6 +12,9 @@ import {
   stepForward,
 } from './selection-history';
 
+/** Where a selection change came from (see `GraphViewState.selectionSource`). */
+export type SelectionSource = 'canvas' | 'graph' | 'list';
+
 /** The Graph section's two presentations of the same snapshot (BIB-29). */
 export type GraphViewMode = 'graph' | 'list';
 
@@ -33,11 +36,13 @@ export interface GraphViewState {
    */
   selectedNodeIds: string[];
   /**
-   * Where the latest selection came from. 'list': an explicit pick (the Nodes list, List View's
-   * Open and Show, Back / Forward) that pans the canvas to it. 'canvas': a canvas click or a List
-   * View checkbox, which never pans or steals focus and keeps an unsaved node edit open.
+   * Where the latest selection came from. 'list': a pick in the Nodes list, which pans the canvas
+   * to it. 'graph': an explicit pick in the Graph section (List View's Open and Show, Back /
+   * Forward), which pans the canvas to it but, like any graph selection change, keeps an unsaved
+   * node edit open. 'canvas': a canvas click or a List View checkbox, which never pans or steals
+   * focus and keeps an unsaved node edit open.
    */
-  selectionSource: 'canvas' | 'list';
+  selectionSource: SelectionSource;
   /** The selection asked for the open node's detail heading to take focus once it loads. */
   focusDetail: boolean;
   /** Back / Forward (BIB-29): every change to exactly one node, from any source. */
@@ -53,7 +58,7 @@ export interface GraphViewState {
   /** The latest arrangement's ids still queued: they are saved together, in one request. */
   pendingGroup: ReadonlySet<string>;
 
-  select: (ids: string[], source: 'canvas' | 'list', options?: { focusDetail?: boolean }) => void;
+  select: (ids: string[], source: SelectionSource, options?: { focusDetail?: boolean }) => void;
   /** The detail heading took focus (or no longer should). */
   detailFocused: () => void;
   /**
@@ -113,7 +118,7 @@ export function createGraphViewStore(): GraphViewStore {
           ? {
               history: next.history,
               selectedNodeIds: [next.id],
-              selectionSource: 'list',
+              selectionSource: 'graph',
               focusDetail: false,
             }
           : { history: next.history },
