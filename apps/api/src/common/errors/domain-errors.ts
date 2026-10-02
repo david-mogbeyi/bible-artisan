@@ -1,11 +1,16 @@
 import {
   type AnchorProblemCode,
+  ANNOTATION_LIMIT_EXCEEDED,
+  ANNOTATION_UNCHANGED,
+  type AnnotationErrorCode,
   LIFECYCLE_TRANSITION_INVALID,
+  MAX_ANNOTATIONS_PER_STUDY,
   MAX_NOTE_CHARACTERS,
   MAX_NOTES_PER_STUDY,
   MAX_STUDY_TAGS,
   NOTE_LIMIT_EXCEEDED,
   NOTE_NOT_TRASHED,
+  NOTE_REFERENCE_INVALID,
   NOTE_TARGET_NOT_FOUND,
   NOTE_TOO_LONG,
   NOTE_TRASHED,
@@ -274,6 +279,7 @@ const NOTE_MESSAGES: Record<NoteErrorCode, string> = {
   [NOTE_UNCHANGED]: 'The note already has this content and version',
   [NOTE_TRASHED]: 'This note is in the trash. Restore it to make changes',
   [NOTE_NOT_TRASHED]: 'This note is not in the trash',
+  [NOTE_REFERENCE_INVALID]: 'A Bible reference link in this note could not be verified',
 };
 
 /**
@@ -286,6 +292,23 @@ export class NoteRuleError extends Error {
   constructor(readonly code: NoteErrorCode) {
     super(NOTE_MESSAGES[code]);
     this.name = 'NoteRuleError';
+  }
+}
+
+const ANNOTATION_MESSAGES: Record<AnnotationErrorCode, string> = {
+  [ANNOTATION_LIMIT_EXCEEDED]: `A study can have at most ${MAX_ANNOTATIONS_PER_STUDY.toLocaleString('en-US')} highlights`,
+  [ANNOTATION_UNCHANGED]: 'The highlight already has this color and label',
+};
+
+/**
+ * A highlight change the study's or highlight's state cannot apply (BIB-24; PRD section 24: 422):
+ * the per-study highlight cap, or an edit that changes nothing. Raised under the study lock, so
+ * nothing is written. Fixed messages: never the label or quote.
+ */
+export class AnnotationRuleError extends Error {
+  constructor(readonly code: AnnotationErrorCode) {
+    super(ANNOTATION_MESSAGES[code]);
+    this.name = 'AnnotationRuleError';
   }
 }
 

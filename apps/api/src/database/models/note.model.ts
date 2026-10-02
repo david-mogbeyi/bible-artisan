@@ -7,13 +7,13 @@ import {
   Table,
   UpdatedAt,
 } from 'sequelize-typescript';
-import type { NoteDocument } from '@bible-artisan/contracts';
+import type { NoteDocument, ScriptureAnchor } from '@bible-artisan/contracts';
 
 /**
  * Hand-written model class for `note` (BIB-23, PRD section 23). Study-scoped: `study_id` +
  * `owner_id` with a composite FK to `study (owner_id, id)` (cascading), and an optional
  * `target_node_id` with a composite FK to `study_node (owner_id, study_id, id)`, both declared
- * only in the migration's raw SQL. Nullability and defaults mirror the migration.
+ * only in the migration's raw SQL. BIB-24 adds the Scripture target pair. Nullability and defaults mirror the migration.
  *
  * `richTextJson` is only ever written after `noteDocumentSchema` validated it, and `plainText` /
  * `searchText` are derived from it by the API (`notePlainText`, `noteSearchText`), never taken
@@ -34,6 +34,16 @@ export class Note extends Model {
   /** The node of the same study the note is attached to; null for a study note. Never changes. */
   @Column({ field: 'target_node_id', type: DataType.UUID, allowNull: true })
   declare targetNodeId: string | null;
+
+  /**
+   * A Scripture target (BIB-24): the shared reference of the anchor's verses, and the anchor as
+   * `AnchorService` checked it. Both set or both null, never with `targetNodeId`. Never changes.
+   */
+  @Column({ field: 'target_reference_id', type: DataType.UUID, allowNull: true })
+  declare targetReferenceId: string | null;
+
+  @Column({ field: 'target_anchor_json', type: DataType.JSONB, allowNull: true })
+  declare targetAnchorJson: ScriptureAnchor | null;
 
   @Column({ field: 'rich_text_json', type: DataType.JSONB, allowNull: false })
   declare richTextJson: NoteDocument;

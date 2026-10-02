@@ -23,7 +23,8 @@ import {
 
 /**
  * Durable Scripture anchors (BIB-18, PRD sections 14, 23; FR-BIBLE-006). Stateless: an anchor is
- * a value the caller keeps (BIB-24 stores it as `Annotation.anchor_json`). Both operations check
+ * a value the caller keeps (BIB-24 stores it as `Annotation.anchor_json` and on notes, and calls
+ * `resolve` before writing one and `checkStored` when reading them back). Both operations check
  * the anchor against the immutable corpus and never adjust it. The only write is the idempotent
  * upsert of the shared `scripture_reference` row for the anchor's verses, exactly as
  * `POST /bible/resolve` writes one. Nothing is logged; no transaction is needed.
@@ -87,6 +88,78 @@ export class AnchorService {
     if (problem) return unresolved(problem, anchor, reference);
     if (!reference) throw new Error('AnchorService: a resolved anchor has a reference');
     return { outcome: 'resolved', anchor, reference };
+  }
+
+  /**
+   * Re-checks many stored anchors at once (BIB-24: a chapter's highlights, a note list's Scripture
+   * targets), with exactly the rules of `resolve` but without minting references (the caller
+   * stored each anchor's reference id when it was saved). Returns each anchor's first failing rule,
+   * or null while it still matches, in input order. Editions come from the cached index; the
+   * verses of every anchor whose coordinates hold are read in ONE query (a primary-key range join
+   * per anchor), so a list costs one statement, not one per item.
+   */
+  async checkStored(anchors: readonly ScriptureAnchor[]): Promise<(AnchorProblemCode | null)[]> {
+    const problems: (AnchorProblemCode | null)[] = anchors.map(() => null);
+    const pending: { index: number; anchor: ScriptureAnchor; range: ReferenceRange }[] = [];
+    const indexes = new Map<string, BookIndex | null>();
+    for (const [index, anchor] of anchors.entries()) {
+      if (!indexes.has(anchor.editionId)) {
+        try {
+          indexes.set(
+            anchor.editionId,
+            (await this.references.activeEdition(anchor.editionId)).index,
+          );
+        } catch (error) {
+          if (!(error instanceof NotFoundError)) throw error;
+          indexes.set(anchor.editionId, null);
+        }
+      }
+      const bookIndex = indexes.get(anchor.editionId);
+      if (!bookIndex) {
+        problems[index] = 'ANCHOR_EDITION_UNAVAILABLE';
+        continue;
+      }
+      const coordinates = checkCoordinates(bookIndex.book(anchor.bookCode), anchor.segments);
+      if (coordinates) {
+        problems[index] = coordinates;
+        continue;
+      }
+      pending.push({ index, anchor, range: rangeOf(anchor.bookCode, anchor.segments) });
+    }
+    if (pending.length === 0) return problems;
+
+    const rows = await this.db.query<StoredVerse & { item: string }>(
+      `SELECT r.item, v.chapter, v.verse, v.text, v.text_sha256 AS "textSha256"
+         FROM unnest($1::uuid[], $2::text[], $3::int[], $4::int[], $5::int[], $6::int[])
+              WITH ORDINALITY AS r(edition_id, book_code, sc, sv, ec, ev, item)
+         JOIN bible_verse v
+           ON v.edition_id = r.edition_id AND v.book_code = r.book_code
+          AND (v.chapter, v.verse) >= (r.sc, r.sv) AND (v.chapter, v.verse) <= (r.ec, r.ev)
+        ORDER BY r.item, v.chapter, v.verse`,
+      {
+        bind: [
+          pending.map((p) => p.anchor.editionId),
+          pending.map((p) => p.range.bookCode),
+          pending.map((p) => p.range.startChapter),
+          pending.map((p) => p.range.startVerse),
+          pending.map((p) => p.range.endChapter),
+          pending.map((p) => p.range.endVerse),
+        ],
+        type: QueryTypes.SELECT,
+      },
+    );
+    const versesOf = new Map<number, StoredVerse[]>();
+    for (const { item, ...verse } of rows) {
+      // ORDINALITY is 1-based and comes back from pg as a bigint string.
+      const position = Number(item) - 1;
+      const list = versesOf.get(position) ?? [];
+      list.push(verse);
+      versesOf.set(position, list);
+    }
+    for (const [position, { index, anchor }] of pending.entries()) {
+      problems[index] = checkText(anchor, versesOf.get(position) ?? []);
+    }
+    return problems;
   }
 
   /**

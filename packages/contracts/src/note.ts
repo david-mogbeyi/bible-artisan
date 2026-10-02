@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { ANCHOR_KINDS, ANCHOR_PROBLEM_CODES, scriptureAnchorSchema } from './anchor';
+import { scriptureReferenceSchema } from './bible';
 import { eventSequenceSchema, expectedRevisionSchema } from './mutation';
 import { STUDY_NODE_TYPES } from './study';
 import { tagKey } from './study-edit';
@@ -37,6 +39,10 @@ export const NOTE_CHECKPOINT_INTERVAL_SECONDS = 30;
 export const NOTE_PREVIEW_LENGTH = 200;
 /** Largest `start` an ordered list may declare. */
 export const MAX_ORDERED_LIST_START = 10_000;
+/** Most verified Scripture reference links (`scriptureReference` nodes) in one note (BIB-24). */
+export const MAX_NOTE_REFERENCES = 500;
+/** Longest reference label a `scriptureReference` node may carry (canonical labels are shorter). */
+export const MAX_NOTE_REFERENCE_LABEL_LENGTH = 200;
 /** Version of the document schema stored with each note and version. */
 export const NOTE_SCHEMA_VERSION = 1;
 
@@ -52,6 +58,11 @@ export const NOTE_UNCHANGED = 'NOTE_UNCHANGED';
 export const NOTE_TRASHED = 'NOTE_TRASHED';
 /** 422: restore of a note that is not in the trash. */
 export const NOTE_NOT_TRASHED = 'NOTE_NOT_TRASHED';
+/**
+ * 422 (BIB-24): a `scriptureReference` node names a reference that does not exist in an active
+ * edition, or carries a label that is not exactly that reference's canonical label.
+ */
+export const NOTE_REFERENCE_INVALID = 'NOTE_REFERENCE_INVALID';
 
 export const NOTE_ERROR_CODES = [
   NOTE_TARGET_NOT_FOUND,
@@ -59,6 +70,7 @@ export const NOTE_ERROR_CODES = [
   NOTE_UNCHANGED,
   NOTE_TRASHED,
   NOTE_NOT_TRASHED,
+  NOTE_REFERENCE_INVALID,
 ] as const;
 export type NoteErrorCode = (typeof NOTE_ERROR_CODES)[number];
 
@@ -68,6 +80,8 @@ export const NOTE_TOO_MANY_NODES = `A note can have at most ${MAX_NOTE_NODES.toL
 export const NOTE_TEXT_INVALID = 'Remove control or invalid characters';
 export const NOTE_MARK_REPEATED = 'Each formatting mark may appear once per text run';
 export const NOTE_EDIT_EMPTY = 'Send new content or ask for a checkpoint';
+export const NOTE_TOO_MANY_REFERENCES = `A note can have at most ${MAX_NOTE_REFERENCES} Bible reference links`;
+export const NOTE_TARGET_EXCLUSIVE = 'Attach a note to a node or to a passage, not both';
 
 // ---------------------------------------------------------------------------------------------
 // The document allowlist
@@ -86,7 +100,18 @@ export interface NoteHardBreak {
   type: 'hardBreak';
 }
 
-export type NoteInline = NoteText | NoteHardBreak;
+/**
+ * A verified internal link to a Bible passage (BIB-24, FR-NOTE-003): the shared
+ * `scripture_reference` id and that reference's canonical label, which the server checks on every
+ * write (unknown id or another label is 422 `NOTE_REFERENCE_INVALID`). An inline atom: no text
+ * runs, no marks. It never creates a node or edge.
+ */
+export interface NoteScriptureReference {
+  type: 'scriptureReference';
+  attrs: { referenceId: string; label: string };
+}
+
+export type NoteInline = NoteText | NoteHardBreak | NoteScriptureReference;
 
 export interface NoteParagraph {
   type: 'paragraph';
@@ -166,6 +191,17 @@ const noteTextSchema = z.strictObject({
 const noteInlineSchema = z.discriminatedUnion('type', [
   noteTextSchema,
   z.strictObject({ type: z.literal('hardBreak') }),
+  z.strictObject({
+    type: z.literal('scriptureReference'),
+    attrs: z.strictObject({
+      referenceId: z.uuid(),
+      label: z
+        .string()
+        .min(1)
+        .max(MAX_NOTE_REFERENCE_LABEL_LENGTH)
+        .refine((text) => !FORBIDDEN_NOTE_TEXT.test(text), { message: NOTE_TEXT_INVALID }),
+    }),
+  }),
 ]);
 
 const noteParagraphSchema = z.strictObject({
@@ -235,29 +271,36 @@ function rawBoundsProblem(value: unknown): string | null {
   return null;
 }
 
-/** The deepest nesting level and the number of document nodes (`doc` included). */
-function measure(doc: NoteDocument): { depth: number; nodes: number } {
+/**
+ * The deepest nesting level, the number of document nodes (`doc` included) and of
+ * `scriptureReference` nodes.
+ */
+function measure(doc: NoteDocument): { depth: number; nodes: number; references: number } {
   let depth = 0;
   let nodes = 0;
-  const stack: [{ content?: readonly unknown[] }, number][] = [[doc, 1]];
+  let references = 0;
+  const stack: [{ type?: string; content?: readonly unknown[] }, number][] = [[doc, 1]];
   while (stack.length > 0) {
-    const [node, level] = stack.pop() as [{ content?: readonly unknown[] }, number];
+    const [node, level] = stack.pop() as [{ type?: string; content?: readonly unknown[] }, number];
     nodes += 1;
+    if (node.type === 'scriptureReference') references += 1;
     depth = Math.max(depth, level);
     for (const child of node.content ?? []) {
       stack.push([child as { content?: readonly unknown[] }, level + 1]);
     }
   }
-  return { depth, nodes };
+  return { depth, nodes, references };
 }
 
 const noteDocumentShapeSchema = z
   .strictObject({ type: z.literal('doc'), content: z.array(noteBlockSchema).min(1) })
   .superRefine((doc, ctx) => {
-    const { depth, nodes } = measure(doc);
+    const { depth, nodes, references } = measure(doc);
     if (depth > MAX_NOTE_DEPTH) ctx.addIssue({ code: 'custom', message: NOTE_TOO_DEEP });
     else if (nodes > MAX_NOTE_NODES) {
       ctx.addIssue({ code: 'custom', message: NOTE_TOO_MANY_NODES });
+    } else if (references > MAX_NOTE_REFERENCES) {
+      ctx.addIssue({ code: 'custom', message: NOTE_TOO_MANY_REFERENCES });
     }
   });
 
@@ -281,7 +324,32 @@ export const EMPTY_NOTE_DOCUMENT: NoteDocument = { type: 'doc', content: [{ type
 // ---------------------------------------------------------------------------------------------
 
 function inlineText(content: readonly NoteInline[] | undefined): string {
-  return (content ?? []).map((node) => (node.type === 'text' ? node.text : '\n')).join('');
+  return (content ?? [])
+    .map((node) =>
+      node.type === 'text'
+        ? node.text
+        : node.type === 'scriptureReference'
+          ? node.attrs.label
+          : '\n',
+    )
+    .join('');
+}
+
+/**
+ * Every `scriptureReference` node's attributes, in document order (BIB-24): what the server
+ * verifies against the corpus on every write.
+ */
+export function noteReferenceLinks(doc: NoteDocument): NoteScriptureReference['attrs'][] {
+  const links: NoteScriptureReference['attrs'][] = [];
+  const stack: unknown[] = [...doc.content].reverse();
+  while (stack.length > 0) {
+    const node = stack.pop() as NoteBlock | NoteListItem | NoteInline;
+    if (node.type === 'scriptureReference') links.push(node.attrs);
+    if ('content' in node && node.content) {
+      for (const child of [...node.content].reverse()) stack.push(child);
+    }
+  }
+  return links;
 }
 
 function blocksText(blocks: readonly NoteBlock[]): string {
@@ -303,8 +371,8 @@ function blockText(block: NoteBlock): string {
 
 /**
  * The note's plain text, as the server stores it for search, previews, export and the length
- * limit: text runs in order, a line break for each hard break and between blocks and list items.
- * Formatting and link targets are not part of it. Only the server's copy is stored; the web
+ * limit: text runs in order, a reference link's label, a line break for each hard break and
+ * between blocks and list items. Formatting and link targets are not part of it. Only the server's copy is stored; the web
  * client uses the same function for its character counter.
  */
 export function notePlainText(doc: NoteDocument): string {
@@ -339,11 +407,22 @@ export function noteSearchText(plainText: string): string {
  * `POST /v1/studies/:studyId/notes`. Creating a note is a change to the study, so
  * `expectedRevision` is the study's revision. No `targetNodeId`: a study note.
  */
-export const createNoteRequestSchema = z.strictObject({
-  expectedRevision: expectedRevisionSchema,
-  targetNodeId: z.uuid().optional(),
-  content: noteDocumentSchema,
-});
+export const createNoteRequestSchema = z
+  .strictObject({
+    expectedRevision: expectedRevisionSchema,
+    targetNodeId: z.uuid().optional(),
+    /**
+     * BIB-24: a Scripture range (`kind: 'verses'`) or phrase as captured by `POST /bible/anchors`.
+     * The server re-checks it against the corpus (a mismatch is 422 with the anchor code) and
+     * never adjusts it. Not together with `targetNodeId`.
+     */
+    targetAnchor: scriptureAnchorSchema.optional(),
+    content: noteDocumentSchema,
+  })
+  .refine((body) => body.targetNodeId === undefined || body.targetAnchor === undefined, {
+    message: NOTE_TARGET_EXCLUSIVE,
+    path: ['targetAnchor'],
+  });
 
 export type CreateNoteRequest = z.infer<typeof createNoteRequestSchema>;
 
@@ -376,16 +455,32 @@ export const listNotesQuerySchema = z.strictObject({
 });
 
 /**
- * The node a note is attached to. `label` is what identifies it to the owner: a question's text,
- * a Scripture node's reference label; null for a type without one yet. `deleted`: the node was
- * deleted, so the note is listed for orphaned-note review (FR-NOTE-002); it keeps its target.
+ * What a note is attached to (null: the study).
+ *
+ * `node`: `label` is what identifies it to the owner: a question's text, a Scripture node's
+ * reference label; null for a type without one yet. `deleted`: the node was deleted, so the note
+ * is listed for orphaned-note review (FR-NOTE-002); it keeps its target.
+ *
+ * `scripture` (BIB-24): a verse range or phrase anchor, re-checked against the corpus on every
+ * read. `reference` is the anchor's verses (null once its edition is no longer active);
+ * `problem` is null while the anchor still matches the stored text, else why it does not. An
+ * anchor that no longer matches is reported, never moved.
  */
-export const noteTargetSchema = z.object({
-  nodeId: z.uuid(),
-  nodeType: z.enum(STUDY_NODE_TYPES),
-  label: z.string().nullable(),
-  deleted: z.boolean(),
-});
+export const noteTargetSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('node'),
+    nodeId: z.uuid(),
+    nodeType: z.enum(STUDY_NODE_TYPES),
+    label: z.string().nullable(),
+    deleted: z.boolean(),
+  }),
+  z.object({
+    kind: z.literal('scripture'),
+    anchorKind: z.enum(ANCHOR_KINDS),
+    reference: scriptureReferenceSchema.nullable(),
+    problem: z.enum(ANCHOR_PROBLEM_CODES).nullable(),
+  }),
+]);
 
 export type NoteTarget = z.infer<typeof noteTargetSchema>;
 
@@ -395,6 +490,8 @@ export const noteResponseSchema = z.object({
   studyId: z.uuid(),
   revision: z.number().int().positive(),
   target: noteTargetSchema.nullable(),
+  /** The anchor exactly as stored, for a `scripture` target (its original quote); else null. */
+  targetAnchor: scriptureAnchorSchema.nullable(),
   content: noteDocumentSchema,
   characterCount: z.number().int().nonnegative(),
   latestVersionNumber: z.number().int().positive(),
@@ -417,6 +514,8 @@ export const noteMutationResponseSchema = z.object({
   studyId: z.uuid(),
   revision: z.number().int().positive(),
   targetNodeId: z.uuid().nullable(),
+  /** The shared reference of a Scripture target's verses (BIB-24); null otherwise. */
+  targetReferenceId: z.uuid().nullable(),
   characterCount: z.number().int().nonnegative(),
   latestVersionNumber: z.number().int().positive(),
   createdAt: z.iso.datetime(),

@@ -25,12 +25,24 @@ import {
   resolveAnchorRequestSchema,
   resolveAnchorResponseSchema,
 } from './anchor';
+import {
+  annotationListResponseSchema,
+  annotationMutationResponseSchema,
+  annotationStateRequestSchema,
+  createAnnotationRequestSchema,
+  createAnnotationResponseSchema,
+  HIGHLIGHT_COLORS,
+  MAX_ANNOTATIONS_PER_STUDY,
+  MAX_HIGHLIGHT_LABEL_LENGTH,
+  updateAnnotationRequestSchema,
+} from './annotation';
 import { errorEnvelopeSchema } from './error-envelope';
 import { healthResponseSchema, livenessResponseSchema } from './health';
 import {
   createNoteRequestSchema,
   createNoteResponseSchema,
   MAX_NOTE_CHARACTERS,
+  MAX_NOTE_REFERENCES,
   MAX_NOTE_VERSIONS,
   MAX_NOTES_PER_STUDY,
   NOTE_CHECKPOINT_INTERVAL_SECONDS,
@@ -173,7 +185,7 @@ const NOTE_OWNERSHIP =
 const NOTE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent (ids only) commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NOTE_OWNERSHIP}`;
 
 /** The note document rules (NFR-SEC-002), for the routes that take one. */
-const NOTE_DOCUMENT_RULES = `content is a Tiptap/ProseMirror document checked against an allowlist: paragraph, heading (level 1-3), bulletList, orderedList (start), listItem, blockquote, text and hardBreak nodes; bold, italic and link (href only, http or https, no credentials) marks. Anything else (another node, mark or attribute, HTML, an unsafe link, nesting deeper than 12 levels, more than 20,000 nodes) is 400 and nothing is stored. The server derives the plain text; more than ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters of it is 413 NOTE_TOO_LONG, and a body over 1 MiB is 413.`;
+const NOTE_DOCUMENT_RULES = `content is a Tiptap/ProseMirror document checked against an allowlist: paragraph, heading (level 1-3), bulletList, orderedList (start), listItem, blockquote, text, hardBreak and scriptureReference (referenceId and label, at most ${MAX_NOTE_REFERENCES} per note) nodes; bold, italic and link (href only, http or https, no credentials) marks. A scriptureReference must name a reference of an active edition and carry exactly its canonical label, else 422 NOTE_REFERENCE_INVALID; it never creates a node. Anything else (another node, mark or attribute, HTML, an unsafe link, nesting deeper than 12 levels, more than 20,000 nodes) is 400 and nothing is stored. The server derives the plain text; more than ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters of it is 413 NOTE_TOO_LONG, and a body over 1 MiB is 413.`;
 
 /** What every lifecycle route (BIB-22) shares after its own first sentence. */
 const LIFECYCLE_RULES =
@@ -467,7 +479,7 @@ function buildDocument(): OpenApiDocument {
       },
       '/studies/{studyId}/notes': {
         post: {
-          description: `Creates a note on the study, or on one of its live nodes (targetNodeId; anything else is 422 NOTE_TARGET_NOT_FOUND), with version 1 (FR-NOTE-001). Creating a note is a study change: expectedRevision is the study's revision, which the creation bumps (studyRevision in the response); contentRevision moves. note_created. At most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} live notes per study (422 NOTE_LIMIT_EXCEEDED); notes in the note trash do not count. The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
+          description: `Creates a note on the study, on one of its live nodes (targetNodeId; anything else is 422 NOTE_TARGET_NOT_FOUND), or on a Scripture range or phrase (targetAnchor, from POST /bible/anchors, re-checked against the corpus: a mismatch is 422 with the ANCHOR_* code; not together with targetNodeId), with version 1 (FR-NOTE-001). Creating a note is a study change: expectedRevision is the study's revision, which the creation bumps (studyRevision in the response); contentRevision moves. note_created. At most ${MAX_NOTES_PER_STUDY.toLocaleString('en-US')} live notes per study (422 NOTE_LIMIT_EXCEEDED); notes in the note trash do not count. The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam],
           requestBody: jsonBody('CreateNoteRequest'),
@@ -554,6 +566,55 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/studies/{studyId}/annotations': {
+        post: {
+          description: `Saves a highlight (FR-BIBLE-006): an anchor from POST /bible/anchors, re-checked against the stored corpus text (checksums, offsets and quote; a mismatch is 422 with the ANCHOR_* code, never adjusted) and stored unchanged, bound to its edition. colorToken is one of ${HIGHLIGHT_COLORS.join(', ')}; label is optional (at most ${MAX_HIGHLIGHT_LABEL_LENGTH} characters, trimmed; empty means none). Creating a highlight is a study change: expectedRevision is the study's revision (studyRevision in the response); contentRevision moves. highlight_created {annotationId, referenceId, colorToken}. At most ${MAX_ANNOTATIONS_PER_STUDY.toLocaleString('en-US')} live highlights per study (422 ANNOTATION_LIMIT_EXCEEDED). The response carries no anchor or label. ${NOTE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam],
+          requestBody: jsonBody('CreateAnnotationRequest'),
+          responses: {
+            201: jsonResponse(
+              'The new highlight, without its anchor or label',
+              'CreateAnnotationResponse',
+            ),
+            default: errorResponse,
+          },
+        },
+        get: {
+          description: `Lists the study's highlights on the chapter the reader shows for referenceId (its first chapter), in that reference's edition and book, oldest first. Each anchor is re-checked against the corpus on this read: resolved, or unresolved with the reason and the anchor exactly as stored (never moved). An unknown reference is 404. Archived and trashed studies stay readable. ${NOTE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [
+            studyIdParam,
+            queryParam('referenceId', true, { type: 'string', format: 'uuid' }),
+          ],
+          responses: {
+            200: jsonResponse('The highlights', 'AnnotationListResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/annotations/{annotationId}': {
+        patch: {
+          description: `Changes a highlight's color and/or label. expectedRevision is the highlight's. contentRevision does not move (PRD section 17). highlight_updated {annotationId, colorToken}. Nothing to change is 422 ANNOTATION_UNCHANGED. ${NOTE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('annotationId')],
+          requestBody: jsonBody('UpdateAnnotationRequest'),
+          responses: {
+            200: jsonResponse('The highlight as saved', 'AnnotationMutationResponse'),
+            default: errorResponse,
+          },
+        },
+        delete: {
+          description: `Deletes a highlight; it is then absent (404). expectedRevision is the highlight's. contentRevision moves. highlight_deleted {annotationId}. ${NOTE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('annotationId')],
+          requestBody: jsonBody('AnnotationStateRequest'),
+          responses: {
+            200: jsonResponse('The deleted highlight', 'AnnotationMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/bible/translations': {
         get: {
           description:
@@ -620,6 +681,12 @@ function buildDocument(): OpenApiDocument {
         NoteListResponse: toSchema(noteListResponseSchema),
         NoteVersionListResponse: toSchema(noteVersionListResponseSchema),
         NoteVersionResponse: toSchema(noteVersionResponseSchema),
+        CreateAnnotationRequest: toInputSchema(createAnnotationRequestSchema),
+        CreateAnnotationResponse: toSchema(createAnnotationResponseSchema),
+        UpdateAnnotationRequest: toInputSchema(updateAnnotationRequestSchema),
+        AnnotationStateRequest: toSchema(annotationStateRequestSchema),
+        AnnotationMutationResponse: toSchema(annotationMutationResponseSchema),
+        AnnotationListResponse: toSchema(annotationListResponseSchema),
         // Filled while the entries above were converted.
         ...hoisted,
       },

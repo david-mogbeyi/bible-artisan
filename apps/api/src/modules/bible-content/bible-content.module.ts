@@ -15,6 +15,7 @@ import { SearchService } from './search/search.service';
 @Module({
   controllers: [BibleController],
   providers: [ReferenceService, SearchService, PassageService, AnchorService],
-  exports: [ReferenceService],
+  // AnchorService: Notes (BIB-24) re-checks the anchors it stores through it, never `bible_verse`.
+  exports: [ReferenceService, AnchorService],
 })
 export class BibleContentModule {}
