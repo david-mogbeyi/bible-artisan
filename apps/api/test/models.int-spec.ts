@@ -10,6 +10,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
+import { Annotation } from '../src/database/models/annotation.model';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
 import { BibleBook } from '../src/database/models/bible-book.model';
@@ -494,6 +495,8 @@ describe('Sequelize models against the real schema', () => {
       studyId: study.id,
       ownerId: owner.id,
       targetNodeId: target.id,
+      targetReferenceId: null,
+      targetAnchorJson: null,
       richTextJson: content,
       plainText: '',
       searchText: '',
@@ -577,6 +580,114 @@ describe('Sequelize models against the real schema', () => {
     await Study.destroy({ where: { id: study.id } });
     expect(await NoteVersion.count({ where: { noteId: note.id } })).toBe(0);
     expect(await Note.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  /** A model-level anchor value: the column stores whatever the API checked; only its root is pinned. */
+  const anchorValue = (editionId: string) => ({
+    version: 1 as const,
+    editionId,
+    bookCode: 'ROM',
+    kind: 'verses' as const,
+    segments: [{ chapter: 9, verse: 1, start: 0, end: 4, textSha256: '0'.repeat(64) }],
+    quote: 'I te',
+  });
+
+  it('creates an Annotation with only required fields and reads it back with DB defaults (BIB-24)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const reference = await ScriptureReference.findOne({ rejectOnEmpty: true });
+    const anchorJson = anchorValue(reference.editionId);
+    const annotation = await Annotation.create({
+      studyId: study.id,
+      ownerId: owner.id,
+      referenceId: reference.id,
+      editionId: reference.editionId,
+      bookCode: reference.bookCode,
+      startChapter: reference.startChapter,
+      endChapter: reference.endChapter,
+      anchorJson,
+      colorToken: 'blue',
+    });
+    expect(
+      (await Annotation.findByPk(annotation.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      studyId: study.id,
+      ownerId: owner.id,
+      referenceId: reference.id,
+      editionId: reference.editionId,
+      bookCode: reference.bookCode,
+      startChapter: reference.startChapter,
+      endChapter: reference.endChapter,
+      anchorJson,
+      colorToken: 'blue',
+      label: null,
+      revision: 1,
+      deletedAt: null,
+      createdAt: expect.any(Date),
+      updatedAt: expect.any(Date),
+    });
+  });
+
+  it('rejects model-level annotations and note Scripture targets that cross owners or break their CHECKs; a study delete cascades (BIB-24)', async () => {
+    const owner = await createUser();
+    const otherOwner = await createUser();
+    const study = await createStudy(owner.id);
+    const reference = await ScriptureReference.findOne({ rejectOnEmpty: true });
+    const anchorJson = anchorValue(reference.editionId);
+    const base = {
+      studyId: study.id,
+      ownerId: owner.id,
+      referenceId: reference.id,
+      editionId: reference.editionId,
+      bookCode: reference.bookCode,
+      startChapter: 9,
+      endChapter: 9,
+      anchorJson,
+      colorToken: 'yellow' as const,
+    };
+    await expect(Annotation.create({ ...base, ownerId: otherOwner.id })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+    await expect(Annotation.create({ ...base, referenceId: randomUUID() })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+    for (const bad of [
+      { colorToken: 'red' },
+      { label: '' },
+      { label: 'x'.repeat(81) },
+      { startChapter: 9, endChapter: 8 },
+      { anchorJson: { ...anchorJson, version: 2 } },
+    ]) {
+      await expect(Annotation.create({ ...base, ...bad } as never)).rejects.toBeInstanceOf(
+        DatabaseError,
+      );
+    }
+    await Annotation.create({ ...base, label: '🙂'.repeat(80) });
+
+    const content = { type: 'doc', content: [{ type: 'paragraph' }] } as const;
+    const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, type: 'thought' });
+    const note = { studyId: study.id, ownerId: owner.id, richTextJson: content, plainText: '' };
+    const withTarget = await Note.create({
+      ...note,
+      searchText: '',
+      targetReferenceId: reference.id,
+      targetAnchorJson: anchorJson,
+    });
+    expect(
+      (await Note.findByPk(withTarget.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toMatchObject({ targetReferenceId: reference.id, targetAnchorJson: anchorJson });
+    for (const bad of [
+      { targetReferenceId: reference.id },
+      { targetAnchorJson: anchorJson },
+      { targetReferenceId: reference.id, targetAnchorJson: anchorJson, targetNodeId: node.id },
+    ]) {
+      await expect(Note.create({ ...note, searchText: '', ...bad })).rejects.toBeInstanceOf(
+        DatabaseError,
+      );
+    }
+    await Study.destroy({ where: { id: study.id } });
+    expect(await Annotation.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('creates an AuthChallenge with only required fields and reads it back with defaults', async () => {

@@ -1180,6 +1180,184 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs highlights and note Scripture targets and reference links (BIB-24) without quotes, labels, references, ids, or keys', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ question: track(`SENTINEL-highlight-question-${randomUUID()}`) })
+      .expect(201);
+    const hlStudyId = track((created.body as { studyId: string }).studyId);
+    const edition = await BibleEdition.findOne({ where: { code: 'engwebp' }, rejectOnEmpty: true });
+    const verse = await BibleVerse.findOne({
+      where: { editionId: edition.id, bookCode: 'ROM', chapter: 9, verse: 2 },
+      rejectOnEmpty: true,
+    });
+    const quote = track(Array.from(verse.text).slice(0, 24).join(''));
+    track(verse.textSha256);
+    const captured = await withPrivateChannels(http().post('/v1/bible/anchors'), cookie).send({
+      editionId: edition.id,
+      bookCode: 'ROM',
+      kind: 'phrase',
+      segments: [{ chapter: 9, verse: 2, start: 0, end: 24 }],
+      quote,
+    });
+    const { anchor, reference } = captured.body as {
+      anchor: Record<string, unknown>;
+      reference: { id: string; label: string };
+    };
+    track(reference.id);
+    track(reference.label);
+    const chapter = await withPrivateChannels(http().post('/v1/bible/references'), cookie).send({
+      editionId: edition.id,
+      bookCode: 'ROM',
+      chapter: 9,
+    });
+    const chapterId = track((chapter.body as { reference: { id: string } }).reference.id);
+
+    const listRoute = '/v1/studies/:studyId/annotations';
+    const itemRoute = '/v1/studies/:studyId/annotations/:annotationId';
+    const send = (method: 'get' | 'post' | 'patch' | 'delete', path: string, body?: object) => {
+      // The list's query string is strict (`referenceId` only), so it gets no decoy parameters.
+      const search = method === 'get' ? `?referenceId=${chapterId}` : query();
+      const req = withPrivateChannels(
+        http()[method](`/v1/studies/${hlStudyId}/annotations${path}${search}`),
+        cookie,
+      ).set('Idempotency-Key', track(randomUUID()));
+      return body ? req.send(body) : req;
+    };
+
+    // Labels the owner's own list returns: tracked for the log check only.
+    const highlight = await send('post', '', {
+      expectedRevision: 1,
+      anchor,
+      colorToken: 'green',
+      label: track(`SENTINEL-highlight-label-${randomUUID()}`),
+    });
+    await expectLogged(highlight, { method: 'POST', route: listRoute, status: 201 });
+    const highlightId = track((highlight.body as { id: string }).id);
+
+    const tampered = await send('post', '', {
+      expectedRevision: 2,
+      anchor: { ...anchor, quote: secret('highlight-quote') },
+      colorToken: 'green',
+    });
+    await expectLogged(
+      tampered,
+      { method: 'POST', route: listRoute, status: 422 },
+      {
+        errorType: 'AnchorInvalidError',
+        body: envelope({
+          code: 'ANCHOR_QUOTE_MISMATCH',
+          message: 'The selected text does not match this translation',
+        }),
+      },
+    );
+    const badLabel = await send('patch', `/${highlightId}`, {
+      expectedRevision: 1,
+      label: `${secret('highlight-long-label')}${'x'.repeat(80)}`,
+    });
+    await expectLogged(
+      badLabel,
+      { method: 'PATCH', route: itemRoute, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { label: ['A label can have at most 80 characters'] },
+        }),
+      },
+    );
+    const edited = await send('patch', `/${highlightId}`, {
+      expectedRevision: 1,
+      colorToken: 'pink',
+      label: track(`SENTINEL-highlight-new-label-${randomUUID()}`),
+    });
+    await expectLogged(edited, { method: 'PATCH', route: itemRoute, status: 200 });
+    const stale = await send('patch', `/${highlightId}`, {
+      expectedRevision: 1,
+      label: secret('highlight-stale-label'),
+    });
+    await expectLogged(
+      stale,
+      { method: 'PATCH', route: itemRoute, status: 409 },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 2,
+        }),
+      },
+    );
+    const listed = await send('get', '');
+    expect((listed.body as { items: unknown[] }).items).toHaveLength(1);
+    await expectLogged(listed, { method: 'GET', route: listRoute, status: 200 });
+    await expectLogged(await send('delete', `/${highlightId}`, { expectedRevision: 2 }), {
+      method: 'DELETE',
+      route: itemRoute,
+      status: 200,
+    });
+    await expectLogged(
+      await send('delete', `/${track(randomUUID())}`, { expectedRevision: 1 }),
+      { method: 'DELETE', route: itemRoute, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+
+    // A note on the phrase, and reference links in note text.
+    const notesRoute = '/v1/studies/:studyId/notes';
+    const link = (label: string) => ({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'scriptureReference', attrs: { referenceId: reference.id, label } }],
+        },
+      ],
+    });
+    const postNote = (body: object) =>
+      withPrivateChannels(http().post(`/v1/studies/${hlStudyId}/notes${query()}`), cookie)
+        .set('Idempotency-Key', track(randomUUID()))
+        .send(body);
+    // Highlight edits and deletes change the highlight, not the study: its revision is still 2.
+    const note = await postNote({
+      expectedRevision: 2,
+      targetAnchor: anchor,
+      content: link(reference.label),
+    });
+    await expectLogged(note, { method: 'POST', route: notesRoute, status: 201 });
+    track((note.body as { id: string }).id);
+    const forged = await postNote({
+      expectedRevision: 3,
+      content: link(secret('reference-label')),
+    });
+    await expectLogged(
+      forged,
+      { method: 'POST', route: notesRoute, status: 422 },
+      {
+        errorType: 'NoteRuleError',
+        body: envelope({
+          code: 'NOTE_REFERENCE_INVALID',
+          message: 'A Bible reference link in this note could not be verified',
+        }),
+      },
+    );
+    const badTarget = await postNote({
+      expectedRevision: 3,
+      targetAnchor: { ...anchor, quote: secret('note-target-quote') },
+      content: link(reference.label),
+    });
+    await expectLogged(
+      badTarget,
+      { method: 'POST', route: notesRoute, status: 422 },
+      {
+        errorType: 'AnchorInvalidError',
+        body: envelope({
+          code: 'ANCHOR_QUOTE_MISMATCH',
+          message: 'The selected text does not match this translation',
+        }),
+      },
+    );
+  });
+
   it('logs a request the client aborted with no status, never a default 200', async () => {
     const correlationId = randomUUID();
     // The probe holds its transaction for 1 s; the client gives up after 200 ms.

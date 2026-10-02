@@ -8,11 +8,13 @@ import type {
   StudyListResponse,
   StudyResponse,
 } from '@bible-artisan/contracts';
-import { QueryTypes } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 import request, { type Response } from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
+import { Annotation } from '../src/database/models/annotation.model';
+import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { NoteVersion } from '../src/database/models/note-version.model';
 import { Note } from '../src/database/models/note.model';
@@ -24,6 +26,7 @@ import { Study } from '../src/database/models/study.model';
 import { Tag } from '../src/database/models/tag.model';
 import { User } from '../src/database/models/user.model';
 import { NotFoundError } from '../src/common/errors/domain-errors';
+import { ReferenceService } from '../src/modules/bible-content/reference/reference.service';
 import { SessionService } from '../src/modules/identity/session.service';
 import { StudyAccessService } from '../src/modules/study/study-access.service';
 import { tagVocabularyLockKey } from '../src/modules/study/http/study-tags';
@@ -784,6 +787,24 @@ describe('study lifecycle (BIB-22)', () => {
         });
       expect(checkpoint.status).toBe(200);
       expect(await NoteVersion.count({ where: { noteId } })).toBe(2);
+      // A highlight (BIB-24) goes with the study too (written through its model here).
+      const edition = await BibleEdition.findOne({
+        where: { activatedAt: { [Op.ne]: null } },
+        rejectOnEmpty: true,
+      });
+      const reference = await app.get(ReferenceService).chapterReference(edition.id, 'ROM', 9);
+      await Annotation.create({
+        studyId: expired.studyId,
+        ownerId: carol.user.id,
+        referenceId: reference.id,
+        editionId: reference.editionId,
+        bookCode: reference.bookCode,
+        startChapter: reference.startChapter,
+        endChapter: reference.endChapter,
+        anchorJson: { version: 1 },
+        colorToken: 'pink',
+        label: 'Private label',
+      });
       await changed(carol, 'trash', expired.studyId, 3);
       await trashedDaysAgo(expired.studyId, 31);
       // In the window: kept. Active, sharing a tag: kept, and so is that tag.
@@ -830,8 +851,9 @@ describe('study lifecycle (BIB-22)', () => {
           StudyTag.count({ where: { studyId: gone } }),
           Note.count({ where: { studyId: gone } }),
           NoteVersion.count({ where: { studyId: gone } }),
+          Annotation.count({ where: { studyId: gone } }),
         ]),
-      ).toStrictEqual([0, 0, 0, 0, 0, 0, 0]);
+      ).toStrictEqual([0, 0, 0, 0, 0, 0, 0, 0]);
       const carolTags = await Tag.findAll({ where: { ownerId: carol.user.id }, raw: true });
       expect(carolTags.map((tag) => tag.name)).toStrictEqual([sharedTag]);
       expect(

@@ -20,8 +20,11 @@ const LIBRARY_MIGRATION = '20261001182657_add_study_library.ts';
 const LIFECYCLE_MIGRATION = '20261001194710_add_study_lifecycle.ts';
 /** BIB-23's notes migration. */
 const NOTE_MIGRATION = '20261001222927_create_note.ts';
+/** BIB-24's highlights and note Scripture targets migration. */
+const ANNOTATION_MIGRATION = '20261001235033_create_annotation.ts';
 
 const DOMAIN_TABLES = [
+  'annotation',
   'auth_challenge',
   'auth_session',
   'bible_book',
@@ -223,12 +226,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-23's notes) is the first `down` toward the
-      // corpus and refuses before anything commits, though this study has no note.
+      // No opt-in at all: the newest migration (BIB-24's highlights) is the first `down` toward
+      // the corpus and refuses before anything commits, though this study has no highlight.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: 'note drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        message: 'annotation drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -310,6 +313,73 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies highlights and note Scripture targets (BIB-24) only with the study-data opt-in; the table, columns and constraints come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const schema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid IN ('annotation'::regclass, 'note'::regclass)
+            AND (conrelid = 'annotation'::regclass OR conname LIKE 'note_%target%')
+         UNION ALL
+         SELECT indexname FROM pg_indexes WHERE indexname = 'annotation_chapter_idx'
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      await db.query(
+        `INSERT INTO annotation (study_id, owner_id, reference_id, edition_id, book_code,
+                                 start_chapter, end_chapter, anchor_json, color_token)
+         SELECT s.id, s.owner_id, r.id, r.edition_id, r.book_code, r.start_chapter,
+                r.end_chapter, '{"version":1}', 'yellow'
+           FROM study s, (SELECT * FROM scripture_reference LIMIT 1) r
+          WHERE s.owner_id = $1`,
+        { bind: [userId] },
+      );
+      const schemaBefore = await schema();
+      expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'annotation_anchor_json_check',
+        'annotation_chapter_idx',
+        'annotation_chapters_check',
+        'annotation_color_token_check',
+        'annotation_label_check',
+        'annotation_pkey',
+        'annotation_reference_id_fkey',
+        'annotation_revision_check',
+        'annotation_study_owner_fk',
+        'note_scripture_target_check',
+        'note_target_node_fk',
+        'note_target_reference_id_fkey',
+      ]);
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(ANNOTATION_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: 'annotation drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await db.query('SELECT 1 FROM annotation', { type: QueryTypes.SELECT })).toHaveLength(
+        1,
+      );
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['annotation'])).toStrictEqual([]);
+      expect(
+        await db.query(
+          `SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'note' AND column_name LIKE 'target_%' ORDER BY column_name`,
+          { type: QueryTypes.SELECT },
+        ),
+      ).toStrictEqual([{ column_name: 'target_node_id' }]);
+      await migrator.up();
+      expect(await schema()).toStrictEqual(schemaBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies notes (BIB-23) only with the study-data opt-in; the tables, keys and version trigger come back', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
@@ -339,17 +409,22 @@ describe('migration reversibility', () => {
         'note_owner_id_study_id_id_key',
         'note_study_owner_fk',
         'note_target_node_fk',
+        'note_target_reference_id_fkey',
         'note_version_immutable',
         'note_version_note_fk',
         'note_version_note_id_version_number_key',
       ]);
       const before = await recordedMigrations(db);
+      // Past BIB-24's step (which refuses first, from latest), note's own guard refuses too.
+      await withStudyDataDropAllowed(() => migrator.down({ to: ANNOTATION_MIGRATION }));
       const refused = await migrator.down().catch((e: unknown) => e);
       expect((refused as { cause?: unknown }).cause).toMatchObject({
         message: 'note drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
         parent: expect.objectContaining({ code: '23000' }),
       });
-      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await recordedMigrations(db)).toStrictEqual(
+        before.filter((name) => name !== ANNOTATION_MIGRATION),
+      );
       expect(
         await db.query('SELECT 1 FROM note_version', { type: QueryTypes.SELECT }),
       ).not.toHaveLength(0);
