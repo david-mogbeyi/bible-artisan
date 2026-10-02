@@ -97,7 +97,9 @@ function normalize(node: EditorNode): EditorNode | null {
     type,
     ...(attrs ? { attrs } : {}),
     ...(text !== undefined ? { text } : {}),
-    ...(node.marks && node.marks.length > 0
+    // A reference link carries no marks (the allowlist refuses them); its editor node allows
+    // none, and any that arrive anyway are dropped rather than making the note unsavable.
+    ...(node.marks && node.marks.length > 0 && type !== 'scriptureReference'
       ? {
           marks: node.marks.map((mark) => {
             const markAttrs = keptAttrs(mark.type, mark.attrs);

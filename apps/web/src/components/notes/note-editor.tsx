@@ -13,6 +13,8 @@ import {
 } from '@bible-artisan/contracts';
 import { useQueryClient } from '@tanstack/react-query';
 import { Fragment, type Node as ProseMirrorNode, Slice } from '@tiptap/pm/model';
+import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state';
+import { AddMarkStep } from '@tiptap/pm/transform';
 import {
   type Editor,
   EditorContent,
@@ -137,6 +139,28 @@ const RESOLVE_COPY = {
 } as const;
 
 /**
+ * A reference link carries no marks (the allowlist refuses them). ProseMirror decides which
+ * marks an inline node may take from its parent, not from the node's own spec, so bold, italic or
+ * a web link applied over a selection containing one would mark it too and make the note
+ * unsavable. After any mark step, this takes them off again; `toNoteDraft` also drops any that
+ * arrive another way.
+ */
+const referenceWithoutMarks = new Plugin({
+  key: new PluginKey('scriptureReferenceWithoutMarks'),
+  appendTransaction(transactions, _old, state) {
+    const marked = transactions.some((tr) => tr.steps.some((step) => step instanceof AddMarkStep));
+    if (!marked) return null;
+    let tr: Transaction | null = null;
+    state.doc.descendants((node, pos) => {
+      if (node.type.name === 'scriptureReference' && node.marks.length > 0) {
+        tr = (tr ?? state.tr).setNodeMarkup(pos, undefined, node.attrs, []);
+      }
+    });
+    return tr;
+  },
+});
+
+/**
  * A verified Bible reference link (BIB-24, FR-NOTE-003): an inline atom holding a shared
  * reference id and its canonical label, inserted only by "Resolve reference" after the server
  * resolved the selected text. It is deleted as a unit and shows its label as text. The server
@@ -174,7 +198,26 @@ const ScriptureReferenceNode = TiptapNode.create({
   renderText({ node }) {
     return String(node.attrs.label ?? '');
   },
+  addProseMirrorPlugins() {
+    return [referenceWithoutMarks];
+  },
 });
+
+/**
+ * The selection without the whitespace (or block boundaries) at either end, so "Resolve
+ * reference" replaces exactly the reference and keeps the spaces around it.
+ */
+export function trimmedRange(
+  doc: ProseMirrorNode,
+  { from, to }: { from: number; to: number },
+): { from: number; to: number } {
+  const blank = (a: number, b: number) => doc.textBetween(a, b, ' ', ' ').trim() === '';
+  let start = from;
+  let end = to;
+  while (start < end && blank(start, start + 1)) start += 1;
+  while (end > start && blank(end - 1, end)) end -= 1;
+  return { from: start, to: end };
+}
 
 /**
  * The editor's schema: the note allowlist and nothing else (no code, strike, underline, rule,
@@ -524,8 +567,8 @@ export function NoteEditor({
     input?: string,
   ) {
     if (!editor || resolving) return;
-    const { from, to } = range ?? editor.state.selection;
-    const text = range?.text ?? editor.state.doc.textBetween(from, to, ' ', ' ').trim();
+    const { from, to } = range ?? trimmedRange(editor.state.doc, editor.state.selection);
+    const text = range?.text ?? editor.state.doc.textBetween(from, to, ' ', ' ');
     setResolveMessage(null);
     setCandidates(null);
     if (text === '') return setResolveMessage(RESOLVE_COPY.empty);

@@ -17,7 +17,7 @@ import {
 } from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import request, { type Response } from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
@@ -29,6 +29,7 @@ import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
+import { AnchorService } from '../src/modules/bible-content/anchor/anchor.service';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 import { SessionService } from '../src/modules/identity/session.service';
 import { createTestApp } from './app';
@@ -304,6 +305,10 @@ describe('notes (BIB-23)', () => {
     db = app.get<Database>(DATABASE);
     alice = await signedInUser();
     bob = await signedInUser();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   afterAll(async () => {
@@ -677,6 +682,139 @@ describe('notes (BIB-23)', () => {
           problem: 'ANCHOR_QUOTE_MISMATCH',
         },
         drifted,
+      ]);
+    });
+
+    it('lists a Scripture target from its checksums alone, flagging a broken one; the full re-check runs only on the note itself', async () => {
+      const study = await createStudy(alice);
+      const { anchor, reference: ref } = await phrase();
+      const broken = await createNote(alice, study.studyId, doc('broken'), {
+        targetAnchor: anchor,
+      });
+      const drifted = await createNote(alice, study.studyId, doc('drifted'), {
+        targetAnchor: anchor,
+      });
+      const [segment] = anchor.segments;
+      if (!segment) throw new Error('no segment');
+      await Note.update(
+        { targetAnchorJson: { ...anchor, segments: [{ ...segment, textSha256: '0'.repeat(64) }] } },
+        { where: { id: broken.id } },
+      );
+      await Note.update(
+        { targetAnchorJson: { ...anchor, quote: `${anchor.quote} (as remembered)` } },
+        { where: { id: drifted.id } },
+      );
+      const fullCheck = vi.spyOn(app.get(AnchorService), 'checkStored');
+      const list = await send(alice, 'get', notesPath(study.studyId));
+      const listChecks = fullCheck.mock.calls.length;
+      const read = await send(alice, 'get', notePath(study.studyId, drifted.id));
+      const target = (problem: string | null) => ({
+        kind: 'scripture',
+        anchorKind: 'phrase',
+        reference: ref,
+        problem,
+      });
+      expect({
+        list: Object.fromEntries(
+          (list.body as NoteListResponse).items.map((item) => [item.id, item.target]),
+        ),
+        listChecks,
+        read: (read.body as NoteResponse).target,
+      }).toStrictEqual({
+        // The checksum no longer matches the corpus: flagged in the list. A quote that drifted
+        // is caught by the note's own full re-check.
+        list: {
+          [drifted.id]: target(null),
+          [broken.id]: target('ANCHOR_CHECKSUM_MISMATCH'),
+        },
+        listChecks: 0,
+        read: target('ANCHOR_QUOTE_MISMATCH'),
+      });
+    });
+
+    it('replays a committed note creation on a passage for its Idempotency-Key even after the anchor stops matching', async () => {
+      const study = await createStudy(alice);
+      const { anchor } = await phrase();
+      const body = { expectedRevision: 1, targetAnchor: anchor, content: doc('Paul swears') };
+      const key = randomUUID();
+      const first = await send(alice, 'post', notesPath(study.studyId), body, key);
+      expect(first.status).toBe(201);
+      const before = await ownerRows(alice);
+      const resolve = vi.spyOn(app.get(AnchorService), 'resolve').mockResolvedValue({
+        outcome: 'unresolved',
+        reason: 'ANCHOR_EDITION_UNAVAILABLE',
+        anchor,
+        reference: null,
+      });
+      const replay = await send(alice, 'post', notesPath(study.studyId), body, key);
+      expect({
+        replay: [replay.status, replay.body, replay.headers['idempotent-replayed']],
+        checks: resolve.mock.calls.length,
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({
+        replay: [201, first.body, 'true'],
+        checks: 0,
+        unchanged: true,
+      });
+    });
+
+    it('keeps saving a note whose stored reference link no longer verifies, while a new or changed link is still checked', async () => {
+      const study = await createStudy(alice);
+      const ref = await reference('Rom 9:1');
+      const note = await createNote(alice, study.studyId, withLink(ref.id, ref.label));
+      // The link stored earlier no longer verifies (as after a label format change): its label
+      // is not the reference's canonical one any more.
+      const legacy = 'Rom. 9.1';
+      await Note.update({ richTextJson: withLink(ref.id, legacy) }, { where: { id: note.id } });
+      const edited = (text: string, links: [string, string][]): NoteDocument => ({
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            content: [
+              { type: 'text', text },
+              ...links.map(([referenceId, label]) => ({
+                type: 'scriptureReference' as const,
+                attrs: { referenceId, label },
+              })),
+            ],
+          },
+        ],
+      });
+      const REFERENCE_INVALID = envelope({
+        code: 'NOTE_REFERENCE_INVALID',
+        message: 'A Bible reference link in this note could not be verified',
+      });
+      // Other text changes around the stored link: saved, the link kept as stored.
+      const kept = await save(alice, study.studyId, note.id, {
+        expectedRevision: 1,
+        content: edited('Edited around ', [[ref.id, legacy]]),
+      });
+      // A link that is new to the note is checked as ever: another unverifiable label is refused.
+      const added = await save(alice, study.studyId, note.id, {
+        expectedRevision: 2,
+        content: edited('Edited around ', [
+          [ref.id, legacy],
+          [ref.id, 'Romans 9:2'],
+        ]),
+      });
+      // And a new link that verifies saves beside the kept one.
+      const verified = await save(alice, study.studyId, note.id, {
+        expectedRevision: 2,
+        content: edited('Edited around ', [
+          [ref.id, legacy],
+          [ref.id, ref.label],
+        ]),
+      });
+      expect(
+        [kept, added, verified].map((res): unknown[] => [
+          res.status,
+          res.status === 200 ? (res.body as NoteMutationResponse).revision : res.body,
+        ]),
+      ).toStrictEqual([
+        [200, 2],
+        [422, REFERENCE_INVALID],
+        [200, 3],
       ]);
     });
 

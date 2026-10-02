@@ -113,6 +113,42 @@ describe('schema (composite-key owner isolation)', () => {
     ]);
   });
 
+  it('backs every composite FK into study with a full (non-partial) index on its columns, so a study purge cascades by index', async () => {
+    // A partial index (e.g. live rows only) cannot serve the cascade, which must also find the
+    // soft-deleted children; without a full index each purged study scans the child table
+    // (BIB-24: `annotation` had only its partial chapter index).
+    const unindexed = await db.query<{ name: string }>(
+      `SELECT c.conname AS name
+         FROM pg_constraint c
+        WHERE c.contype = 'f' AND c.confrelid = 'public.study'::regclass
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_index i
+             WHERE i.indrelid = c.conrelid AND i.indpred IS NULL
+               AND (
+                 -- Led by the column referencing study.id (unique, so enough on its own) …
+                 (i.indkey::int2[])[0] = c.conkey[array_position(c.confkey, (
+                   SELECT attnum FROM pg_attribute
+                    WHERE attrelid = 'public.study'::regclass AND attname = 'id'))]
+                 -- … or by all of the FK's columns, in any order.
+                 OR ((i.indkey::int2[])[0:cardinality(c.conkey) - 1] @> c.conkey
+                     AND (i.indkey::int2[])[0:cardinality(c.conkey) - 1] <@ c.conkey)))
+        ORDER BY c.conname`,
+      { type: QueryTypes.SELECT },
+    );
+    expect(unindexed).toStrictEqual([]);
+
+    // And the planner uses it for the cascade's lookup (sequential scans priced out, as on a
+    // large table): the annotation cascade reads `annotation_study_idx`.
+    const plan = await db.transaction(async (transaction) => {
+      await db.query('SET LOCAL enable_seqscan = off', { transaction });
+      return db.query<{ 'QUERY PLAN': string }>(
+        `EXPLAIN SELECT 1 FROM annotation WHERE owner_id = $1 AND study_id = $2`,
+        { bind: [randomUUID(), randomUUID()], transaction, type: QueryTypes.SELECT },
+      );
+    });
+    expect(plan.map((row) => row['QUERY PLAN']).join('\n')).toMatch(/annotation_study_idx/);
+  });
+
   it('rejects a study_node insert whose owner_id does not match its study owner', async () => {
     const owner = await insertUser();
     const otherOwner = await insertUser();

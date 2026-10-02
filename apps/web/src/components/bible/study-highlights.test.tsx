@@ -257,6 +257,122 @@ describe('highlights in the reader (BIB-24)', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Highlight' }));
   });
 
+  /** Captures verse 3 and opens the Highlight form with Blue and a label chosen. */
+  async function chooseHighlight() {
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 3' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Capture' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Highlight' }));
+    const form = screen.getByRole('form', { name: 'Highlight this selection' });
+    fireEvent.click(within(form).getByRole('radio', { name: 'Blue' }));
+    fireEvent.change(within(form).getByLabelText('Label (optional)'), {
+      target: { value: 'Seven' },
+    });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save highlight' }));
+    return form;
+  }
+  const created = () =>
+    jsonResponse(201, {
+      id: HIGHLIGHT_ID,
+      studyId: STUDY_ID,
+      revision: 1,
+      colorToken: 'blue',
+      referenceId: ref(3).id,
+      createdAt: T,
+      updatedAt: T,
+      deletedAt: null,
+      lastEventSequence: '9',
+      studyRevision: 10,
+    });
+  const posts = () => requests.filter((r) => r.route === `POST /studies/${STUDY_ID}/annotations`);
+
+  it('after a study conflict reads the study again and Retry saves the same choice on its current revision, with a new key', async () => {
+    reply(LIST, jsonResponse(200, { items: [] }), jsonResponse(200, { items: [] }));
+    reply(
+      `POST /studies/${STUDY_ID}/annotations`,
+      jsonResponse(409, {
+        code: 'REVISION_CONFLICT',
+        message: 'Revision conflict',
+        retryable: false,
+        correlationId: 'c',
+        currentRevision: 9,
+      }),
+      created(),
+    );
+    reply(
+      `GET /studies/${STUDY_ID}`,
+      jsonResponse(200, {
+        id: STUDY_ID,
+        title: 'Conscience',
+        description: null,
+        lifecycle: 'active',
+        pinned: false,
+        revision: 9,
+        contentRevision: 5,
+        startingReference: null,
+        mainQuestion: null,
+        originalQuestion: null,
+        tags: [],
+        branchId: null,
+        purgeAt: null,
+        createdAt: T,
+      }),
+    );
+    await renderReader();
+    const form = await chooseHighlight();
+
+    const alert = await within(form).findByRole('alert');
+    expect(textOf(alert)).toContain('This study changed somewhere else');
+    // The study was read again; the choice is still in the form.
+    expect(requests.some((r) => r.route === `GET /studies/${STUDY_ID}`)).toBe(true);
+    expect(within(form).getByRole<HTMLInputElement>('radio', { name: 'Blue' }).checked).toBe(true);
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    await waitFor(
+      () =>
+        expect(textOf(screen.getByRole('status'))).toContain('Blue highlight saved on Psalms 3:3.'),
+      { timeout: 3000 },
+    );
+    const [first, second] = posts();
+    expect({
+      revisions: posts().map((p) => (p.body as { expectedRevision: number }).expectedRevision),
+      intents: posts().map((p) => {
+        const { colorToken, label } = p.body as { colorToken: string; label: string };
+        return [colorToken, label];
+      }),
+      newKey: first?.key !== second?.key,
+    }).toStrictEqual({
+      revisions: [7, 9],
+      intents: [
+        ['blue', 'Seven'],
+        ['blue', 'Seven'],
+      ],
+      newKey: true,
+    });
+  });
+
+  it('keeps the Idempotency-Key for Retry when the server marks a failure retryable, whatever its status', async () => {
+    reply(LIST, jsonResponse(200, { items: [] }), jsonResponse(200, { items: [] }));
+    reply(
+      `POST /studies/${STUDY_ID}/annotations`,
+      jsonResponse(422, {
+        code: 'TEMPORARILY_UNAVAILABLE',
+        message: 'x',
+        retryable: true,
+        correlationId: 'c',
+      }),
+      created(),
+    );
+    await renderReader();
+    const form = await chooseHighlight();
+    fireEvent.click(await within(form).findByRole('button', { name: 'Retry' }));
+    await waitFor(
+      () =>
+        expect(textOf(screen.getByRole('status'))).toContain('Blue highlight saved on Psalms 3:3.'),
+      { timeout: 3000 },
+    );
+    const [first, second] = posts();
+    expect([posts().length, first?.body, first?.key]).toStrictEqual([2, second?.body, second?.key]);
+  });
+
   it('deletes a highlight after a labelled confirmation with focus on Cancel; a conflict offers Reload', async () => {
     reply(LIST, jsonResponse(200, { items: [RESOLVED] }), jsonResponse(200, { items: [] }));
     reply(

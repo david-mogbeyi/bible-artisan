@@ -17,6 +17,13 @@ import type { MigrationContext } from '../src/database/migrator';
 //   code points (`char_length` counts code points, as the API does).
 // - `deleted_at`: deleted (soft; undo/restore is BIB-31), written with the database clock.
 //
+// Indexes: `annotation_study_idx` (owner_id, study_id), over every row, backs the composite FK so
+// a study purge or user delete cascades by index, never a scan (the partial chapter index skips
+// deleted highlights, so it cannot serve the cascade); `annotation_chapter_idx` (live rows only)
+// serves the reader's chapter query. The FKs to `scripture_reference` (`annotation.reference_id`,
+// `note.target_reference_id`) need no supporting index: those rows can never be deleted or
+// updated (BIB-15 trigger), so the FKs never look rows up from the referenced side.
+//
 // `note` gains a Scripture target: `target_reference_id` (the anchor's verses) and
 // `target_anchor_json` (the checked anchor), both set or both null, and never together with
 // `target_node_id`, so a note has at most one target.
@@ -56,6 +63,7 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
       CONSTRAINT annotation_revision_check CHECK (revision >= 1)
     );
   `);
+  await context.query(`CREATE INDEX annotation_study_idx ON annotation (owner_id, study_id);`);
   await context.query(`
     CREATE INDEX annotation_chapter_idx
       ON annotation (owner_id, study_id, edition_id, book_code, start_chapter)

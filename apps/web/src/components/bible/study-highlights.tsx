@@ -29,9 +29,10 @@ import {
   updateAnnotation,
 } from '@/lib/annotations';
 import { ApiError } from '@/lib/api-client';
+import { classifyError, isRetryable } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
 import { createNote, noteListsKey } from '@/lib/notes';
-import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
+import { fetchStudy, invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { AnchorQuote } from './anchor-quote';
 import type { CodePointRange } from './code-point-runs';
 import { ProblemAlert } from './problem-alert';
@@ -141,6 +142,8 @@ function ColorName({ color }: { color: HighlightColor }) {
 /**
  * One Idempotency-Key per logical request: kept, with the exact body, until the outcome is known,
  * so Retry after an unknown outcome resends the identical request and never applies it twice.
+ * Whether an outcome is unknown is the shared rule (`isRetryable`): a network failure, a 5xx, a
+ * 429 or any envelope marked `retryable: true` keeps the key; a definite refusal drops it.
  */
 function useAttempt() {
   const attempt = useRef<{ body: string; key: string } | null>(null);
@@ -153,10 +156,7 @@ function useAttempt() {
       return attempt.current.key;
     },
     settle(error?: unknown): void {
-      const unknownOutcome =
-        error !== undefined &&
-        (!(error instanceof ApiError) || error.status >= 500 || error.status === 429);
-      if (!unknownOutcome) attempt.current = null;
+      if (error === undefined || !isRetryable(classifyError(error))) attempt.current = null;
     },
   };
 }
@@ -164,10 +164,9 @@ function useAttempt() {
 /** A refused change, in fixed copy (never a server message, quote or label). */
 function refusal(error: unknown, thing: 'highlight' | 'note' = 'highlight'): string | null {
   if (!(error instanceof ApiError)) return null;
+  // A 409 on a new highlight or note is `StudyConflict`'s; here it is an existing highlight's.
   if (error.status === 409) {
-    return thing === 'note'
-      ? 'This study changed somewhere else, so the note was not added. Reload the page and try again.'
-      : 'This highlight changed somewhere else, so nothing was saved. Reload the highlights and try again.';
+    return 'This highlight changed somewhere else, so nothing was saved. Reload the highlights and try again.';
   }
   if (error.status === 404) {
     return thing === 'note'
@@ -197,6 +196,31 @@ function SaveProblem({ error, onRetry }: { error: unknown; onRetry: () => void }
   const text = refusal(error);
   if (text) return <p role="alert">{text}</p>;
   return <ProblemAlert error={error} copy={SAVE_COPY} onRetry={onRetry} />;
+}
+
+const isConflict = (error: unknown): boolean => error instanceof ApiError && error.status === 409;
+
+/**
+ * A highlight or note on the selection refused because the study changed elsewhere (409). The
+ * study has been read again, so Retry sends the same choice on its current revision.
+ */
+function StudyConflict({ thing, onRetry }: { thing: 'highlight' | 'note'; onRetry: () => void }) {
+  return (
+    <div role="alert" className="flex flex-wrap items-center gap-2">
+      <p>
+        {thing === 'note'
+          ? 'This study changed somewhere else, so the note was not added yet.'
+          : 'This study changed somewhere else, so the highlight was not saved yet. Your color and label are kept.'}
+      </p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="rounded border border-accent px-3 py-1 text-accent"
+      >
+        Retry
+      </button>
+    </div>
+  );
 }
 
 /** The color radio group and optional label shared by Highlight and Edit. */
@@ -289,6 +313,9 @@ export function CapturedActions({
   const firstRadio = useRef<HTMLDivElement>(null);
   const highlightAttempt = useAttempt();
   const noteAttempt = useAttempt();
+  // The study revision read back after a 409, until the study prop catches up with it.
+  const [knownRevision, setKnownRevision] = useState(study.revision);
+  const studyRevision = Math.max(study.revision, knownRevision);
   const writable = studyIsWritable(study);
   const tooLong = Array.from(label.trim()).length > MAX_HIGHLIGHT_LABEL_LENGTH;
 
@@ -302,11 +329,29 @@ export function CapturedActions({
     toggleRef.current?.focus();
   };
 
+  /**
+   * After a 409 the study changed elsewhere: read it again (the cached study, and so the page,
+   * moves to the current revision) and refresh the highlights, keeping what the user chose, so
+   * Retry sends the same intent on the current revision (a new request, with a new key).
+   */
+  const catchUp = async () => {
+    void queryClient.invalidateQueries({ queryKey: annotationListsKey(study.id) });
+    try {
+      const current = await queryClient.fetchQuery({
+        queryKey: studyQueryKey(study.id),
+        queryFn: () => fetchStudy(study.id),
+      });
+      setKnownRevision((known) => Math.max(known, current.revision));
+    } catch {
+      // The conflict stays on screen; Retry reads the study again.
+    }
+  };
+
   const save = async (event?: FormEvent) => {
     event?.preventDefault();
     if (pending || tooLong) return;
     const body = {
-      expectedRevision: study.revision,
+      expectedRevision: studyRevision,
       anchor: captured.anchor,
       colorToken: color,
       label: label.trim() === '' ? null : label,
@@ -325,6 +370,7 @@ export function CapturedActions({
       toggleRef.current?.focus();
     } catch (error) {
       highlightAttempt.settle(error);
+      if (isConflict(error)) await catchUp();
       setProblem(error);
     } finally {
       setPending(false);
@@ -334,7 +380,7 @@ export function CapturedActions({
   const addNote = async () => {
     if (pending) return;
     const body = {
-      expectedRevision: study.revision,
+      expectedRevision: studyRevision,
       targetAnchor: captured.anchor,
       content: EMPTY_NOTE_DOCUMENT,
     };
@@ -350,6 +396,7 @@ export function CapturedActions({
       onAnnounce(`Note added on ${captured.reference.label}.`);
     } catch (error) {
       noteAttempt.settle(error);
+      if (isConflict(error)) await catchUp();
       setNoteProblem(error);
     } finally {
       setPending(false);
@@ -406,7 +453,13 @@ export function CapturedActions({
           {tooLong ? (
             <p role="alert">A label can have at most {MAX_HIGHLIGHT_LABEL_LENGTH} characters.</p>
           ) : null}
-          {problem ? <SaveProblem error={problem} onRetry={() => void save()} /> : null}
+          {problem ? (
+            isConflict(problem) ? (
+              <StudyConflict thing="highlight" onRetry={() => void save()} />
+            ) : (
+              <SaveProblem error={problem} onRetry={() => void save()} />
+            )
+          ) : null}
           <div className="flex flex-wrap gap-2">
             <button
               type="submit"
@@ -430,7 +483,9 @@ export function CapturedActions({
         </p>
       ) : null}
       {noteProblem ? (
-        refusal(noteProblem, 'note') ? (
+        isConflict(noteProblem) ? (
+          <StudyConflict thing="note" onRetry={() => void addNote()} />
+        ) : refusal(noteProblem, 'note') ? (
           <p role="alert">{refusal(noteProblem, 'note')}</p>
         ) : (
           <ProblemAlert

@@ -723,6 +723,66 @@ describe('Bible references and passages in notes (BIB-24)', () => {
     );
   });
 
+  it('links only the reference when the selection has spaces around it, keeping those spaces', async () => {
+    reply('GET /bible/translations', jsonResponse(200, { translations: [TRANSLATION] }));
+    reply('POST /bible/resolve', jsonResponse(200, { outcome: 'resolved', reference: ROMANS }));
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation()));
+    const editor = await openNote('See Rom 9:1 now');
+    // A leading and a trailing space selected along with the reference.
+    select(editor, ' Rom 9:1 ');
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve reference' }));
+
+    await waitFor(() => expect(textOf(resolveStatus())).toContain('Linked Romans 9:1.'));
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved), {
+      timeout: 3000,
+    });
+    expect(
+      requests.filter((r) => r.method !== 'GET').map((r) => [r.method, r.path, r.body]),
+    ).toStrictEqual([
+      ['POST', '/bible/resolve', { input: 'Rom 9:1', editionId: TRANSLATION.id }],
+      ['PATCH', NOTE, { expectedRevision: 1, content: linked('See ', ' now') }],
+    ]);
+  });
+
+  it('keeps a note with a reference link savable after bold or italic is applied over all of it', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note({ content: linked('See ', ' now') })));
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation()));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    act(() => {
+      editor.chain().selectAll().toggleBold().toggleItalic().run();
+    });
+
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved), {
+      timeout: 3000,
+    });
+    const bold = [{ type: 'bold' }, { type: 'italic' }];
+    expect(requests.filter((r) => r.method === 'PATCH').map((r) => r.body)).toStrictEqual([
+      {
+        expectedRevision: 1,
+        content: {
+          type: 'doc',
+          content: [
+            {
+              type: 'paragraph',
+              content: [
+                { type: 'text', text: 'See ', marks: bold },
+                // The link itself takes no marks: the allowlist carries none on it.
+                {
+                  type: 'scriptureReference',
+                  attrs: { referenceId: ROMANS.id, label: ROMANS.label },
+                },
+                { type: 'text', text: ' now', marks: bold },
+              ],
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
   it('offers the candidates of an ambiguous book and links only the one chosen', async () => {
     reply('GET /bible/translations', jsonResponse(200, { translations: [TRANSLATION] }));
     reply(

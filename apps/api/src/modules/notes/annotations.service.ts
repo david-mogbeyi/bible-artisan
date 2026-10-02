@@ -11,7 +11,6 @@ import {
   listAnnotationsQuerySchema,
   MAX_ANNOTATIONS_PER_STUDY,
   type ResolveAnchorResponse,
-  type ScriptureAnchor,
   updateAnnotationRequestSchema,
 } from '@bible-artisan/contracts';
 import {
@@ -27,6 +26,7 @@ import { requireExpectedRevision } from '../../common/revision/expected-revision
 import { isResourceId } from '../../common/validation/resource-id';
 import { parseBody } from '../../common/validation/parse-body';
 import { Annotation } from '../../database/models/annotation.model';
+import { activeTransaction } from '../../database/transaction-context';
 import { AnchorService } from '../bible-content/anchor/anchor.service';
 import { ReferenceService } from '../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study/study-access.service';
@@ -57,14 +57,6 @@ function mutationBody(row: Annotation, lastEventSequence: string): AnnotationMut
   };
 }
 
-/** The first and last chapter an anchor's segments touch (segments are in canon order). */
-function chaptersOf(anchor: ScriptureAnchor): { startChapter: number; endChapter: number } {
-  const first = anchor.segments[0];
-  const last = anchor.segments[anchor.segments.length - 1];
-  if (!first || !last) throw new Error('AnnotationsService: an anchor has at least one segment');
-  return { startChapter: first.chapter, endChapter: last.chapter };
-}
-
 /**
  * Highlights on Scripture (BIB-24; FR-BIBLE-006/007, PRD sections 14, 15, 23).
  *
@@ -74,8 +66,9 @@ function chaptersOf(anchor: ScriptureAnchor): { startChapter: number; endChapter
  * `StudyAccessService`, then queries highlights by study id and owner id.
  *
  * Anchors are checked by the Bible content context (`AnchorService`), never read from its tables
- * here: on create (anything but a match is 422 with the anchor code; the anchor is stored exactly
- * as checked) and again on every read, where a highlight that no longer matches is returned as
+ * here: on create, inside the mutation (anything but a match is 422 with the anchor code; the
+ * anchor is stored exactly as checked; a replay of a committed request returns its stored
+ * response without re-checking) and again on every read, where a highlight that no longer matches is returned as
  * unresolved with its original quote. Nothing ever moves an anchor to other text.
  */
 @Injectable()
@@ -90,8 +83,10 @@ export class AnnotationsService {
 
   /**
    * `POST /studies/:studyId/annotations`. A new highlight is a study change: `expectedRevision` is
-   * the study's, checked first and bumped; content revision moves. The anchor is re-checked before
-   * the transaction (its only write is the idempotent upsert of the shared reference row).
+   * the study's, checked first and bumped; content revision moves. The anchor is re-checked inside
+   * the work, so an Idempotency-Key replay short-circuits to the committed response before it
+   * (an anchor that stopped matching since cannot turn a committed 201 into a 422); its only
+   * write, the idempotent upsert of the shared reference row, commits or rolls back with it.
    */
   async create(
     ownerId: string,
@@ -100,20 +95,22 @@ export class AnnotationsService {
   ): Promise<MutationResult> {
     const expectedRevision = requireExpectedRevision(mutation.body);
     const body = parseBody(createAnnotationRequestSchema, mutation.body);
-    const resolution = await this.anchors.resolve(body.anchor);
-    if (resolution.outcome === 'unresolved') throw new AnchorInvalidError(resolution.reason);
-    const { anchor, reference } = resolution;
     return this.mutations.execute(ownerId, mutation, {
       studyId,
       bumpsContentRevision: true,
       work: async (m) => {
         const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
         await requireRoomForHighlight(m);
+        const resolution = await this.anchors.resolve(body.anchor);
+        if (resolution.outcome === 'unresolved') throw new AnchorInvalidError(resolution.reason);
+        const { anchor, reference } = resolution;
+        const { startChapter, endChapter } = this.anchors.rangeOf(anchor);
         const created = await m.createChild(Annotation, {
           referenceId: reference.id,
           editionId: anchor.editionId,
           bookCode: anchor.bookCode,
-          ...chaptersOf(anchor),
+          startChapter,
+          endChapter,
           anchorJson: anchor,
           colorToken: body.colorToken,
           label: body.label ?? null,
@@ -230,8 +227,15 @@ export class AnnotationsService {
       // Live highlights are capped per study, so this bounds the list.
       limit: MAX_ANNOTATIONS_PER_STUDY,
     });
-    const problems = await this.anchors.checkStored(rows.map((row) => row.anchorJson));
-    const stored = await this.references.storedReferences(rows.map((row) => row.referenceId));
+    const checkAnchors = () => this.anchors.checkStored(rows.map((row) => row.anchorJson));
+    const readReferences = () =>
+      this.references.storedReferences(rows.map((row) => row.referenceId));
+    // Independent reads: concurrent on their own connections, in order inside a transaction
+    // (one connection), as the study state does (BIB-20).
+    const [problems, stored] =
+      activeTransaction() === undefined
+        ? await Promise.all([checkAnchors(), readReferences()])
+        : [await checkAnchors(), await readReferences()];
     return {
       items: rows.map((row, index) => {
         const problem = problems[index] ?? null;

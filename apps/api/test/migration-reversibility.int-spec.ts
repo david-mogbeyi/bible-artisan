@@ -322,7 +322,8 @@ describe('migration reversibility', () => {
           WHERE conrelid IN ('annotation'::regclass, 'note'::regclass)
             AND (conrelid = 'annotation'::regclass OR conname LIKE 'note_%target%')
          UNION ALL
-         SELECT indexname FROM pg_indexes WHERE indexname = 'annotation_chapter_idx'
+         SELECT indexname FROM pg_indexes
+          WHERE indexname IN ('annotation_chapter_idx', 'annotation_study_idx')
           ORDER BY name`,
         { type: QueryTypes.SELECT },
       );
@@ -346,6 +347,7 @@ describe('migration reversibility', () => {
         'annotation_pkey',
         'annotation_reference_id_fkey',
         'annotation_revision_check',
+        'annotation_study_idx',
         'annotation_study_owner_fk',
         'note_scripture_target_check',
         'note_target_node_fk',

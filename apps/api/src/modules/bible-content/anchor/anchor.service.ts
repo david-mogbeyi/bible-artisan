@@ -21,6 +21,13 @@ import {
   type StoredVerse,
 } from './anchor-check';
 
+/** What `checkStoredChecksums` reads of a stored anchor: never its quote or offsets. */
+export interface StoredAnchorChecksums {
+  editionId: string;
+  bookCode: string;
+  segments: readonly { chapter: number; verse: number; textSha256: string }[];
+}
+
 /**
  * Durable Scripture anchors (BIB-18, PRD sections 14, 23; FR-BIBLE-006). Stateless: an anchor is
  * a value the caller keeps (BIB-24 stores it as `Annotation.anchor_json` and on notes, and calls
@@ -101,20 +108,9 @@ export class AnchorService {
   async checkStored(anchors: readonly ScriptureAnchor[]): Promise<(AnchorProblemCode | null)[]> {
     const problems: (AnchorProblemCode | null)[] = anchors.map(() => null);
     const pending: { index: number; anchor: ScriptureAnchor; range: ReferenceRange }[] = [];
-    const indexes = new Map<string, BookIndex | null>();
+    const bookIndexOf = this.bookIndexes();
     for (const [index, anchor] of anchors.entries()) {
-      if (!indexes.has(anchor.editionId)) {
-        try {
-          indexes.set(
-            anchor.editionId,
-            (await this.references.activeEdition(anchor.editionId)).index,
-          );
-        } catch (error) {
-          if (!(error instanceof NotFoundError)) throw error;
-          indexes.set(anchor.editionId, null);
-        }
-      }
-      const bookIndex = indexes.get(anchor.editionId);
+      const bookIndex = await bookIndexOf(anchor.editionId);
       if (!bookIndex) {
         problems[index] = 'ANCHOR_EDITION_UNAVAILABLE';
         continue;
@@ -160,6 +156,94 @@ export class AnchorService {
       problems[index] = checkText(anchor, versesOf.get(position) ?? []);
     }
     return problems;
+  }
+
+  /**
+   * The cheap integrity signal for a list of stored anchors (BIB-24: a note list's Scripture
+   * targets), from their coordinates and per-segment checksums only, never their quotes or
+   * offsets: an inactive edition, a verse that is not there or a broken chain of verses (from the
+   * cached index, no query), then every segment's stored checksum compared with the corpus's in
+   * ONE query for the whole list. Returns each anchor's problem or null, in input order. A quote
+   * or offset that no longer fits is caught only by the full `checkStored` / `resolve` (a note's
+   * detail); the corpus is immutable, so a checksum that matches means the verse text is the one
+   * the anchor was checked against.
+   */
+  async checkStoredChecksums(
+    anchors: readonly StoredAnchorChecksums[],
+  ): Promise<(AnchorProblemCode | null)[]> {
+    const problems: (AnchorProblemCode | null)[] = anchors.map(() => null);
+    const pending: { index: number; anchor: StoredAnchorChecksums }[] = [];
+    const bookIndexOf = this.bookIndexes();
+    for (const [index, anchor] of anchors.entries()) {
+      const bookIndex = await bookIndexOf(anchor.editionId);
+      if (!bookIndex) {
+        problems[index] = 'ANCHOR_EDITION_UNAVAILABLE';
+        continue;
+      }
+      const coordinates = checkCoordinates(bookIndex.book(anchor.bookCode), anchor.segments);
+      if (coordinates) {
+        problems[index] = coordinates;
+        continue;
+      }
+      pending.push({ index, anchor });
+    }
+    if (pending.length === 0) return problems;
+
+    const segments = pending.flatMap(({ anchor }, item) =>
+      anchor.segments.map((segment) => ({ item, anchor, segment })),
+    );
+    const rows = await this.db.query<{ item: number; found: boolean; matches: boolean }>(
+      `SELECT r.item, bool_and(v.verse IS NOT NULL) AS found,
+              bool_and(v.text_sha256 IS NOT DISTINCT FROM r.sha) AS matches
+         FROM unnest($1::int[], $2::uuid[], $3::text[], $4::int[], $5::int[], $6::text[])
+              AS r(item, edition_id, book_code, chapter, verse, sha)
+         LEFT JOIN bible_verse v
+           ON v.edition_id = r.edition_id AND v.book_code = r.book_code
+          AND v.chapter = r.chapter AND v.verse = r.verse
+        GROUP BY r.item`,
+      {
+        bind: [
+          segments.map((s) => s.item),
+          segments.map((s) => s.anchor.editionId),
+          segments.map((s) => s.anchor.bookCode),
+          segments.map((s) => s.segment.chapter),
+          segments.map((s) => s.segment.verse),
+          segments.map((s) => s.segment.textSha256),
+        ],
+        type: QueryTypes.SELECT,
+      },
+    );
+    const byItem = new Map(rows.map((row) => [Number(row.item), row]));
+    for (const [item, { index }] of pending.entries()) {
+      const row = byItem.get(item);
+      problems[index] = !row?.found
+        ? 'ANCHOR_VERSE_NOT_FOUND'
+        : row.matches
+          ? null
+          : 'ANCHOR_CHECKSUM_MISMATCH';
+    }
+    return problems;
+  }
+
+  /** The verse range an anchor covers, first segment to last (for callers' chapter columns). */
+  rangeOf(anchor: Pick<ScriptureAnchor, 'bookCode' | 'segments'>): ReferenceRange {
+    return rangeOf(anchor.bookCode, anchor.segments);
+  }
+
+  /** Book indexes by edition for one batch: null for an unknown or inactive edition. */
+  private bookIndexes(): (editionId: string) => Promise<BookIndex | null> {
+    const indexes = new Map<string, BookIndex | null>();
+    return async (editionId) => {
+      if (!indexes.has(editionId)) {
+        try {
+          indexes.set(editionId, (await this.references.activeEdition(editionId)).index);
+        } catch (error) {
+          if (!(error instanceof NotFoundError)) throw error;
+          indexes.set(editionId, null);
+        }
+      }
+      return indexes.get(editionId) ?? null;
+    };
   }
 
   /**

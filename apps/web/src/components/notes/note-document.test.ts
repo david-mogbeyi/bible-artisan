@@ -220,6 +220,36 @@ describe('verified reference links (BIB-24)', () => {
     });
   });
 
+  it('drops marks on a reference link instead of making the note unsavable', () => {
+    const editorJson = {
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'scriptureReference',
+              attrs: { referenceId, label: 'Romans 9:1' },
+              marks: [{ type: 'bold' }, { type: 'link', attrs: { href: 'https://example.org' } }],
+            },
+          ],
+        },
+      ],
+    };
+    expect(toNoteDraft(editorJson)).toStrictEqual({
+      ok: true,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            content: [{ type: 'scriptureReference', attrs: { referenceId, label: 'Romans 9:1' } }],
+          },
+        ],
+      },
+    });
+  });
+
   it('reports a reference link it cannot send as a reference problem', () => {
     const draft = toNoteDraft({
       type: 'doc',

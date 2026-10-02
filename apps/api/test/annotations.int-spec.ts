@@ -14,7 +14,7 @@ import {
 } from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import request, { type Response } from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { Annotation } from '../src/database/models/annotation.model';
@@ -24,6 +24,7 @@ import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
+import { AnchorService } from '../src/modules/bible-content/anchor/anchor.service';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 import { SessionService } from '../src/modules/identity/session.service';
 import { createTestApp } from './app';
@@ -232,6 +233,10 @@ describe('highlights (BIB-24)', () => {
     bob = await signedInUser();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   afterAll(async () => {
     // Deleting a user cascades to studies, and each study to its highlights.
     await User.destroy({ where: { id: userIds } });
@@ -360,6 +365,45 @@ describe('highlights (BIB-24)', () => {
         unchanged: isDeepStrictEqual(await ownerRows(alice), before),
       }).toStrictEqual({
         answers: tampered.map(([, body]) => [422, body]),
+        unchanged: true,
+      });
+    });
+
+    it('replays a committed create for its Idempotency-Key even after the anchor stops matching, without re-checking it', async () => {
+      const { studyId } = await createStudy(alice);
+      const { anchor } = await phrase();
+      const body = { expectedRevision: 1, anchor, colorToken: 'blue' };
+      const key = randomUUID();
+      const first = await send(alice, 'post', annotationsPath(studyId), body, key);
+      expect(first.status).toBe(201);
+      const before = await ownerRows(alice);
+
+      // From now on the anchor no longer checks out (as if its edition were withdrawn).
+      const resolve = vi.spyOn(app.get(AnchorService), 'resolve').mockResolvedValue({
+        outcome: 'unresolved',
+        reason: 'ANCHOR_EDITION_UNAVAILABLE',
+        anchor,
+        reference: null,
+      });
+      const replay = await send(alice, 'post', annotationsPath(studyId), body, key);
+      const fresh = await send(alice, 'post', annotationsPath(studyId), {
+        ...body,
+        expectedRevision: (await study(studyId)).revision,
+      });
+      expect({
+        replay: [replay.status, replay.body, replay.headers['idempotent-replayed']],
+        // A new request is checked, and refused.
+        fresh: [fresh.status, fresh.body],
+        // The replay never reached the anchor check; only the new request did.
+        checks: resolve.mock.calls.length,
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({
+        replay: [201, first.body, 'true'],
+        fresh: [
+          422,
+          anchorProblem('ANCHOR_EDITION_UNAVAILABLE', 'That translation is not available'),
+        ],
+        checks: 1,
         unchanged: true,
       });
     });
