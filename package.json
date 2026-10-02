@@ -17,7 +17,8 @@
     "db:setup": "./scripts/db-setup.sh",
     "db:migrate": "pnpm --filter @bible-artisan/api db:migrate",
     "corpus:import": "pnpm --filter @bible-artisan/api corpus:import",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build",
+    "check:local": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
     "typescript": "6.0.3",
