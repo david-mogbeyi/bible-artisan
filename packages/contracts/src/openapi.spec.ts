@@ -552,6 +552,62 @@ describe('buildOpenApiDocument', () => {
             'NoteVersionResponse',
           ),
         },
+        '/studies/{studyId}/annotations': {
+          post: noteOperation(
+            [
+              'ANCHOR_\\* code',
+              'never adjusted',
+              'yellow, green, blue, pink',
+              'highlight_created',
+              'ANNOTATION_LIMIT_EXCEEDED',
+              'no anchor or label',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId],
+            201,
+            'The new highlight, without its anchor or label',
+            'CreateAnnotationResponse',
+            'CreateAnnotationRequest',
+          ),
+          get: noteOperation(
+            ['first chapter', 'unresolved', 'never moved', SAME_404],
+            [
+              studyId,
+              {
+                name: 'referenceId',
+                in: 'query',
+                required: true,
+                schema: { type: 'string', format: 'uuid' },
+              },
+            ],
+            200,
+            'The highlights',
+            'AnnotationListResponse',
+          ),
+        },
+        '/studies/{studyId}/annotations/{annotationId}': {
+          patch: noteOperation(
+            [
+              'contentRevision does not move',
+              'highlight_updated',
+              'ANNOTATION_UNCHANGED',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId, uuidParam('annotationId')],
+            200,
+            'The highlight as saved',
+            'AnnotationMutationResponse',
+            'UpdateAnnotationRequest',
+          ),
+          delete: noteOperation(
+            ['contentRevision moves', 'highlight_deleted', ...MUTATION],
+            [idempotencyHeader, studyId, uuidParam('annotationId')],
+            200,
+            'The deleted highlight',
+            'AnnotationMutationResponse',
+            'AnnotationStateRequest',
+          ),
+        },
         '/bible/translations': {
           get: {
             description:
@@ -694,6 +750,12 @@ describe('buildOpenApiDocument', () => {
       'NoteListResponse',
       'NoteVersionListResponse',
       'NoteVersionResponse',
+      'CreateAnnotationRequest',
+      'CreateAnnotationResponse',
+      'UpdateAnnotationRequest',
+      'AnnotationStateRequest',
+      'AnnotationMutationResponse',
+      'AnnotationListResponse',
       'NoteBlock',
       'NoteListItem',
     ]);

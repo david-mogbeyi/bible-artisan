@@ -2,8 +2,8 @@ import type { ScriptureAnchor } from '@bible-artisan/contracts';
 
 /**
  * A durable anchor's quote (BIB-18, PRD sections 14 and 30): the quote exactly as the server
- * checked it, with its reference and edition. The unresolved state (original quote, said in
- * words, with Reselect) ships with BIB-24, which stores anchors and re-checks them.
+ * checked it, with its reference and edition. BIB-24 also uses it for a stored anchor that no
+ * longer matches the text (its original quote, beside the reason and Reselect).
  */
 export function AnchorQuote({
   anchor,

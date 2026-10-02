@@ -5,6 +5,7 @@ import { STATUS_CODES } from 'node:http';
 import { ConnectionError, TimeoutError } from 'sequelize';
 import {
   AnchorInvalidError,
+  AnnotationRuleError,
   DependencyUnavailableError,
   IdempotencyKeyReusedError,
   NotFoundError,
@@ -154,7 +155,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof StudyUnchangedError ||
       exception instanceof TagLimitExceededError ||
       exception instanceof StudyLifecycleError ||
-      exception instanceof NoteRuleError
+      exception instanceof NoteRuleError ||
+      exception instanceof AnnotationRuleError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,

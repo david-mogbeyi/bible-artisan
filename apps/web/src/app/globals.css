@@ -6,6 +6,12 @@
   --color-ink: #1c1b19;
   --color-muted: #5c5a55;
   --color-accent: #7a3e12;
+  /* Highlight fills (BIB-24): pale, under ink text, each well above 4.5:1 (about 12:1 or more).
+     Color is never the only signal: highlights are underlined and named in text. */
+  --color-highlight-yellow: #fde68a;
+  --color-highlight-green: #bbf7d0;
+  --color-highlight-blue: #bfdbfe;
+  --color-highlight-pink: #fbcfe8;
   --font-serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
 }
 

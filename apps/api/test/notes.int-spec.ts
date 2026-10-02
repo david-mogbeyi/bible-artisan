@@ -3,21 +3,25 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { INestApplication } from '@nestjs/common';
 import {
+  type CaptureAnchorResponse,
   type CreateNoteResponse,
   type CreateStudyResponse,
   type NoteDocument,
   type NoteListResponse,
   type NoteMutationResponse,
+  type NoteResponse,
   type NoteVersionListResponse,
   type ResolveReferenceResponse,
+  type ScriptureReference,
   type StudyListResponse,
 } from '@bible-artisan/contracts';
 import { Op, QueryTypes } from 'sequelize';
 import request, { type Response } from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
+import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { NoteVersion } from '../src/database/models/note-version.model';
 import { Note } from '../src/database/models/note.model';
@@ -25,6 +29,7 @@ import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
+import { AnchorService } from '../src/modules/bible-content/anchor/anchor.service';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 import { SessionService } from '../src/modules/identity/session.service';
 import { createTestApp } from './app';
@@ -302,6 +307,10 @@ describe('notes (BIB-23)', () => {
     bob = await signedInUser();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   afterAll(async () => {
     // Deleting a user cascades to studies, and each study to its notes and their versions.
     await User.destroy({ where: { id: userIds } });
@@ -324,6 +333,7 @@ describe('notes (BIB-23)', () => {
           studyId: study.studyId,
           revision: 1,
           targetNodeId: null,
+          targetReferenceId: null,
           characterCount: [...RICH_TEXT].length,
           latestVersionNumber: 1,
           createdAt: anyTime,
@@ -346,6 +356,7 @@ describe('notes (BIB-23)', () => {
           studyId: study.studyId,
           revision: 1,
           target: null,
+          targetAnchor: null,
           content: RICH,
           characterCount: [...RICH_TEXT].length,
           latestVersionNumber: 1,
@@ -370,6 +381,7 @@ describe('notes (BIB-23)', () => {
               id: onQuestion.id,
               revision: 1,
               target: {
+                kind: 'node',
                 nodeId: study.questionNodeId,
                 nodeType: 'question',
                 label: 'What is conscience?',
@@ -403,13 +415,19 @@ describe('notes (BIB-23)', () => {
       expect((await events(study.studyId)).slice(1)).toStrictEqual([
         {
           eventType: 'note_created',
-          payload: { noteId: note.id, targetNodeId: null, versionId: versions[0]?.id },
+          payload: {
+            noteId: note.id,
+            targetNodeId: null,
+            targetReferenceId: null,
+            versionId: versions[0]?.id,
+          },
         },
         {
           eventType: 'note_created',
           payload: {
             noteId: onQuestion.id,
             targetNodeId: study.questionNodeId,
+            targetReferenceId: null,
             versionId: expect.stringMatching(UUID),
           },
         },
@@ -440,6 +458,7 @@ describe('notes (BIB-23)', () => {
       });
       const read = await send(alice, 'get', notePath(study.studyId, note.id));
       expect((read.body as { target: unknown }).target).toStrictEqual({
+        kind: 'node',
         nodeId: study.rootNodeId,
         nodeType: 'scripture',
         label: 'Romans 9:1',
@@ -500,6 +519,386 @@ describe('notes (BIB-23)', () => {
         'true',
       ]);
       expect(await Note.count({ where: { studyId: study.studyId } })).toBe(1);
+    });
+  });
+
+  describe('Scripture targets and verified reference links (BIB-24)', () => {
+    let editionId: string;
+
+    beforeAll(async () => {
+      const edition = await BibleEdition.findOne({
+        where: {
+          code: ENGWEBP_RELEASE.code,
+          sourceRelease: ENGWEBP_RELEASE.sourceRelease,
+          activatedAt: { [Op.ne]: null },
+        },
+        rejectOnEmpty: true,
+      });
+      editionId = edition.id;
+    });
+
+    async function reference(input: string): Promise<ScriptureReference> {
+      const res = await send(alice, 'post', '/v1/bible/resolve', { input, editionId });
+      const body = res.body as ResolveReferenceResponse;
+      if (body.outcome !== 'resolved') throw new Error('expected a resolved reference');
+      return body.reference;
+    }
+
+    /** The first three words of Romans 9:1, captured by `POST /bible/anchors` as the reader does. */
+    async function phrase(): Promise<CaptureAnchorResponse> {
+      const verse = await BibleVerse.findOne({
+        where: { editionId, bookCode: 'ROM', chapter: 9, verse: 1 },
+        rejectOnEmpty: true,
+      });
+      const quote = verse.text.split(' ').slice(0, 3).join(' ');
+      const res = await send(alice, 'post', '/v1/bible/anchors', {
+        editionId,
+        bookCode: 'ROM',
+        kind: 'phrase',
+        segments: [{ chapter: 9, verse: 1, start: 0, end: Array.from(quote).length }],
+        quote,
+      });
+      expect(res.status).toBe(200);
+      return res.body as CaptureAnchorResponse;
+    }
+
+    /** A paragraph holding text, a verified reference link, and more text. */
+    const withLink = (referenceId: string, label: string): NoteDocument => ({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'See ' },
+            { type: 'scriptureReference', attrs: { referenceId, label } },
+            { type: 'text', text: ' on conscience' },
+          ],
+        },
+      ],
+    });
+
+    it('attaches a note to a phrase: the anchor is stored as captured and read back resolved with its reference', async () => {
+      const study = await createStudy(alice);
+      const { anchor, reference: ref } = await phrase();
+      const created = await send(alice, 'post', notesPath(study.studyId), {
+        expectedRevision: 1,
+        targetAnchor: anchor,
+        content: doc('Paul swears'),
+      });
+      expect([created.status, created.body]).toStrictEqual([
+        201,
+        {
+          id: anyId,
+          studyId: study.studyId,
+          revision: 1,
+          targetNodeId: null,
+          targetReferenceId: ref.id,
+          characterCount: 11,
+          latestVersionNumber: 1,
+          createdAt: anyTime,
+          updatedAt: anyTime,
+          deletedAt: null,
+          lastEventSequence: '2',
+          studyRevision: 2,
+        },
+      ]);
+      const note = created.body as CreateNoteResponse;
+      const target = { kind: 'scripture', anchorKind: 'phrase', reference: ref, problem: null };
+      const read = await send(alice, 'get', notePath(study.studyId, note.id));
+      const list = await send(alice, 'get', notesPath(study.studyId));
+      expect({
+        read: [
+          read.status,
+          (read.body as NoteResponse).target,
+          (read.body as NoteResponse).targetAnchor,
+        ],
+        list: (list.body as NoteListResponse).items.map((item) => item.target),
+        events: (await events(study.studyId)).slice(1),
+      }).toStrictEqual({
+        read: [200, target, anchor],
+        list: [target],
+        events: [
+          {
+            eventType: 'note_created',
+            payload: {
+              noteId: note.id,
+              targetNodeId: null,
+              targetReferenceId: ref.id,
+              versionId: anyId,
+            },
+          },
+        ],
+      });
+    });
+
+    it('refuses a Scripture target that does not match the corpus (422 with its code) or comes with a node target (400), writing nothing', async () => {
+      const study = await createStudy(alice);
+      const { anchor } = await phrase();
+      const before = await ownerRows(alice);
+      const answers = [
+        await send(alice, 'post', notesPath(study.studyId), {
+          expectedRevision: 1,
+          targetAnchor: { ...anchor, quote: `${anchor.quote}!` },
+          content: doc('x'),
+        }),
+        await send(alice, 'post', notesPath(study.studyId), {
+          expectedRevision: 1,
+          targetAnchor: anchor,
+          targetNodeId: study.questionNodeId,
+          content: doc('x'),
+        }),
+      ].map((res): unknown[] => [res.status, res.body]);
+      expect({
+        answers,
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({
+        answers: [
+          [
+            422,
+            envelope({
+              code: 'ANCHOR_QUOTE_MISMATCH',
+              message: 'The selected text does not match this translation',
+            }),
+          ],
+          [400, INVALID],
+        ],
+        unchanged: true,
+      });
+    });
+
+    it('reports a Scripture target that no longer matches the corpus, keeping its original anchor', async () => {
+      const study = await createStudy(alice);
+      const { anchor, reference: ref } = await phrase();
+      const note = await createNote(alice, study.studyId, doc('x'), { targetAnchor: anchor });
+      const drifted = { ...anchor, quote: `${anchor.quote} (as remembered)` };
+      await Note.update({ targetAnchorJson: drifted }, { where: { id: note.id } });
+      const read = await send(alice, 'get', notePath(study.studyId, note.id));
+      const body = read.body as NoteResponse;
+      expect([body.target, body.targetAnchor]).toStrictEqual([
+        {
+          kind: 'scripture',
+          anchorKind: 'phrase',
+          reference: ref,
+          problem: 'ANCHOR_QUOTE_MISMATCH',
+        },
+        drifted,
+      ]);
+    });
+
+    it('lists a Scripture target from its checksums alone, flagging a broken one; the full re-check runs only on the note itself', async () => {
+      const study = await createStudy(alice);
+      const { anchor, reference: ref } = await phrase();
+      const broken = await createNote(alice, study.studyId, doc('broken'), {
+        targetAnchor: anchor,
+      });
+      const drifted = await createNote(alice, study.studyId, doc('drifted'), {
+        targetAnchor: anchor,
+      });
+      const [segment] = anchor.segments;
+      if (!segment) throw new Error('no segment');
+      await Note.update(
+        { targetAnchorJson: { ...anchor, segments: [{ ...segment, textSha256: '0'.repeat(64) }] } },
+        { where: { id: broken.id } },
+      );
+      await Note.update(
+        { targetAnchorJson: { ...anchor, quote: `${anchor.quote} (as remembered)` } },
+        { where: { id: drifted.id } },
+      );
+      const fullCheck = vi.spyOn(app.get(AnchorService), 'checkStored');
+      const list = await send(alice, 'get', notesPath(study.studyId));
+      const listChecks = fullCheck.mock.calls.length;
+      const read = await send(alice, 'get', notePath(study.studyId, drifted.id));
+      const target = (problem: string | null) => ({
+        kind: 'scripture',
+        anchorKind: 'phrase',
+        reference: ref,
+        problem,
+      });
+      expect({
+        list: Object.fromEntries(
+          (list.body as NoteListResponse).items.map((item) => [item.id, item.target]),
+        ),
+        listChecks,
+        read: (read.body as NoteResponse).target,
+      }).toStrictEqual({
+        // The checksum no longer matches the corpus: flagged in the list. A quote that drifted
+        // is caught by the note's own full re-check.
+        list: {
+          [drifted.id]: target(null),
+          [broken.id]: target('ANCHOR_CHECKSUM_MISMATCH'),
+        },
+        listChecks: 0,
+        read: target('ANCHOR_QUOTE_MISMATCH'),
+      });
+    });
+
+    it('replays a committed note creation on a passage for its Idempotency-Key even after the anchor stops matching', async () => {
+      const study = await createStudy(alice);
+      const { anchor } = await phrase();
+      const body = { expectedRevision: 1, targetAnchor: anchor, content: doc('Paul swears') };
+      const key = randomUUID();
+      const first = await send(alice, 'post', notesPath(study.studyId), body, key);
+      expect(first.status).toBe(201);
+      const before = await ownerRows(alice);
+      const resolve = vi.spyOn(app.get(AnchorService), 'resolve').mockResolvedValue({
+        outcome: 'unresolved',
+        reason: 'ANCHOR_EDITION_UNAVAILABLE',
+        anchor,
+        reference: null,
+      });
+      const replay = await send(alice, 'post', notesPath(study.studyId), body, key);
+      expect({
+        replay: [replay.status, replay.body, replay.headers['idempotent-replayed']],
+        checks: resolve.mock.calls.length,
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({
+        replay: [201, first.body, 'true'],
+        checks: 0,
+        unchanged: true,
+      });
+    });
+
+    it('keeps saving a note whose stored reference link no longer verifies, while a new or changed link is still checked', async () => {
+      const study = await createStudy(alice);
+      const ref = await reference('Rom 9:1');
+      const note = await createNote(alice, study.studyId, withLink(ref.id, ref.label));
+      // The link stored earlier no longer verifies (as after a label format change): its label
+      // is not the reference's canonical one any more.
+      const legacy = 'Rom. 9.1';
+      await Note.update({ richTextJson: withLink(ref.id, legacy) }, { where: { id: note.id } });
+      const edited = (text: string, links: [string, string][]): NoteDocument => ({
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            content: [
+              { type: 'text', text },
+              ...links.map(([referenceId, label]) => ({
+                type: 'scriptureReference' as const,
+                attrs: { referenceId, label },
+              })),
+            ],
+          },
+        ],
+      });
+      const REFERENCE_INVALID = envelope({
+        code: 'NOTE_REFERENCE_INVALID',
+        message: 'A Bible reference link in this note could not be verified',
+      });
+      // Other text changes around the stored link: saved, the link kept as stored.
+      const kept = await save(alice, study.studyId, note.id, {
+        expectedRevision: 1,
+        content: edited('Edited around ', [[ref.id, legacy]]),
+      });
+      // A link that is new to the note is checked as ever: another unverifiable label is refused.
+      const added = await save(alice, study.studyId, note.id, {
+        expectedRevision: 2,
+        content: edited('Edited around ', [
+          [ref.id, legacy],
+          [ref.id, 'Romans 9:2'],
+        ]),
+      });
+      // And a new link that verifies saves beside the kept one.
+      const verified = await save(alice, study.studyId, note.id, {
+        expectedRevision: 2,
+        content: edited('Edited around ', [
+          [ref.id, legacy],
+          [ref.id, ref.label],
+        ]),
+      });
+      expect(
+        [kept, added, verified].map((res): unknown[] => [
+          res.status,
+          res.status === 200 ? (res.body as NoteMutationResponse).revision : res.body,
+        ]),
+      ).toStrictEqual([
+        [200, 2],
+        [422, REFERENCE_INVALID],
+        [200, 3],
+      ]);
+    });
+
+    it('saves a verified reference link with its label in the plain text, creating no node and no other event', async () => {
+      const study = await createStudy(alice);
+      const ref = await reference('Rom 9:1');
+      const nodesBefore = await StudyNode.count({ where: { studyId: study.studyId } });
+      const note = await createNote(alice, study.studyId, doc('draft'));
+      const saved = await save(alice, study.studyId, note.id, {
+        expectedRevision: 1,
+        content: withLink(ref.id, ref.label),
+        checkpoint: true,
+      });
+      const read = await send(alice, 'get', notePath(study.studyId, note.id));
+      const stored = await Note.findByPk(note.id, { rejectOnEmpty: true });
+      expect({
+        saved: saved.status,
+        content: (read.body as NoteResponse).content,
+        plainText: stored.plainText,
+        nodes: await StudyNode.count({ where: { studyId: study.studyId } }),
+        events: (await events(study.studyId)).slice(1).map((e) => e.eventType),
+      }).toStrictEqual({
+        saved: 200,
+        content: withLink(ref.id, ref.label),
+        plainText: `See ${ref.label} on conscience`,
+        nodes: nodesBefore,
+        events: ['note_created', 'note_autosaved'],
+      });
+    });
+
+    it('refuses a reference link to an unknown reference or with another label (422 NOTE_REFERENCE_INVALID) and malformed ones (400), on create and save, writing nothing', async () => {
+      const study = await createStudy(alice);
+      const ref = await reference('Rom 9:1');
+      const note = await createNote(alice, study.studyId, doc('x'));
+      const REFERENCE_INVALID = envelope({
+        code: 'NOTE_REFERENCE_INVALID',
+        message: 'A Bible reference link in this note could not be verified',
+      });
+      const before = await ownerRows(alice);
+      const bad: [NoteDocument | object, unknown][] = [
+        [withLink(randomUUID(), ref.label), REFERENCE_INVALID],
+        [withLink(ref.id, 'Romans 9:2'), REFERENCE_INVALID],
+        [withLink(ref.id, `${ref.label} `), REFERENCE_INVALID],
+        [
+          {
+            type: 'doc',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'scriptureReference',
+                    attrs: { referenceId: ref.id, label: ref.label, href: 'javascript:alert(1)' },
+                  },
+                ],
+              },
+            ],
+          },
+          INVALID,
+        ],
+        [withLink('not-a-uuid', ref.label), INVALID],
+      ];
+      const answers: unknown[] = [];
+      for (const [content] of bad) {
+        for (const res of [
+          await send(alice, 'post', notesPath(study.studyId), {
+            expectedRevision: await studyRevision(study.studyId),
+            content,
+          }),
+          await save(alice, study.studyId, note.id, { expectedRevision: 1, content }),
+        ]) {
+          answers.push([res.status, res.body]);
+        }
+      }
+      expect({
+        answers,
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({
+        answers: bad.flatMap(([, body]) => [
+          [body === INVALID ? 400 : 422, body],
+          [body === INVALID ? 400 : 422, body],
+        ]),
+        unchanged: true,
+      });
     });
   });
 
@@ -670,6 +1069,7 @@ describe('notes (BIB-23)', () => {
           studyId: study.studyId,
           revision: 2,
           targetNodeId: null,
+          targetReferenceId: null,
           characterCount: 15,
           latestVersionNumber: 1,
           createdAt: note.createdAt,
@@ -936,6 +1336,7 @@ describe('notes (BIB-23)', () => {
           studyId: study.studyId,
           revision: 2,
           targetNodeId: null,
+          targetReferenceId: null,
           characterCount: 7,
           latestVersionNumber: 1,
           createdAt: note.createdAt,
@@ -1052,6 +1453,7 @@ describe('notes (BIB-23)', () => {
       const list = await send(alice, 'get', notesPath(study.studyId));
       expect((list.body as NoteListResponse).items.map((item) => item.target)).toStrictEqual([
         {
+          kind: 'node',
           nodeId: study.questionNodeId,
           nodeType: 'question',
           label: 'Who bears witness?',

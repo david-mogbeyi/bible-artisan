@@ -3,17 +3,21 @@ import {
   createNoteRequestSchema,
   MAX_NOTE_DEPTH,
   MAX_NOTE_NODES,
+  MAX_NOTE_REFERENCES,
   NOTE_EDIT_EMPTY,
   NOTE_MARK_REPEATED,
+  NOTE_TARGET_EXCLUSIVE,
   NOTE_TEXT_INVALID,
   NOTE_TOO_DEEP,
   NOTE_TOO_MANY_NODES,
+  NOTE_TOO_MANY_REFERENCES,
   type NoteParagraph,
   noteCharacterCount,
   type NoteDocument,
   noteDocumentSchema,
   notePlainText,
   notePreview,
+  noteReferenceLinks,
   noteSearchText,
   updateNoteRequestSchema,
 } from './note';
@@ -278,5 +282,67 @@ describe('note requests', () => {
     expect(
       updateNoteRequestSchema.safeParse({ expectedRevision: 2, checkpoint: false }).success,
     ).toBe(false);
+  });
+});
+
+describe('verified reference links and Scripture targets (BIB-24)', () => {
+  const REF = '0b0f7d9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f';
+  const refNode = (attrs: object): unknown => ({ type: 'scriptureReference', attrs });
+  const withRef = (...inline: unknown[]): unknown => doc({ type: 'paragraph', content: inline });
+  const ANCHOR = {
+    version: 1,
+    editionId: '1b0f7d9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f',
+    bookCode: 'ROM',
+    kind: 'phrase',
+    segments: [{ chapter: 9, verse: 1, start: 0, end: 6, textSha256: 'a'.repeat(64) }],
+    quote: 'I tell',
+  };
+
+  it('accepts a scriptureReference inline node with exactly an id and a label, and derives its label as text', () => {
+    const parsed = noteDocumentSchema.parse(
+      withRef({ type: 'text', text: 'See ' }, refNode({ referenceId: REF, label: 'Romans 9:1' }), {
+        type: 'text',
+        text: '.',
+      }),
+    );
+    expect(notePlainText(parsed)).toBe('See Romans 9:1.');
+    expect(noteReferenceLinks(parsed)).toStrictEqual([{ referenceId: REF, label: 'Romans 9:1' }]);
+  });
+
+  it('refuses extra attributes, marks, content, a malformed id or an unsafe label', () => {
+    for (const bad of [
+      refNode({ referenceId: REF, label: 'Romans 9:1', href: 'javascript:alert(1)' }),
+      { ...(refNode({ referenceId: REF, label: 'Romans 9:1' }) as object), marks: [] },
+      { ...(refNode({ referenceId: REF, label: 'Romans 9:1' }) as object), content: [] },
+      refNode({ referenceId: 'Romans 9:1', label: 'Romans 9:1' }),
+      refNode({ referenceId: REF, label: '' }),
+      refNode({ referenceId: REF, label: 'Romans\n9:1' }),
+      refNode({ referenceId: REF }),
+    ]) {
+      expect(noteDocumentSchema.safeParse(withRef(bad)).success).toBe(false);
+    }
+  });
+
+  it(`accepts ${MAX_NOTE_REFERENCES} reference links and refuses one more`, () => {
+    const refs = (n: number) =>
+      withRef(
+        ...Array.from({ length: n }, () => refNode({ referenceId: REF, label: 'Romans 9:1' })),
+      );
+    expect(noteDocumentSchema.safeParse(refs(MAX_NOTE_REFERENCES)).success).toBe(true);
+    const over = noteDocumentSchema.safeParse(refs(MAX_NOTE_REFERENCES + 1));
+    expect(over.error?.issues.map((i) => i.message)).toStrictEqual([NOTE_TOO_MANY_REFERENCES]);
+  });
+
+  it('takes a Scripture target on create, but never together with a node target', () => {
+    const body = { expectedRevision: 1, content: doc(para('x')) };
+    expect(createNoteRequestSchema.safeParse({ ...body, targetAnchor: ANCHOR }).success).toBe(true);
+    const both = createNoteRequestSchema.safeParse({
+      ...body,
+      targetAnchor: ANCHOR,
+      targetNodeId: REF,
+    });
+    expect(both.error?.issues.map((i) => [i.path, i.message])).toStrictEqual([
+      [['targetAnchor'], NOTE_TARGET_EXCLUSIVE],
+    ]);
   });
 });

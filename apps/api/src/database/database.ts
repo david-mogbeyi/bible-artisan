@@ -1,4 +1,5 @@
 import { Sequelize } from 'sequelize-typescript';
+import { Annotation } from './models/annotation.model';
 import { AuthChallenge } from './models/auth-challenge.model';
 import { AuthSession } from './models/auth-session.model';
 import { BibleBook } from './models/bible-book.model';
@@ -81,6 +82,7 @@ export function createDatabase(
       ScriptureReference,
       Note,
       NoteVersion,
+      Annotation,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

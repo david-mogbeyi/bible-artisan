@@ -2,6 +2,7 @@
 
 import type {
   AnchorSelection,
+  Annotation,
   BibleChapterLink,
   BibleEditionAttribution,
   BiblePassageResponse,
@@ -12,6 +13,7 @@ import { type FormEvent, useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/lib/api-client';
 import { captureAnchor } from '@/lib/anchors';
 import { type ChapterTarget, fetchPassage, passageQueryKey } from '@/lib/bible';
+import { type CodePointRange, codePointRuns } from './code-point-runs';
 import { ProblemAlert } from './problem-alert';
 import {
   type CaptureState,
@@ -31,6 +33,15 @@ import {
   spanOfRanges,
   VERSE_TEXT_ATTRIBUTE,
 } from './selection';
+import {
+  CapturedActions,
+  ChapterHighlights,
+  HIGHLIGHT_CLASS,
+  highlightName,
+  highlightRanges,
+  type ReaderStudy,
+  useChapterHighlights,
+} from './study-highlights';
 
 /**
  * A deliberate navigation: once the passage for `referenceId` has loaded, its heading takes
@@ -77,9 +88,20 @@ interface BibleReaderProps {
   onChangeEdition: (editionId: string) => void;
   /** The latest deliberate navigation, or null; see `FocusRequest`. */
   focusRequest: FocusRequest | null;
+  /**
+   * The study being read in (BIB-24): its highlights are drawn over the text and listed, and a
+   * captured selection can be highlighted or noted. Null outside a study.
+   */
+  study?: ReaderStudy | null;
 }
 
 const NOT_CONTINUOUS_TEXT = 'Select one continuous passage.';
+
+const HIGHLIGHTS_COPY = {
+  notFound: "This study's highlights aren't available.",
+  refused: "We couldn't load this study's highlights.",
+  unavailable: "We couldn't load this study's highlights. The text is still here.",
+};
 
 const PASSAGE_COPY = {
   notFound: 'That passage is not available.',
@@ -102,6 +124,7 @@ export function BibleReader({
   onOpenReference,
   onChangeEdition,
   focusRequest,
+  study = null,
 }: BibleReaderProps) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const targetRef = useRef<HTMLLIElement>(null);
@@ -156,7 +179,16 @@ export function BibleReader({
   const choose = (value: ReaderSelection | null) => {
     setPicked(value && passageKey ? { key: passageKey, value } : null);
     setNotice(null);
+    setAnnouncement(null);
   };
+  // What a highlight or note action said (references and color names only, never a quote).
+  const [announcement, setAnnouncement] = useState<{ on: string; text: string } | null>(null);
+  const announce = (text: string) => {
+    if (passageKey) setAnnouncement({ on: passageKey, text });
+  };
+  const highlights = useChapterHighlights(study, shown);
+  const ranges =
+    shown && highlights.data ? highlightRanges(shown, highlights.data.items) : new Map();
   /** Drops the browser's text selection, but only one made in this reader. */
   const clearNativeSelection = () => {
     const native = document.getSelection();
@@ -267,7 +299,12 @@ export function BibleReader({
       : passageKey !== null && notice?.on === passageKey
         ? notice.text
         : '';
-  const status = progress || selectionStatus;
+  // A highlight or note outcome is said over "Selection captured." (it follows it); loading a new
+  // passage still comes first.
+  const said = passageKey !== null && announcement?.on === passageKey ? announcement.text : '';
+  const highlightsLoading = study && highlights.isPending && shown ? 'Loading highlights…' : '';
+  const status =
+    (loading ? progress : '') || said || progress || highlightsLoading || selectionStatus;
 
   return (
     <section ref={sectionRef} aria-label="Reader" className="flex flex-col gap-4">
@@ -363,6 +400,13 @@ export function BibleReader({
                 clearNativeSelection();
               }}
               captureButtonRef={captureButtonRef}
+              capturedActions={
+                study
+                  ? (captured) => (
+                      <CapturedActions study={study} captured={captured} onAnnounce={announce} />
+                    )
+                  : undefined
+              }
             />
           </div>
           <Verses
@@ -373,7 +417,24 @@ export function BibleReader({
             listRef={listRef}
             ticked={tickedVerses}
             onToggle={toggleVerse}
+            highlights={ranges}
           />
+          {study && highlights.isError ? (
+            <ProblemAlert
+              error={highlights.error}
+              copy={HIGHLIGHTS_COPY}
+              onRetry={() => void highlights.refetch()}
+            />
+          ) : null}
+          {study && highlights.data ? (
+            <ChapterHighlights
+              study={study}
+              passage={shown}
+              items={highlights.data.items}
+              onAnnounce={announce}
+              onReload={() => void highlights.refetch()}
+            />
+          ) : null}
           <ChapterLinks passage={shown} onGo={(link) => onOpenReference(link.referenceId)} />
         </article>
       ) : null}
@@ -499,6 +560,7 @@ function Verses({
   listRef,
   ticked,
   onToggle,
+  highlights,
 }: {
   passage: BiblePassageResponse;
   target: Target | null;
@@ -506,6 +568,8 @@ function Verses({
   listRef: React.RefObject<HTMLOListElement | null>;
   ticked: readonly number[];
   onToggle: (verse: number) => void;
+  /** Saved highlights to draw (BIB-24), per verse; empty outside a study. */
+  highlights: ReadonlyMap<number, CodePointRange<Annotation>[]>;
 }) {
   const headings = new Map(passage.superscriptions.map((s) => [s.beforeVerse, s.text]));
   const textAttribute = (verse: number) => ({ [VERSE_TEXT_ATTRIBUTE]: verse });
@@ -549,7 +613,10 @@ function Verses({
                 <span className="sr-only">{marked ? 'Marked verse ' : 'Verse '}</span>
                 {verse}
               </span>
-              <span {...textAttribute(verse)}>{text}</span>
+              <span {...textAttribute(verse)}>
+                <VerseText text={text} ranges={highlights.get(verse) ?? []} />
+              </span>
+              <HighlightNote ranges={highlights.get(verse) ?? []} />
               {text === '' ? (
                 <span className="select-none font-sans text-base italic text-muted">
                   No text for this verse in this edition.
@@ -561,6 +628,42 @@ function Verses({
       })}
     </ol>
   );
+}
+
+/**
+ * A verse's stored text with its saved highlights in `<mark>` (BIB-24), over exact code points.
+ * The marks only wrap the text: the element still holds exactly the stored verse, so selection
+ * mapping (BIB-18) is unchanged. Where highlights overlap, the latest one's color is drawn.
+ */
+function VerseText({ text, ranges }: { text: string; ranges: CodePointRange<Annotation>[] }) {
+  if (ranges.length === 0) return <>{text}</>;
+  return (
+    <>
+      {codePointRuns(text, ranges).map((run, i) => {
+        const top = run.keys[run.keys.length - 1];
+        return top ? (
+          <mark
+            key={i}
+            className={`${HIGHLIGHT_CLASS[top.colorToken]} text-ink underline decoration-ink decoration-dotted decoration-2 underline-offset-4`}
+          >
+            {run.text}
+          </mark>
+        ) : (
+          <span key={i}>{run.text}</span>
+        );
+      })}
+    </>
+  );
+}
+
+/**
+ * Says which highlights a verse holds, outside the verse text (so the text a selection measures
+ * stays exact) and for screen readers only; the visible list names them too.
+ */
+function HighlightNote({ ranges }: { ranges: CodePointRange<Annotation>[] }) {
+  const names = [...new Set(ranges.map((range) => highlightName(range.key)))];
+  if (names.length === 0) return null;
+  return <span className="sr-only select-none"> ({names.join('; ')})</span>;
 }
 
 /** Translation attribution, shown beside every display of Scripture (PRD section 20). */

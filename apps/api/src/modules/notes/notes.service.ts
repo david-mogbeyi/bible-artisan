@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { fn, literal, Op } from 'sequelize';
 import {
+  type AnchorKind,
+  type AnchorProblemCode,
   createNoteRequestSchema,
   type CreateNoteResponse,
   listNotesQuerySchema,
@@ -10,6 +12,7 @@ import {
   NOTE_CHECKPOINT_INTERVAL_SECONDS,
   NOTE_LIMIT_EXCEEDED,
   NOTE_NOT_TRASHED,
+  NOTE_REFERENCE_INVALID,
   NOTE_SCHEMA_VERSION,
   NOTE_TARGET_NOT_FOUND,
   NOTE_TRASHED,
@@ -20,15 +23,18 @@ import {
   type NoteMutationResponse,
   notePlainText,
   notePreview,
+  noteReferenceLinks,
   type NoteResponse,
   noteSearchText,
   noteStateRequestSchema,
   type NoteTarget,
   type NoteVersionListResponse,
   type NoteVersionResponse,
+  type ScriptureAnchor,
   updateNoteRequestSchema,
 } from '@bible-artisan/contracts';
 import {
+  AnchorInvalidError,
   NotFoundError,
   NoteRuleError,
   NoteTooLongError,
@@ -43,6 +49,7 @@ import { isResourceId } from '../../common/validation/resource-id';
 import { parseBody } from '../../common/validation/parse-body';
 import { NoteVersion } from '../../database/models/note-version.model';
 import { Note } from '../../database/models/note.model';
+import { AnchorService, type StoredAnchorChecksums } from '../bible-content/anchor/anchor.service';
 import { ReferenceService } from '../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study/study-access.service';
 import { StudyRevisionService } from '../study/study-revision.service';
@@ -87,12 +94,43 @@ function derive(content: NoteDocument): DerivedNote {
 const sameDocument = (a: NoteDocument, b: NoteDocument): boolean =>
   canonicalJson(a) === canonicalJson(b);
 
+/**
+ * What a note list reads of a Scripture target's anchor (BIB-24): its kind, edition, book and
+ * per-segment coordinates and checksums, built in SQL so the list never loads quotes or offsets.
+ */
+const TARGET_ANCHOR_SUMMARY_SQL = `CASE WHEN target_anchor_json IS NULL THEN NULL ELSE
+  jsonb_build_object(
+    'kind', target_anchor_json -> 'kind',
+    'editionId', target_anchor_json -> 'editionId',
+    'bookCode', target_anchor_json -> 'bookCode',
+    'segments', (SELECT jsonb_agg(jsonb_build_object('chapter', s -> 'chapter',
+                                                     'verse', s -> 'verse',
+                                                     'textSha256', s -> 'textSha256')
+                                  ORDER BY n)
+                   FROM jsonb_array_elements(target_anchor_json -> 'segments')
+                        WITH ORDINALITY AS e(s, n)))
+END`;
+
+type TargetAnchorSummary = StoredAnchorChecksums & { kind: AnchorKind };
+
+/** A note's target as `targets` builds it: the columns plus its anchor's kind and check result. */
+interface TargetSource {
+  targetNodeId: string | null;
+  targetReferenceId: string | null;
+  anchor: { kind: AnchorKind; problem: AnchorProblemCode | null } | null;
+}
+
+/** The (referenceId, label) pairs of a document's reference links, as comparable keys. */
+const linkKeys = (doc: NoteDocument): Set<string> =>
+  new Set(noteReferenceLinks(doc).map((link) => JSON.stringify([link.referenceId, link.label])));
+
 function mutationBody(note: Note, lastEventSequence: string): NoteMutationResponse {
   return {
     id: note.id,
     studyId: note.studyId,
     revision: note.revision,
     targetNodeId: note.targetNodeId,
+    targetReferenceId: note.targetReferenceId,
     characterCount: noteCharacterCount(note.plainText),
     latestVersionNumber: note.latestVersionNumber,
     createdAt: note.createdAt.toISOString(),
@@ -124,7 +162,46 @@ export class NotesService {
     private readonly access: StudyAccessService,
     private readonly studyRevisions: StudyRevisionService,
     private readonly references: ReferenceService,
+    private readonly anchors: AnchorService,
   ) {}
+
+  /**
+   * Every NEW `scriptureReference` node must name a reference of an active edition and carry
+   * exactly its canonical label (BIB-24, FR-NOTE-003), checked with one batched lookup through the
+   * Bible content context inside the mutation, so a refusal rolls everything back and a replay
+   * never re-checks. Never repaired: an unknown id or another label is 422
+   * `NOTE_REFERENCE_INVALID`. A link already in the stored document (same id and label) was checked
+   * when it was saved and is kept as stored, so a link that later stops resolving (its edition
+   * withdrawn) never blocks editing the rest of the note; readers re-resolve it when it is opened.
+   */
+  private async verifyReferences(content: NoteDocument, current?: NoteDocument): Promise<void> {
+    const kept = current ? linkKeys(current) : new Set<string>();
+    const links = noteReferenceLinks(content).filter(
+      (link) => !kept.has(JSON.stringify([link.referenceId, link.label])),
+    );
+    if (links.length === 0) return;
+    const stored = await this.references.storedReferences(links.map((link) => link.referenceId));
+    for (const link of links) {
+      if (stored.get(link.referenceId)?.label !== link.label) {
+        throw new NoteRuleError(NOTE_REFERENCE_INVALID);
+      }
+    }
+  }
+
+  /**
+   * A Scripture target (BIB-24): the anchor is re-checked against the corpus through the Bible
+   * content context (checksums, offsets, quote), never trusted from the client and never
+   * adjusted; anything but `resolved` is 422 with the anchor code. Runs inside the mutation, so a
+   * replay returns the committed response without re-checking; its only write, the idempotent
+   * upsert of the shared reference row, commits or rolls back with it.
+   */
+  private async checkedTarget(
+    anchor: ScriptureAnchor,
+  ): Promise<{ anchor: ScriptureAnchor; referenceId: string }> {
+    const resolution = await this.anchors.resolve(anchor);
+    if (resolution.outcome === 'unresolved') throw new AnchorInvalidError(resolution.reason);
+    return { anchor: resolution.anchor, referenceId: resolution.reference.id };
+  }
 
   /**
    * `POST /studies/:studyId/notes`. A new note is a study change: `expectedRevision` is the
@@ -146,9 +223,13 @@ export class NotesService {
         const targetNodeId = body.targetNodeId ?? null;
         if (targetNodeId !== null) await this.requireLiveTarget(m, targetNodeId);
         await requireRoomForLiveNote(m);
+        await this.verifyReferences(note.content);
+        const scripture = body.targetAnchor ? await this.checkedTarget(body.targetAnchor) : null;
 
         const created = await m.createChild(Note, {
           targetNodeId,
+          targetReferenceId: scripture?.referenceId ?? null,
+          targetAnchorJson: scripture?.anchor ?? null,
           richTextJson: note.content,
           plainText: note.plainText,
           searchText: note.searchText,
@@ -164,7 +245,12 @@ export class NotesService {
         });
         const event = await m.appendEvent({
           eventType: NOTE_EVENTS.created,
-          payload: { noteId: created.id, targetNodeId, versionId: version.id },
+          payload: {
+            noteId: created.id,
+            targetNodeId,
+            targetReferenceId: created.targetReferenceId,
+            versionId: version.id,
+          },
         });
         const response: CreateNoteResponse = {
           ...mutationBody(created, event.sequence),
@@ -197,6 +283,7 @@ export class NotesService {
         if (current.deletedAt !== null) throw new NoteRuleError(NOTE_TRASHED);
 
         const contentChanged = next !== null && !sameDocument(next.content, current.richTextJson);
+        if (contentChanged) await this.verifyReferences(next.content, current.richTextJson);
         const latest = await NoteVersion.findOne({
           where: { noteId: current.id, studyId: m.studyId, ownerId: m.ownerId },
           order: [['versionNumber', 'DESC']],
@@ -321,9 +408,11 @@ export class NotesService {
         'id',
         'revision',
         'targetNodeId',
+        'targetReferenceId',
         'createdAt',
         'updatedAt',
         'deletedAt',
+        [literal(TARGET_ANCHOR_SUMMARY_SQL), 'targetAnchorSummary'],
         [literal(PREVIEW_SOURCE_SQL), 'previewSource'],
         [literal('char_length(plain_text)'), 'characterCount'],
       ],
@@ -334,16 +423,36 @@ export class NotesService {
       // Live notes are capped at this many; the trash is not, so it lists its newest.
       limit: MAX_NOTES_PER_STUDY,
     });
+    // The cheap integrity signal for the list (checksums, one query); the note's detail re-checks
+    // the whole anchor.
+    const summaries = rows.map(
+      (row) => row.get('targetAnchorSummary') as TargetAnchorSummary | null,
+    );
+    const anchored = summaries.filter((summary) => summary !== null);
+    const problems = anchored.length === 0 ? [] : await this.anchors.checkStoredChecksums(anchored);
+    let anchorIndex = 0;
     const targets = await this.targets(
       ownerId,
       studyId,
-      rows.map((row) => row.targetNodeId),
+      rows.map((row, index): TargetSource => {
+        const summary = summaries[index] ?? null;
+        let anchor: TargetSource['anchor'] = null;
+        if (summary !== null) {
+          anchor = { kind: summary.kind, problem: problems[anchorIndex] ?? null };
+          anchorIndex += 1;
+        }
+        return {
+          targetNodeId: row.targetNodeId,
+          targetReferenceId: row.targetReferenceId,
+          anchor,
+        };
+      }),
     );
     return {
-      items: rows.map((row) => ({
+      items: rows.map((row, index) => ({
         id: row.id,
         revision: row.revision,
-        target: row.targetNodeId === null ? null : (targets.get(row.targetNodeId) ?? null),
+        target: targets[index] ?? null,
         preview: notePreview(String(row.get('previewSource'))),
         characterCount: Number(row.get('characterCount')),
         createdAt: row.createdAt.toISOString(),
@@ -357,12 +466,25 @@ export class NotesService {
   async get(ownerId: string, studyId: string, noteId: string): Promise<NoteResponse> {
     await this.access.requireOwnedStudy(ownerId, studyId);
     const note = await this.ownedNote(ownerId, studyId, noteId);
-    const targets = await this.targets(ownerId, studyId, [note.targetNodeId]);
+    // The detail re-checks the whole anchor (checksums, offsets, quote) against the corpus.
+    const [problem] = note.targetAnchorJson
+      ? await this.anchors.checkStored([note.targetAnchorJson])
+      : [null];
+    const [target] = await this.targets(ownerId, studyId, [
+      {
+        targetNodeId: note.targetNodeId,
+        targetReferenceId: note.targetReferenceId,
+        anchor: note.targetAnchorJson
+          ? { kind: note.targetAnchorJson.kind, problem: problem ?? null }
+          : null,
+      },
+    ]);
     return {
       id: note.id,
       studyId: note.studyId,
       revision: note.revision,
-      target: note.targetNodeId === null ? null : (targets.get(note.targetNodeId) ?? null),
+      target: target ?? null,
+      targetAnchor: note.targetAnchorJson,
       content: note.richTextJson,
       characterCount: noteCharacterCount(note.plainText),
       latestVersionNumber: note.latestVersionNumber,
@@ -451,34 +573,54 @@ export class NotesService {
   }
 
   /**
-   * The target nodes of these notes, deleted ones included (orphaned-note review, FR-NOTE-002),
-   * with their labels: a question's text, a Scripture node's reference label. One node query and
-   * one batched reference lookup.
+   * The targets of these notes, in order (null: a study note).
+   *
+   * Nodes, deleted ones included (orphaned-note review, FR-NOTE-002), with their labels: a
+   * question's text, a Scripture node's reference label. Scripture targets (BIB-24) with their
+   * reference and the problem the caller's anchor check found (never moved). One node query and
+   * one batched reference lookup, whatever the count.
    */
   private async targets(
     ownerId: string,
     studyId: string,
-    nodeIds: (string | null)[],
-  ): Promise<Map<string, NoteTarget>> {
-    const ids = [...new Set(nodeIds.filter((id): id is string => id !== null))];
-    const found = new Map<string, NoteTarget>();
-    if (ids.length === 0) return found;
-    const nodes = await this.access.ownedNodesIncludingDeleted(ownerId, studyId, ids);
-    const references = await this.references.storedReferences(
-      nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
-    );
+    notes: readonly TargetSource[],
+  ): Promise<(NoteTarget | null)[]> {
+    const nodeIds = [
+      ...new Set(notes.flatMap((n) => (n.targetNodeId === null ? [] : [n.targetNodeId]))),
+    ];
+    const nodes =
+      nodeIds.length === 0
+        ? []
+        : await this.access.ownedNodesIncludingDeleted(ownerId, studyId, nodeIds);
+    const references = await this.references.storedReferences([
+      ...nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
+      ...notes.flatMap((n) => (n.targetReferenceId ? [n.targetReferenceId] : [])),
+    ]);
+
+    const nodeTargets = new Map<string, NoteTarget>();
     for (const node of nodes) {
       const label = node.scriptureReferenceId
         ? (references.get(node.scriptureReferenceId)?.label ?? null)
         : node.title;
-      found.set(node.id, {
+      nodeTargets.set(node.id, {
+        kind: 'node',
         nodeId: node.id,
         nodeType: node.type,
         label,
         deleted: node.deletedAt !== null,
       });
     }
-    return found;
+    // The CHECK constraint guarantees a note with an anchor has a reference and no node.
+    return notes.map((n): NoteTarget | null => {
+      if (n.targetNodeId !== null) return nodeTargets.get(n.targetNodeId) ?? null;
+      if (!n.anchor || !n.targetReferenceId) return null;
+      return {
+        kind: 'scripture',
+        anchorKind: n.anchor.kind,
+        reference: references.get(n.targetReferenceId) ?? null,
+        problem: n.anchor.problem,
+      };
+    });
   }
 }
 

@@ -11,6 +11,7 @@ import { type FormEvent, useId, useRef, useState } from 'react';
 import { classifyError, REFERENCE_ERROR_COPY } from '@/lib/api-errors';
 import { type ChapterTarget, resolveReference, searchBible, type SearchRequest } from '@/lib/bible';
 import { Attribution } from './bible-reader';
+import { codePointRuns } from './code-point-runs';
 import { ProblemAlert } from './problem-alert';
 
 /** Input wrapped in straight or curly double quotes is an exact phrase (PRD section 14). */
@@ -365,17 +366,17 @@ function Candidates({
  * (BIB-16), so the text is split by code point, never by UTF-16 unit; the text is not altered.
  */
 function HighlightedText({ result }: { result: SearchResult }) {
-  const points = Array.from(result.text);
+  // Overlapping or touching matches read as one marked stretch.
   const parts: { text: string; marked: boolean }[] = [];
-  let at = 0;
-  const sorted = [...result.highlights].sort((a, b) => a.start - b.start);
-  for (const h of sorted) {
-    if (h.start < at) continue;
-    if (h.start > at) parts.push({ text: points.slice(at, h.start).join(''), marked: false });
-    parts.push({ text: points.slice(h.start, h.end).join(''), marked: true });
-    at = h.end;
+  for (const run of codePointRuns(
+    result.text,
+    result.highlights.map((h) => ({ ...h, key: true })),
+  )) {
+    const marked = run.keys.length > 0;
+    const last = parts[parts.length - 1];
+    if (last && last.marked === marked) last.text += run.text;
+    else parts.push({ text: run.text, marked });
   }
-  if (at < points.length) parts.push({ text: points.slice(at).join(''), marked: false });
   return (
     <>
       {parts.map((part, i) =>

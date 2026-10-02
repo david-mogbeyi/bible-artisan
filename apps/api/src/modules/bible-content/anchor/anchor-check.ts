@@ -36,7 +36,7 @@ export interface StoredVerse {
  */
 export function checkCoordinates(
   book: IndexBook | undefined,
-  segments: readonly AnchorSegmentInput[],
+  segments: readonly Pick<AnchorSegmentInput, 'chapter' | 'verse'>[],
 ): AnchorProblemCode | null {
   if (!book) return 'ANCHOR_VERSE_NOT_FOUND';
   for (const { chapter, verse } of segments) {

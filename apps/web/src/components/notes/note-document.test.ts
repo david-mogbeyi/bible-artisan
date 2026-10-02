@@ -187,3 +187,84 @@ describe('toNoteDocument (BIB-23)', () => {
     ).toStrictEqual(['list_numbering', 'characters', 'too_deep', 'too_many_parts', 'structure']);
   });
 });
+
+describe('verified reference links (BIB-24)', () => {
+  const referenceId = 'eeeeeeee-2222-4333-8444-555555555555';
+  it('keeps exactly the reference id and label of a scriptureReference node', () => {
+    const editorJson = {
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'See ' },
+            {
+              type: 'scriptureReference',
+              attrs: { referenceId, label: 'Romans 9:1', class: 'x', href: 'javascript:alert(1)' },
+            },
+          ],
+        },
+      ],
+    };
+    expect(toNoteDocument(editorJson)).toStrictEqual({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            { type: 'text', text: 'See ' },
+            { type: 'scriptureReference', attrs: { referenceId, label: 'Romans 9:1' } },
+          ],
+        },
+      ],
+    });
+  });
+
+  it('drops marks on a reference link instead of making the note unsavable', () => {
+    const editorJson = {
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'scriptureReference',
+              attrs: { referenceId, label: 'Romans 9:1' },
+              marks: [{ type: 'bold' }, { type: 'link', attrs: { href: 'https://example.org' } }],
+            },
+          ],
+        },
+      ],
+    };
+    expect(toNoteDraft(editorJson)).toStrictEqual({
+      ok: true,
+      doc: {
+        type: 'doc',
+        content: [
+          {
+            type: 'paragraph',
+            content: [{ type: 'scriptureReference', attrs: { referenceId, label: 'Romans 9:1' } }],
+          },
+        ],
+      },
+    });
+  });
+
+  it('reports a reference link it cannot send as a reference problem', () => {
+    const draft = toNoteDraft({
+      type: 'doc',
+      content: [
+        {
+          type: 'paragraph',
+          content: [
+            {
+              type: 'scriptureReference',
+              attrs: { referenceId: 'Romans 9:1', label: 'Romans 9:1' },
+            },
+          ],
+        },
+      ],
+    });
+    expect(draft).toStrictEqual({ ok: false, problem: 'reference' });
+  });
+});

@@ -25,6 +25,7 @@ const response = (revision: number, latestVersionNumber = 1): NoteMutationRespon
   studyId: 'bbbbbbbb-2222-4333-8444-555555555555',
   revision,
   targetNodeId: null,
+  targetReferenceId: null,
   characterCount: 1,
   latestVersionNumber,
   createdAt: '2026-10-01T12:00:00.000Z',
@@ -192,6 +193,15 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     saver.edited(doc('y'));
     await vi.advanceTimersByTimeAsync(AUTOSAVE_MAX_DELAY_MS);
     expect([states.at(-1), sent.length]).toStrictEqual(['locked', 1]);
+  });
+
+  it('says a Bible reference link could not be verified (422 NOTE_REFERENCE_INVALID) and keeps the draft (BIB-24)', async () => {
+    const saver = autosave();
+    saver.edited(doc('x'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    sent[0]?.reject(new ApiError(422, { code: 'NOTE_REFERENCE_INVALID' }));
+    await settle();
+    expect([states.at(-1), saver.unsaved]).toStrictEqual(['invalid', true]);
   });
 
   it('saves a version on request, and says when the newest version already holds the content', async () => {

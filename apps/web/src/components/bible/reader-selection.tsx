@@ -8,6 +8,7 @@ import type {
 import {
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
   useEffect,
   useId,
@@ -98,6 +99,7 @@ export function SelectionBar({
   onCapture,
   onClear,
   captureButtonRef,
+  capturedActions,
 }: {
   passage: BiblePassageResponse;
   payload: AnchorSelection | 'not_contiguous' | null;
@@ -105,6 +107,8 @@ export function SelectionBar({
   onCapture: () => void;
   onClear: () => void;
   captureButtonRef: RefObject<HTMLButtonElement | null>;
+  /** What can be done with the captured anchor (BIB-24: Highlight, Add note in a study). */
+  capturedActions?: (captured: CaptureAnchorResponse) => ReactNode;
 }) {
   const ready = payload !== null && payload !== 'not_contiguous';
   const quote = ready && payload.quote !== '' ? `“${payload.quote}”` : '';
@@ -156,6 +160,7 @@ export function SelectionBar({
             label={capture.result.reference.label}
             editionName={passage.edition.name}
           />
+          {capturedActions?.(capture.result)}
         </>
       ) : null}
       {capture.status === 'error' ? (
