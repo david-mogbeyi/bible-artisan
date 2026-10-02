@@ -188,6 +188,21 @@ export class StudyRevisionService {
   }
 
   /**
+   * The study's current revision, read under the mutation's study lock, for a work that changed
+   * nothing and declared `m.unchanged()` (BIB-27: a connect answered `existing` reports it). The
+   * lock is held, so it cannot move before COMMIT.
+   */
+  async currentRevision(m: StudyMutation): Promise<number> {
+    const study = await Study.findOne({
+      where: { id: m.studyId, ownerId: m.ownerId },
+      attributes: ['revision'],
+      transaction: m.transaction,
+      rejectOnEmpty: true,
+    });
+    return study.revision;
+  }
+
+  /**
    * Persists the lock's counters in ONE statement: `content_revision` (when the mutation bumped
    * it) and `last_event_sequence` (when it appended events). No-op when neither changed.
    *

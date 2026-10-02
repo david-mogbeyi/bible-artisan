@@ -28,6 +28,9 @@ const TYPED_NODES_MIGRATION = '20261002011330_add_typed_nodes.ts';
 const CANONICAL_MIGRATION = '20261002021301_add_canonical_scripture_nodes.ts';
 const CANONICAL_REFUSED =
   'canonical scripture nodes drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-27's typed relationships migration. */
+const EDGE_MIGRATION = '20261002090447_create_study_edge.ts';
+const EDGE_REFUSED = 'study edge drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'annotation',
@@ -43,6 +46,7 @@ const DOMAIN_TABLES = [
   'scripture_reference',
   'study',
   'study_branch',
+  'study_edge',
   'study_event',
   'study_node',
   'study_tag',
@@ -232,12 +236,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-26's canonical Scripture nodes) is the first
+      // No opt-in at all: the newest migration (BIB-27's typed relationships) is the first
       // `down` toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: CANONICAL_REFUSED,
+        message: EDGE_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -319,6 +323,75 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies typed relationships (BIB-27) only with the study-data opt-in; the table, constraints, indexes and identity trigger come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const edgeSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint WHERE conrelid = 'study_edge'::regclass
+         UNION ALL
+         SELECT indexname FROM pg_indexes WHERE tablename = 'study_edge'
+         UNION ALL
+         SELECT tgname FROM pg_trigger WHERE tgname = 'study_edge_identity_immutable'
+         UNION ALL
+         SELECT proname FROM pg_proc WHERE proname = 'study_edge_identity_immutable'
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      // An edge between the seeded question and passage.
+      await db.query(
+        `INSERT INTO study_edge (study_id, owner_id, source_node_id, target_node_id, type, origin, note)
+         SELECT p.study_id, p.owner_id, p.id, q.id, 'raises_question', 'user', 'Seeded note'
+           FROM study_node p JOIN study_node q ON q.study_id = p.study_id AND q.type = 'question'
+          WHERE p.owner_id = $1 AND p.type = 'scripture'`,
+        { bind: [userId] },
+      );
+      const schemaBefore = await edgeSchema();
+      expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'study_edge_identity_immutable',
+        'study_edge_identity_immutable',
+        'study_edge_live_key',
+        'study_edge_no_self_check',
+        'study_edge_note_check',
+        'study_edge_origin_check',
+        'study_edge_pkey',
+        'study_edge_pkey',
+        'study_edge_revision_check',
+        'study_edge_source_idx',
+        'study_edge_source_node_fk',
+        'study_edge_study_owner_fk',
+        'study_edge_symmetric_order_check',
+        'study_edge_target_idx',
+        'study_edge_target_node_fk',
+        'study_edge_type_check',
+      ]);
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(EDGE_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: EDGE_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, ['study_edge'])).toStrictEqual(['study_edge']);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['study_edge'])).toStrictEqual([]);
+      expect(
+        await db.query(
+          `SELECT proname FROM pg_proc WHERE proname = 'study_edge_identity_immutable'`,
+          { type: QueryTypes.SELECT },
+        ),
+      ).toStrictEqual([]);
+      await migrator.up();
+      expect(await edgeSchema()).toStrictEqual(schemaBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies canonical Scripture nodes (BIB-26) only with the study-data opt-in; up labels later same-reference rows duplicates of the oldest, deleting nothing', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
@@ -349,6 +422,8 @@ describe('migration reversibility', () => {
         'study_node_canonical_target',
         'study_node_owner_id_study_id_id_scripture_reference_id_key',
       ]);
+      // Past BIB-27's step (which refuses first, from latest), canonical nodes' own guard refuses.
+      await withStudyDataDropAllowed(() => migrator.down({ to: EDGE_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(CANONICAL_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -464,7 +539,8 @@ describe('migration reversibility', () => {
         'study_node_title_check',
         'study_node_type_check',
       ]);
-      // Past BIB-26's step (which refuses first, from latest), typed nodes' own guard refuses.
+      // Past BIB-27's and BIB-26's steps (which refuse first, from latest), typed nodes' own guard
+      // refuses.
       await withStudyDataDropAllowed(() => migrator.down({ to: CANONICAL_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(TYPED_NODES_MIGRATION);
@@ -622,7 +698,7 @@ describe('migration reversibility', () => {
         'note_version_note_id_version_number_key',
       ]);
       const before = await recordedMigrations(db);
-      // Past BIB-26's, BIB-25's and BIB-24's steps (which refuse first, from latest), note's own
+      // Past BIB-27's, BIB-26's, BIB-25's and BIB-24's steps (which refuse first, from latest), note's own
       // guard refuses too.
       await withStudyDataDropAllowed(() => migrator.down({ to: ANNOTATION_MIGRATION }));
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -635,7 +711,8 @@ describe('migration reversibility', () => {
           (name) =>
             name !== ANNOTATION_MIGRATION &&
             name !== TYPED_NODES_MIGRATION &&
-            name !== CANONICAL_MIGRATION,
+            name !== CANONICAL_MIGRATION &&
+            name !== EDGE_MIGRATION,
         ),
       );
       expect(

@@ -118,6 +118,10 @@ beforeEach(() => {
         return Promise.resolve(jsonResponse(200, { translations: [TRANSLATION] }));
       }
       const next = replies.get(`${method} ${path}`)?.shift();
+      // A node detail lists its relationships (BIB-27): none unless a test queues some.
+      if (!next && method === 'GET' && path.startsWith(`/studies/${STUDY_ID}/edges?`)) {
+        return Promise.resolve(jsonResponse(200, { items: [] }));
+      }
       if (!next) throw new Error(`unexpected ${method} ${path}`);
       return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
     }),

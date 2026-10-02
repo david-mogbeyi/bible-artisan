@@ -286,6 +286,37 @@ const ROUTES: Record<string, Access> = {
       test: 'PATCH /v1/studies/:studyId/nodes/:nodeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  // Typed relationships (BIB-27): Bob's calls on Alice's study, edges and nodes, absent and
+  // malformed ids, Alice's edge or nodes under his own study, and her edge under another of her
+  // studies.
+  'POST /v1/studies/:studyId/edges': {
+    access: 'private',
+    crossUserTest: {
+      file: 'edges.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/edges gives another user the same neutral 404 as an absent or malformed study, and never connects their nodes, writing nothing',
+    },
+  },
+  'GET /v1/studies/:studyId/edges': {
+    access: 'private',
+    crossUserTest: {
+      file: 'edges.int-spec.ts',
+      test: "GET /v1/studies/:studyId/edges lists nothing of another user's: their study and node are the same 404 as absent ones",
+    },
+  },
+  'PATCH /v1/studies/:studyId/edges/:edgeId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'edges.int-spec.ts',
+      test: 'PATCH /v1/studies/:studyId/edges/:edgeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'DELETE /v1/studies/:studyId/edges/:edgeId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'edges.int-spec.ts',
+      test: 'DELETE /v1/studies/:studyId/edges/:edgeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

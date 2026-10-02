@@ -10,6 +10,7 @@ import { MutationReceipt } from './models/mutation-receipt.model';
 import { NoteVersion } from './models/note-version.model';
 import { Note } from './models/note.model';
 import { ScriptureReference } from './models/scripture-reference.model';
+import { StudyEdge } from './models/study-edge.model';
 import { StudyBranch } from './models/study-branch.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
@@ -83,6 +84,7 @@ export function createDatabase(
       Note,
       NoteVersion,
       Annotation,
+      StudyEdge,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

@@ -13,3 +13,4 @@ export * from './study-lifecycle';
 export * from './note';
 export * from './annotation';
 export * from './node';
+export * from './edge';

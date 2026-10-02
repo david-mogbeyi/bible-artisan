@@ -273,6 +273,9 @@ export function NodesSection({
           onLocked={lock}
           labelOf={labelOf}
           onShowNode={(nodeId) => select(nodeId, true)}
+          nodes={items}
+          studyRevision={study.revision}
+          onReload={onReload}
         />
       ) : null}
     </section>

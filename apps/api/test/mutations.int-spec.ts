@@ -908,6 +908,171 @@ describe('revision-safe, event-atomic mutations', () => {
     });
   });
 
+  describe('m.unchanged() (BIB-27)', () => {
+    /** A keyed service-level request, so the receipt and its replay are exercised. */
+    const keyed = (idempotencyKey: string): MutationRequestInfo => ({
+      ...NO_KEY,
+      idempotencyKey,
+      route: '/service-level/unchanged',
+    });
+
+    async function counters(study: Study) {
+      const row = await Study.findByPk(study.id, { rejectOnEmpty: true });
+      return {
+        revision: row.revision,
+        contentRevision: row.contentRevision,
+        lastEventSequence: row.lastEventSequence,
+        lastActivityAt: row.lastActivityAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+        events: await StudyEvent.count({ where: { studyId: study.id } }),
+      };
+    }
+
+    it('commits the receipt and replays it, writing no event and leaving revision, content revision, last event sequence and last activity unchanged', async () => {
+      const study = await newStudy(alice);
+      const before = await counters(study);
+      const receiptsBefore = await MutationReceipt.count({ where: { ownerId: alice.user.id } });
+      const key = randomUUID();
+      let runs = 0;
+      const run = () =>
+        mutations.execute(alice.user.id, keyed(key), {
+          studyId: study.id,
+          bumpsContentRevision: false,
+          work: (m) => {
+            runs += 1;
+            m.unchanged();
+            return Promise.resolve({ status: 200, body: { outcome: 'existing' } });
+          },
+        });
+      const first = await run();
+      const replay = await run();
+      expect({
+        first: [first.status, first.body, first.replayed],
+        replay: [replay.status, replay.body, replay.replayed],
+        runs,
+        receipts:
+          (await MutationReceipt.count({ where: { ownerId: alice.user.id } })) - receiptsBefore,
+        counters: await counters(study),
+      }).toStrictEqual({
+        first: [200, { outcome: 'existing' }, false],
+        replay: [200, { outcome: 'existing' }, true],
+        runs: 1,
+        receipts: 1,
+        counters: before,
+      });
+    });
+
+    it('fails loudly, writing nothing, when unchanged() follows a write, a write follows it, the spec bumps content, or a study is being created', async () => {
+      const study = await newStudy(alice);
+      const before = await counters(study);
+      const after = 'unchanged() after this mutation already wrote';
+      const writeAfter = 'a write after unchanged() was declared';
+      const cases: [string, (m: StudyMutation) => Promise<unknown>, boolean][] = [
+        [
+          after,
+          async (m) => {
+            await m.updateWithExpectedRevision(Study, {
+              id: study.id,
+              expectedRevision: 1,
+              values: {},
+            });
+            m.unchanged();
+          },
+          false,
+        ],
+        [
+          after,
+          async (m) => {
+            await m.appendEvent({ eventType: 'probe' });
+            m.unchanged();
+          },
+          false,
+        ],
+        [
+          after,
+          async (m) => {
+            await m.createChild(StudyNode, THOUGHT);
+            m.unchanged();
+          },
+          false,
+        ],
+        [
+          after,
+          (m) => {
+            m.bumpContentRevision();
+            m.unchanged();
+            return Promise.resolve();
+          },
+          false,
+        ],
+        [after, (m) => Promise.resolve(m.unchanged()), true],
+        [
+          writeAfter,
+          async (m) => {
+            m.unchanged();
+            await m.appendEvent({ eventType: 'probe' });
+          },
+          false,
+        ],
+        [
+          writeAfter,
+          async (m) => {
+            m.unchanged();
+            await m.updateWithExpectedRevision(Study, {
+              id: study.id,
+              expectedRevision: 1,
+              values: {},
+            });
+          },
+          false,
+        ],
+        [
+          writeAfter,
+          async (m) => {
+            m.unchanged();
+            await m.createChild(StudyNode, THOUGHT);
+          },
+          false,
+        ],
+      ];
+      const messages: string[] = [];
+      for (const [, work, bumps] of cases) {
+        const error = await execute(
+          alice,
+          study.id,
+          async (m) => {
+            await work(m);
+            return { status: 200, body: {} };
+          },
+          { bumpsContentRevision: bumps },
+        ).catch((e: unknown) => e);
+        messages.push(error instanceof Error ? error.message : 'resolved');
+      }
+      const creating = await mutations
+        .create(alice.user.id, NO_KEY, {
+          study: { title: 'Never', startingReferenceId: null },
+          work: (m) => {
+            m.unchanged();
+            return Promise.resolve({ status: 201, body: {} });
+          },
+        })
+        .catch((e: unknown) => (e instanceof Error ? e.message : 'resolved'));
+      expect({
+        messages,
+        creating,
+        counters: await counters(study),
+        nodes: await StudyNode.count({ where: { studyId: study.id } }),
+        neverCreated: await Study.count({ where: { ownerId: alice.user.id, title: 'Never' } }),
+      }).toStrictEqual({
+        messages: cases.map(([message]) => `StudyMutation: ${message}`),
+        creating: 'StudyMutation: creating a study always changes it',
+        counters: before,
+        nodes: 0,
+        neverCreated: 0,
+      });
+    });
+  });
+
   describe('shared services', () => {
     it("refuses to mutate another owner's study (404) and changes nothing", async () => {
       const study = await newStudy(alice);

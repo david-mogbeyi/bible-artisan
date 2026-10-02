@@ -7,6 +7,7 @@ import {
   AnchorInvalidError,
   AnnotationRuleError,
   DependencyUnavailableError,
+  EdgeRuleError,
   IdempotencyKeyReusedError,
   NotFoundError,
   NodeRuleError,
@@ -158,7 +159,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof StudyLifecycleError ||
       exception instanceof NoteRuleError ||
       exception instanceof AnnotationRuleError ||
-      exception instanceof NodeRuleError
+      exception instanceof NodeRuleError ||
+      exception instanceof EdgeRuleError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,
