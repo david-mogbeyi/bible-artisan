@@ -12,8 +12,15 @@ import type { MigrationContext } from '../src/database/migrator';
 //   BIB-25's identity trigger keeps both rows' reference fixed). NO ACTION, like the branch root
 //   FK: checked at the end of the statement, so a study or user purge deletes both sides in one
 //   cascade, while deleting a canonical row on its own that a duplicate names is refused.
-// - CHECK: only a Scripture node can be a duplicate, and never of itself. "Canonical, not another
-//   duplicate" is the service's rule: it only ever looks up a canonical node to point at.
+// - CHECK: only a Scripture node can be a duplicate, and never of itself.
+// - No duplicate-of-duplicate chains: the constraint trigger `study_node_canonical_target`
+//   (fires after INSERT, or UPDATE OF canonical_node_id, at the end of the statement) refuses a
+//   row whose canonical_node_id names a node that is itself a duplicate, and the reverse, a node
+//   that duplicates already name becoming a duplicate. It locks the target row FOR UPDATE, so two
+//   concurrent writes (A becomes a duplicate while C is added as a duplicate of A) serialize and
+//   the second sees the first. Like the other triggers, the function pins
+//   `search_path = pg_catalog, pg_temp`, schema-qualifies the table, and raises a fixed,
+//   content-free SQLSTATE 23000.
 // - The partial unique index allows at most one live canonical Scripture node per (study,
 //   reference); the reference already fixes range and edition (BIB-15), so this is PRD section
 //   23's study/reference/edition key. Deleted rows are outside it, so once BIB-31 adds node
@@ -33,7 +40,21 @@ import type { MigrationContext } from '../src/database/migrator';
 // `down` refuses while any study exists unless ALLOW_STUDY_DATA_DROP=1 (ADR 0001, BIB-19
 // addendum): it drops which nodes are labeled duplicates. With the opt-in, duplicate rows stay
 // as plain Scripture rows (a re-applied `up` backfills them again, oldest canonical).
+/** A plain lower-case identifier: safe to double-quote into DDL. */
+const SCHEMA_NAME = /^[a-z_][a-z0-9_]{0,62}$/;
+
+async function nodeSchema(context: MigrationContext): Promise<string> {
+  const [row] = await context.select<{ schema: string | null }>(
+    'SELECT current_schema() AS schema',
+  );
+  if (!row?.schema || !SCHEMA_NAME.test(row.schema)) {
+    throw new Error('add_canonical_scripture_nodes: unsupported current schema');
+  }
+  return `"${row.schema}"`;
+}
+
 export async function up({ context }: { context: MigrationContext }): Promise<void> {
+  const s = await nodeSchema(context);
   await context.query(`
     ALTER TABLE study_node
       ADD COLUMN canonical_node_id uuid,
@@ -70,6 +91,36 @@ export async function up({ context }: { context: MigrationContext }): Promise<vo
       ON study_node (study_id, canonical_node_id)
       WHERE canonical_node_id IS NOT NULL;
   `);
+  // After the backfill, which only ever points a row at its partition's oldest (canonical) row.
+  await context.query(`
+    CREATE FUNCTION ${s}.study_node_canonical_target() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+    DECLARE
+      target_canonical uuid;
+    BEGIN
+      IF NEW.canonical_node_id IS NULL THEN
+        RETURN NULL;
+      END IF;
+      SELECT t.canonical_node_id INTO target_canonical
+        FROM ${s}.study_node t
+       WHERE t.id = NEW.canonical_node_id
+         FOR UPDATE;
+      IF target_canonical IS NOT NULL
+         OR EXISTS (SELECT 1 FROM ${s}.study_node d WHERE d.canonical_node_id = NEW.id) THEN
+        RAISE EXCEPTION 'a duplicate study node must name a canonical node'
+          USING ERRCODE = 'integrity_constraint_violation';
+      END IF;
+      RETURN NULL;
+    END
+    $$;
+  `);
+  await context.query(`
+    CREATE CONSTRAINT TRIGGER study_node_canonical_target
+      AFTER INSERT OR UPDATE OF canonical_node_id ON ${s}.study_node
+      FOR EACH ROW EXECUTE FUNCTION ${s}.study_node_canonical_target();
+  `);
 }
 
 export async function down({ context }: { context: MigrationContext }): Promise<void> {
@@ -86,6 +137,9 @@ export async function down({ context }: { context: MigrationContext }): Promise<
       $$;
     `);
   }
+  const s = await nodeSchema(context);
+  await context.query(`DROP TRIGGER IF EXISTS study_node_canonical_target ON ${s}.study_node;`);
+  await context.query(`DROP FUNCTION IF EXISTS ${s}.study_node_canonical_target();`);
   await context.query(`DROP INDEX IF EXISTS study_node_canonical_node_idx;`);
   await context.query(`DROP INDEX IF EXISTS study_node_canonical_scripture_key;`);
   await context.query(`

@@ -245,6 +245,8 @@ export class NodesService {
    * trips it, so a violation would be a bug and stays a 500.
    */
   private async addScripture(m: StudyMutation, body: ScriptureBody, studyRevision: number) {
+    // Only live canonical rows count. When a canonical node is soft-deleted, promoting its oldest
+    // live duplicate to canonical is BIB-31's responsibility (node delete/restore), not this path's.
     const canonical = await StudyNode.findOne({
       where: {
         studyId: m.studyId,

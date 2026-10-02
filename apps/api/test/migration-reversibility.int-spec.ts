@@ -345,6 +345,8 @@ describe('migration reversibility', () => {
         'study_node_canonical_node_fk',
         'study_node_canonical_node_idx',
         'study_node_canonical_scripture_key',
+        // The no-chains constraint trigger (contype 't').
+        'study_node_canonical_target',
         'study_node_owner_id_study_id_id_scripture_reference_id_key',
       ]);
       const before = await recordedMigrations(db);
@@ -360,6 +362,15 @@ describe('migration reversibility', () => {
       expect((await columns(['study_node'])).filter((c) => c.includes('canonical'))).toStrictEqual(
         [],
       );
+      expect(await schema()).toStrictEqual([]);
+      expect(
+        await db.query(
+          `SELECT tgname AS name FROM pg_trigger WHERE tgname = 'study_node_canonical_target'
+           UNION ALL
+           SELECT proname FROM pg_proc WHERE proname = 'study_node_canonical_target'`,
+          { type: QueryTypes.SELECT },
+        ),
+      ).toStrictEqual([]);
       // Rows written by hand before BIB-26: two more live copies of the seeded passage (later),
       // and a deleted one, which stays as it is.
       await db.query(

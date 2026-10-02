@@ -2,20 +2,24 @@
 
 import {
   type CreateNodeResponse,
-  NODE_LIMIT_EXCEEDED,
   NODE_ORIGIN_NAMES,
   NODE_TYPE_NAMES,
-  STUDY_ARCHIVED,
-  STUDY_TRASHED,
   type StudyResponse,
 } from '@bible-artisan/contracts';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
-import { ApiError } from '@/lib/api-client';
-import { createNode, listNodes, nodeStateText, nodesQueryKey } from '@/lib/nodes';
+import {
+  addProblemText,
+  isLifecycleRefusal,
+  NODE_ADD_COPY,
+  outcomeText,
+  scriptureRequest,
+  useAddNode,
+} from '@/lib/add-node';
+import { listNodes, nodeStateText, nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
-import { ADD_NODE_COPY, AddNodeForm } from './add-node-form';
+import { AddNodeForm } from './add-node-form';
 import { NodeDetail } from './node-detail';
 
 export const NODES_COPY = {
@@ -26,20 +30,13 @@ export const NODES_COPY = {
     'This study was archived or moved to the trash somewhere else, so nothing was saved. Reload to see it.',
 } as const;
 
-/** BIB-26: the outcomes of adding a passage, by its label (never a quote). */
-export const SCRIPTURE_OUTCOME_COPY = {
-  focused: (label: string) => `${label} is already in this study. Showing it.`,
-  duplicate: (label: string) => `Duplicate of ${label} added`,
-  separateCopy: 'Add a separate copy',
-  copyConflict:
-    'The study changed somewhere else, so the copy was not added. Press Add a separate copy again.',
-} as const;
-
 /** "Duplicate", the text badge a deliberate duplicate Scripture node carries (never color alone). */
 export const DUPLICATE_BADGE = 'Duplicate';
 
 /** A passage the study already held, focused instead of added again. */
 interface Revisit {
+  /** The focused existing node: the status shows only while it is the selected one. */
+  nodeId: string;
   referenceId: string;
   label: string;
   /** The study revision the focus moved to: a copy is requested from at least this one. */
@@ -85,10 +82,26 @@ export function NodesSection({
   const [revisit, setRevisit] = useState<Revisit | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const returnToAdd = useRef(false);
+  const lockedAlert = useRef<HTMLDivElement>(null);
+  const focusLockedAlert = useRef(false);
   // Read-only until the study is reloaded (a reload brings a newer revision).
   const locked = lockedAt === study.revision;
   const editable = study.lifecycle === 'active' && !locked;
   const lock = () => setLockedAt(study.revision);
+  /**
+   * A lifecycle refusal from an add control that unmounts with it (the Add node form, "Add a
+   * separate copy"): the section-level alert says why and takes focus, so focus is never dropped.
+   */
+  const lockFromAdd = () => {
+    focusLockedAlert.current = true;
+    lock();
+  };
+
+  useEffect(() => {
+    if (!locked || !focusLockedAlert.current) return;
+    focusLockedAlert.current = false;
+    lockedAlert.current?.focus();
+  }, [locked]);
 
   const nodes = useQuery({
     queryKey: nodesQueryKey(study.id),
@@ -104,6 +117,8 @@ export function NodesSection({
   const select = (nodeId: string, focus: boolean) => {
     setSelectedId(nodeId);
     setFocusDetail(focus);
+    // The revisit status is about the node it focused: another node drops it.
+    setRevisit((current) => (current && current.nodeId !== nodeId ? null : current));
   };
   const onFocused = useCallback(() => setFocusDetail(false), []);
 
@@ -125,8 +140,9 @@ export function NodesSection({
     if (node.outcome === 'focused_existing' && node.referenceId) {
       // Announced in the section's live region (a newly mounted one may go unread) and shown
       // below with "Add a separate copy".
-      setAnnouncement(SCRIPTURE_OUTCOME_COPY.focused(passage));
+      setAnnouncement(outcomeText(node, passage));
       setRevisit({
+        nodeId: node.id,
         referenceId: node.referenceId,
         label: passage,
         studyRevision: node.studyRevision,
@@ -135,8 +151,8 @@ export function NodesSection({
     }
     setRevisit(null);
     setAnnouncement(
-      node.outcome === 'explicit_duplicate'
-        ? SCRIPTURE_OUTCOME_COPY.duplicate(passage)
+      node.type === 'scripture' && label
+        ? outcomeText(node, label)
         : `${NODE_TYPE_NAMES[node.type]} added`,
     );
   }
@@ -156,7 +172,12 @@ export function NodesSection({
         {announcement}
       </p>
       {locked ? (
-        <div role="alert" className="flex flex-wrap items-center gap-3">
+        <div
+          role="alert"
+          ref={lockedAlert}
+          tabIndex={-1}
+          className="flex flex-wrap items-center gap-3"
+        >
           <p>{NODES_COPY.locked}</p>
           <button type="button" onClick={() => void onReload()} className="underline">
             Reload
@@ -187,17 +208,17 @@ export function NodesSection({
           study={study}
           onCreated={created}
           onCancel={cancelAdd}
-          onLocked={lock}
+          onLocked={lockFromAdd}
           onReload={onReload}
         />
       ) : null}
-      {editable && revisit ? (
+      {editable && revisit && revisit.nodeId === shownId ? (
         <RevisitStatus
-          key={revisit.referenceId}
+          key={`revisit:${revisit.nodeId}`}
           study={study}
           revisit={revisit}
           onCreated={(node) => created(node, revisit.label)}
-          onLocked={lock}
+          onLocked={lockFromAdd}
           onReload={onReload}
         />
       ) : null}
@@ -259,10 +280,10 @@ export function NodesSection({
 }
 
 /**
- * The passage was already in the study, so its node was selected (BIB-26). Says so in a polite
- * live region and offers a deliberate duplicate: the same Add with `explicit_duplicate`, a new
- * request (its body differs) frozen with its own Idempotency-Key and resent verbatim after an
- * unknown outcome.
+ * The passage was already in the study, so its node was selected (BIB-26). Says so and offers a
+ * deliberate duplicate: the same Add with `explicit_duplicate` through `useAddNode`, a new request
+ * on the study's current revision with its own Idempotency-Key, which Retry resends verbatim after
+ * an unknown outcome. A lifecycle refusal hands over to the section's alert (`onLocked`).
  */
 function RevisitStatus({
   study,
@@ -277,67 +298,50 @@ function RevisitStatus({
   onLocked: () => void;
   onReload: () => Promise<unknown>;
 }) {
-  const [pending, setPending] = useState(false);
-  const [problem, setProblem] = useState<{ text: string; retry?: boolean } | null>(null);
-  const frozen = useRef<{ key: string; expectedRevision: number } | null>(null);
+  const add = useAddNode(study.id);
+  const [problem, setProblem] = useState<{ text: string; retry: boolean } | null>(null);
 
   async function addCopy(retry = false) {
-    if (pending) return;
-    if (!retry || frozen.current === null) {
-      frozen.current = {
-        key: crypto.randomUUID(),
-        expectedRevision: Math.max(study.revision, revisit.studyRevision),
-      };
-    }
-    const attempt = frozen.current;
-    setPending(true);
+    const request = retry
+      ? add.retry()
+      : add.send(
+          scriptureRequest(
+            revisit.referenceId,
+            Math.max(study.revision, revisit.studyRevision),
+            'explicit_duplicate',
+          ),
+          null,
+        );
+    if (!request) return;
     setProblem(null);
-    try {
-      const node = await createNode(
-        study.id,
-        {
-          type: 'scripture',
-          referenceId: revisit.referenceId,
-          duplicatePolicy: 'explicit_duplicate',
-          expectedRevision: attempt.expectedRevision,
-        },
-        attempt.key,
-      );
-      frozen.current = null;
-      onCreated(node);
-    } catch (error) {
-      const definite = error instanceof ApiError && error.status < 500 && error.status !== 429;
-      if (!definite) {
-        setProblem({ text: ADD_NODE_COPY.unknown, retry: true });
-        return;
-      }
-      frozen.current = null;
-      if (error.status === 409) {
-        void onReload();
-        setProblem({ text: SCRIPTURE_OUTCOME_COPY.copyConflict });
-      } else if (error.code === NODE_LIMIT_EXCEEDED) {
-        setProblem({ text: ADD_NODE_COPY.limit });
-      } else if (error.code === STUDY_ARCHIVED || error.code === STUDY_TRASHED) {
-        onLocked();
-      } else {
-        setProblem({ text: ADD_NODE_COPY.failed });
-      }
-    } finally {
-      setPending(false);
+    const result = await request;
+    if (result.ok) {
+      onCreated(result.node);
+      return;
     }
+    const { problem: reason } = result;
+    if (isLifecycleRefusal(reason)) {
+      onLocked();
+      return;
+    }
+    if (reason.kind === 'conflict') void onReload();
+    setProblem({
+      text: addProblemText(reason, NODE_ADD_COPY.separateCopy),
+      retry: reason.kind === 'unknown',
+    });
   }
 
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-3">
-        <p>{SCRIPTURE_OUTCOME_COPY.focused(revisit.label)}</p>
+        <p>{NODE_ADD_COPY.focused(revisit.label)}</p>
         <button
           type="button"
-          aria-disabled={pending ? true : undefined}
+          aria-disabled={add.pending ? true : undefined}
           onClick={() => void addCopy()}
           className="rounded border border-accent px-3 py-1 text-accent aria-disabled:opacity-60"
         >
-          {SCRIPTURE_OUTCOME_COPY.separateCopy}
+          {NODE_ADD_COPY.separateCopy}
         </button>
       </div>
       {problem ? (

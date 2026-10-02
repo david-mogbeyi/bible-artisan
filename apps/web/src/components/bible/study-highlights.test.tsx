@@ -5,9 +5,11 @@ import type {
   CaptureAnchorResponse,
   ScriptureAnchor,
 } from '@bible-artisan/contracts';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chapter, OTHER_TRANSLATION, TRANSLATION } from '@/test/bible-fixtures';
+import { NODE_ADD_COPY } from '@/lib/add-node';
 import { studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { BibleReader } from './bible-reader';
@@ -137,19 +139,21 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const readerElement = (study: ReaderStudy | null) => (
+  <BibleReader
+    translations={[TRANSLATION, OTHER_TRANSLATION]}
+    editionId={TRANSLATION.id}
+    referenceId={PASSAGE_ID}
+    onOpenChapter={vi.fn()}
+    onOpenReference={vi.fn()}
+    onChangeEdition={vi.fn()}
+    focusRequest={null}
+    study={study}
+  />
+);
+
 async function renderReader(study: ReaderStudy | null = STUDY) {
-  const view = renderWithQuery(
-    <BibleReader
-      translations={[TRANSLATION, OTHER_TRANSLATION]}
-      editionId={TRANSLATION.id}
-      referenceId={PASSAGE_ID}
-      onOpenChapter={vi.fn()}
-      onOpenReference={vi.fn()}
-      onChangeEdition={vi.fn()}
-      focusRequest={null}
-      study={study}
-    />,
-  );
+  const view = renderWithQuery(readerElement(study));
   await screen.findByRole('heading', { name: 'Psalms 3' });
   return view;
 }
@@ -507,9 +511,16 @@ describe('Add to study in the reader (BIB-26)', () => {
     });
 
   /** Ticks verse 3, captures it, and returns the focused Add to study button. */
+  let view: Awaited<ReturnType<typeof renderReader>>;
+  /** The same reader, now given `study` (e.g. a revision that moved elsewhere). */
+  const rerenderReader = (study: ReaderStudy) =>
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>{readerElement(study)}</QueryClientProvider>,
+    );
+
   async function captureVerse3() {
     reply(LIST, jsonResponse(200, { items: [] }));
-    await renderReader();
+    view = await renderReader();
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select verse 3' }));
     fireEvent.click(screen.getByRole('button', { name: 'Capture' }));
     const button = await screen.findByRole('button', { name: 'Add to study' });
@@ -620,9 +631,7 @@ describe('Add to study in the reader (BIB-26)', () => {
     );
     const button = await captureVerse3();
     fireEvent.click(button);
-    expect(textOf(await screen.findByRole('alert'))).toBe(
-      'The study changed somewhere else. Press Add to study again.',
-    );
+    expect(textOf(await screen.findByRole('alert'))).toBe(NODE_ADD_COPY.conflict('Add to study'));
     fireEvent.click(button);
     await waitFor(() =>
       expect(textOf(screen.getByRole('status'))).toContain('Your visit was recorded.'),
@@ -654,6 +663,47 @@ describe('Add to study in the reader (BIB-26)', () => {
     );
     const [first, second] = nodePosts();
     expect([second?.key === first?.key, second?.body]).toStrictEqual([true, first?.body]);
+  });
+
+  it('Retry after a lost "Add a separate copy" response resends the identical body and key after the study moved elsewhere, so no second duplicate', async () => {
+    reply(
+      NODES,
+      answer(200, { outcome: 'focused_existing' }),
+      jsonResponse(503, {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'x',
+        retryable: true,
+        correlationId: 'c',
+      }),
+      answer(201, {
+        id: COPY_ID,
+        outcome: 'explicit_duplicate',
+        canonicalNodeId: NODE_ID,
+        studyRevision: 9,
+      }),
+    );
+    const button = await captureVerse3();
+    fireEvent.click(button);
+    fireEvent.click(await screen.findByRole('button', { name: NODE_ADD_COPY.separateCopy }));
+    const alert = await screen.findByRole('alert');
+    expect(textOf(alert)).toContain(NODE_ADD_COPY.unknown);
+    // The study moved somewhere else while the outcome was unknown.
+    rerenderReader({ ...STUDY, revision: 12 });
+    fireEvent.click(
+      within(await screen.findByRole('alert')).getByRole('button', { name: 'Retry' }),
+    );
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('status'))).toContain(NODE_ADD_COPY.duplicate('Psalms 3:3')),
+    );
+    const [, lost, retried] = nodePosts();
+    expect(nodePosts()).toHaveLength(3);
+    expect(lost?.body).toStrictEqual({
+      type: 'scripture',
+      referenceId: ref(3).id,
+      expectedRevision: 8,
+      duplicatePolicy: 'explicit_duplicate',
+    });
+    expect(retried).toStrictEqual(lost);
   });
 
   it('says a phrase adds the verse containing it', async () => {
