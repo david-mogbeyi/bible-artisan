@@ -278,9 +278,16 @@ describe('Relationships', () => {
         mutationBody(existing, { outcome: 'existing', studyRevision: 4, lastEventSequence: null }),
       ),
     );
+    // Made in another tab: this node's list hasn't seen it yet, and refetches on 'existing'.
+    server[OBS] = [existing];
     fireEvent.submit(form);
     expect(await within(form).findByText(RELATIONSHIPS_COPY.existing)).toBeTruthy();
     expect((note as HTMLTextAreaElement).value).toBe('My draft');
+    await waitFor(() =>
+      expect(sentences()).toStrictEqual([
+        'This observation references Conclusion: Conscience testifies',
+      ]),
+    );
   });
 
   it('resends the same key and body on Retry after an unknown outcome, and asks to press Connect again after a 409', async () => {

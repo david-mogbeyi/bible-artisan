@@ -221,11 +221,16 @@ export function Relationships({
     ]);
   }
 
-  function connected(edge: CreateEdgeResponse) {
+  /** Adopts the study revision the server returned and refetches both endpoints' lists. */
+  function adopt(edge: CreateEdgeResponse) {
     queryClient.setQueryData<StudyResponse>(studyQueryKey(studyId), (old) =>
       old && edge.studyRevision > old.revision ? { ...old, revision: edge.studyRevision } : old,
     );
     void refresh(edge);
+  }
+
+  function connected(edge: CreateEdgeResponse) {
+    adopt(edge);
     returnToConnect.current = true;
     setConnecting(false);
     setAnnouncement(RELATIONSHIPS_COPY.added);
@@ -303,6 +308,7 @@ export function Relationships({
           studyRevision={studyRevision}
           sentence={sentence}
           onConnected={connected}
+          onExisting={adopt}
           onCancel={() => {
             returnToConnect.current = true;
             setConnecting(false);
@@ -424,6 +430,7 @@ function ConnectForm({
   studyRevision,
   sentence,
   onConnected,
+  onExisting,
   onCancel,
   onLocked,
   onReload,
@@ -435,6 +442,8 @@ function ConnectForm({
   studyRevision: number;
   sentence: (type: EdgeType, otherId: string, reversed: boolean) => string;
   onConnected: (edge: CreateEdgeResponse) => void;
+  /** The relationship already existed (perhaps made in another tab): sync lists and revision. */
+  onExisting: (edge: CreateEdgeResponse) => void;
   onCancel: () => void;
   onLocked: () => void;
   onReload: () => Promise<unknown>;
@@ -460,7 +469,8 @@ function ConnectForm({
 
   const twoWay = isSymmetricEdgeType(type);
   const reversed = swapped && !twoWay;
-  const chosen = others.some((candidate) => candidate.id === other) ? other : '';
+  // If the picked node left the list, the select shows the first option: send what is shown.
+  const chosen = others.some((candidate) => candidate.id === other) ? other : (others[0]?.id ?? '');
 
   async function submit(retry = false) {
     let attempt;
@@ -482,7 +492,10 @@ function ConnectForm({
     const result = await attempt;
     if (result.ok) {
       if (result.value.outcome === 'created') onConnected(result.value);
-      else setExisting(true);
+      else {
+        onExisting(result.value);
+        setExisting(true);
+      }
       return;
     }
     const { error } = result;
