@@ -1468,6 +1468,131 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs typed relationships (BIB-27) without edge notes, ids, or keys, on success and on refusals', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ blank: true })
+      .expect(201);
+    const edgeStudyId = track((created.body as { studyId: string }).studyId);
+    const listRoute = '/v1/studies/:studyId/edges';
+    const itemRoute = '/v1/studies/:studyId/edges/:edgeId';
+    const send = (method: 'get' | 'post' | 'patch' | 'delete', path: string, body?: object) => {
+      const req = withPrivateChannels(http()[method](`${path}${query()}`), cookie).set(
+        'Idempotency-Key',
+        track(randomUUID()),
+      );
+      return body ? req.send(body) : req;
+    };
+    const edges = `/v1/studies/${edgeStudyId}/edges`;
+    const node = async (expectedRevision: number) => {
+      const res = await send('post', `/v1/studies/${edgeStudyId}/nodes`, {
+        expectedRevision,
+        type: 'thought',
+        text: track(`SENTINEL-edge-node-${randomUUID()}`),
+      }).expect(201);
+      return track((res.body as { id: string }).id);
+    };
+    const a = await node(1);
+    const b = await node(2);
+
+    // A note the owner's own reads return: tracked for the log check only.
+    const connected = await send('post', edges, {
+      expectedRevision: 3,
+      sourceNodeId: a,
+      targetNodeId: b,
+      type: 'supports',
+      note: track(`SENTINEL-edge-note-${randomUUID()}`),
+    });
+    await expectLogged(connected, { method: 'POST', route: listRoute, status: 201 });
+    const edgeId = track((connected.body as { id: string }).id);
+    const existing = await send('post', edges, {
+      expectedRevision: 1,
+      sourceNodeId: a,
+      targetNodeId: b,
+      type: 'supports',
+      note: secret('edge-duplicate-note'),
+    });
+    await expectLogged(existing, { method: 'POST', route: listRoute, status: 200 });
+    const selfEdge = await send('post', edges, {
+      expectedRevision: 4,
+      sourceNodeId: a,
+      targetNodeId: a,
+      type: 'supports',
+      note: secret('edge-self-note'),
+    });
+    await expectLogged(
+      selfEdge,
+      { method: 'POST', route: listRoute, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { targetNodeId: ['Choose two different nodes'] },
+        }),
+      },
+    );
+    const notQuestion = await send('post', edges, {
+      expectedRevision: 4,
+      sourceNodeId: a,
+      targetNodeId: b,
+      type: 'answers',
+      note: secret('edge-rule-note'),
+    });
+    await expectLogged(
+      notQuestion,
+      { method: 'POST', route: listRoute, status: 422 },
+      {
+        errorType: 'EdgeRuleError',
+        body: envelope({
+          code: 'EDGE_TARGET_NOT_QUESTION',
+          message: 'This relationship must point to a question',
+        }),
+      },
+    );
+    const stale = await send('patch', `${edges}/${edgeId}`, {
+      expectedRevision: 7,
+      note: secret('edge-stale-note'),
+    });
+    await expectLogged(
+      stale,
+      { method: 'PATCH', route: itemRoute, status: 409 },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 1,
+        }),
+      },
+    );
+    const edited = await send('patch', `${edges}/${edgeId}`, {
+      expectedRevision: 1,
+      note: track(`SENTINEL-edge-new-note-${randomUUID()}`),
+    });
+    await expectLogged(edited, { method: 'PATCH', route: itemRoute, status: 200 });
+    // The list takes only `nodeId` (strict), so no private query channel here: an opaque id only.
+    const listed = await withPrivateChannels(http().get(`${edges}?nodeId=${a}`), cookie);
+    await expectLogged(listed, { method: 'GET', route: listRoute, status: 200 });
+    const unknownKey = await withPrivateChannels(
+      http().get(`${edges}?nodeId=${a}&note=${encodeURIComponent(secret('edge-query-note'))}`),
+      cookie,
+    );
+    await expectLogged(
+      unknownKey,
+      { method: 'GET', route: listRoute, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: expect.any(Object) as Record<string, string[]>,
+        }),
+      },
+    );
+    const removed = await send('delete', `${edges}/${edgeId}`, { expectedRevision: 2 });
+    await expectLogged(removed, { method: 'DELETE', route: itemRoute, status: 200 });
+  });
+
   it('logs a request the client aborted with no status, never a default 200', async () => {
     const correlationId = randomUUID();
     // The probe holds its transaction for 1 s; the client gives up after 200 ms.

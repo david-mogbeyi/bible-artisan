@@ -93,6 +93,12 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'study_edge_study_owner_fk',
+        table: 'study_edge',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'study_event_study_owner_fk',
         table: 'study_event',
         columns: ['owner_id', 'study_id'],
@@ -675,6 +681,176 @@ describe('schema (composite-key owner isolation)', () => {
         { bind: [studyId], type: QueryTypes.SELECT },
       );
       expect(row?.n).toBe(0);
+    });
+  });
+
+  describe('study_edge (BIB-27)', () => {
+    async function insertThought(studyId: string, ownerId: string): Promise<string> {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO study_node (id, study_id, owner_id, type, origin, body)
+         VALUES ($1, $2, $3, 'thought', 'user', 'T')`,
+        { bind: [id, studyId, ownerId], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    interface EdgeRow {
+      studyId: string;
+      ownerId: string;
+      source: string;
+      target: string;
+      type?: string;
+      note?: string | null;
+      deleted?: boolean;
+    }
+
+    async function insertEdge(row: EdgeRow): Promise<string> {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO study_edge
+           (id, study_id, owner_id, source_node_id, target_node_id, type, note, origin, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'user', CASE WHEN $8 THEN now() END)`,
+        {
+          bind: [
+            id,
+            row.studyId,
+            row.ownerId,
+            row.source,
+            row.target,
+            row.type ?? 'supports',
+            row.note ?? null,
+            row.deleted ?? false,
+          ],
+          type: QueryTypes.INSERT,
+        },
+      );
+      return id;
+    }
+
+    const violation = (code: string, constraint?: string) => ({
+      parent: expect.objectContaining(constraint ? { code, constraint } : { code }),
+    });
+
+    async function fixture() {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const [a, b] = [await insertThought(studyId, owner), await insertThought(studyId, owner)];
+      const [low, high] = [a, b].sort() as [string, string];
+      return { owner, studyId, a, b, low, high };
+    }
+
+    it('refuses a self-edge, an unsorted two-way edge, an unknown type, a 2,001-character note and an unknown origin', async () => {
+      const { owner, studyId, a, low, high } = await fixture();
+      const base = { studyId, ownerId: owner };
+      await expect(insertEdge({ ...base, source: a, target: a })).rejects.toMatchObject(
+        violation('23514', 'study_edge_no_self_check'),
+      );
+      for (const type of ['related_to', 'parallels']) {
+        await expect(
+          insertEdge({ ...base, source: high, target: low, type }),
+        ).rejects.toMatchObject(violation('23514', 'study_edge_symmetric_order_check'));
+      }
+      await expect(
+        insertEdge({ ...base, source: low, target: high, type: 'implies' }),
+      ).rejects.toMatchObject(violation('23514', 'study_edge_type_check'));
+      await expect(
+        insertEdge({ ...base, source: low, target: high, note: 'x'.repeat(2001) }),
+      ).rejects.toMatchObject(violation('23514', 'study_edge_note_check'));
+      await expect(
+        insertEdge({ ...base, source: low, target: high, note: '' }),
+      ).rejects.toMatchObject(violation('23514', 'study_edge_note_check'));
+      await expect(
+        db.query(
+          `INSERT INTO study_edge (study_id, owner_id, source_node_id, target_node_id, type, origin)
+           VALUES ($1, $2, $3, $4, 'supports', 'external')`,
+          { bind: [studyId, owner, low, high] },
+        ),
+      ).rejects.toMatchObject(violation('23514', 'study_edge_origin_check'));
+      // Sorted two-way and both directed directions are fine; a 2,000-character note too.
+      await insertEdge({ ...base, source: low, target: high, type: 'related_to' });
+      await insertEdge({ ...base, source: high, target: low, note: 'x'.repeat(2000) });
+      await insertEdge({ ...base, source: low, target: high });
+    });
+
+    it('refuses an endpoint from another study of the same owner, or from another owner, and an edge naming another owner', async () => {
+      const { owner, studyId, a } = await fixture();
+      const otherStudy = await insertStudy(owner);
+      const elsewhere = await insertThought(otherStudy, owner);
+      const stranger = await insertUser();
+      const strangerStudy = await insertStudy(stranger);
+      const foreign = await insertThought(strangerStudy, stranger);
+      for (const [source, target] of [
+        [a, elsewhere],
+        [elsewhere, a],
+        [a, foreign],
+        [foreign, a],
+      ] as const) {
+        await expect(insertEdge({ studyId, ownerId: owner, source, target })).rejects.toMatchObject(
+          violation('23503'),
+        );
+      }
+      // The stranger cannot write an edge into this study even between its own nodes' ids.
+      await expect(
+        insertEdge({ studyId, ownerId: stranger, source: a, target: foreign }),
+      ).rejects.toMatchObject(violation('23503'));
+    });
+
+    it('allows one live edge per study, source, target and type; a removed one does not block, and other types and directions are separate', async () => {
+      const { owner, studyId, a, b } = await fixture();
+      const base = { studyId, ownerId: owner };
+      const first = await insertEdge({ ...base, source: a, target: b });
+      await expect(insertEdge({ ...base, source: a, target: b })).rejects.toMatchObject(
+        violation('23505', 'study_edge_live_key'),
+      );
+      await insertEdge({ ...base, source: b, target: a });
+      await insertEdge({ ...base, source: a, target: b, type: 'qualifies' });
+      await db.query(`UPDATE study_edge SET deleted_at = now() WHERE id = $1`, { bind: [first] });
+      await expect(insertEdge({ ...base, source: a, target: b })).resolves.toEqual(
+        expect.any(String),
+      );
+      await insertEdge({ ...base, source: a, target: b, deleted: true });
+    });
+
+    it('refuses changing endpoints, study, owner or origin, and allows type, note, revision and deletion', async () => {
+      const { owner, studyId, a, b } = await fixture();
+      const c = await insertThought(studyId, owner);
+      const otherStudy = await insertStudy(owner);
+      const edge = await insertEdge({ studyId, ownerId: owner, source: a, target: b });
+      const IMMUTABLE = violation('23000');
+      for (const [column, value] of [
+        ['source_node_id', c],
+        ['target_node_id', c],
+        ['study_id', otherStudy],
+        ['owner_id', await insertUser()],
+        ['origin', 'ai'],
+      ] as const) {
+        await expect(
+          db.query(`UPDATE study_edge SET ${column} = $1 WHERE id = $2`, { bind: [value, edge] }),
+        ).rejects.toMatchObject(IMMUTABLE);
+      }
+      await db.query(
+        `UPDATE study_edge
+            SET type = 'qualifies', note = 'n', revision = revision + 1, deleted_at = now(),
+                updated_at = now()
+          WHERE id = $1`,
+        { bind: [edge] },
+      );
+    });
+
+    it('purges a study holding nodes and edges in one statement, and refuses to hard-delete a node an edge names on its own', async () => {
+      const { owner, studyId, a, b } = await fixture();
+      await insertEdge({ studyId, ownerId: owner, source: a, target: b });
+      await expect(
+        db.query(`DELETE FROM study_node WHERE id = $1`, { bind: [a] }),
+      ).rejects.toMatchObject(violation('23503', 'study_edge_source_node_fk'));
+      await db.query(`DELETE FROM study WHERE id = $1`, { bind: [studyId] });
+      const [row] = await db.query<{ edges: number; nodes: number }>(
+        `SELECT (SELECT count(*)::int FROM study_edge WHERE study_id = $1) AS edges,
+                (SELECT count(*)::int FROM study_node WHERE study_id = $1) AS nodes`,
+        { bind: [studyId], type: QueryTypes.SELECT },
+      );
+      expect(row).toStrictEqual({ edges: 0, nodes: 0 });
     });
   });
 });

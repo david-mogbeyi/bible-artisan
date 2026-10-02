@@ -65,8 +65,9 @@ export interface StudyMutationSpec {
   lifecycleTransition?: StudyLifecycleTransition;
   /**
    * The domain work. Must revision-check at least one row with `m.updateWithExpectedRevision`
-   * and append at least one event with `m.appendEvent`. Every query joins the mutation
-   * transaction automatically. Call no external provider.
+   * and append at least one event with `m.appendEvent`, or declare `m.unchanged()` before writing
+   * anything (then neither, and no counters). Every query joins the mutation transaction
+   * automatically. Call no external provider.
    */
   work: (m: StudyMutation) => Promise<MutationResponse>;
 }
@@ -102,7 +103,9 @@ export interface StudyCreationSpec {
  *    lifecycle guard: an archived or trashed study is 422 unless the spec names a lifecycle
  *    transition that starts from its state (BIB-22).
  * 3. Run `work` with a `StudyMutation`. It must make ≥1 revision check and append ≥1 event;
- *    otherwise `execute` throws (a programming error, 500) and rolls everything back.
+ *    otherwise `execute` throws (a programming error, 500) and rolls everything back. The one
+ *    exception is a work that declares `m.unchanged()` before writing anything (BIB-27): it
+ *    writes no event and no counters, and step 4 still stores its response on the receipt.
  * 4. Write the study counters (content_revision, last_event_sequence) in one UPDATE, store the
  *    response on the receipt, COMMIT.
  *
@@ -219,6 +222,16 @@ export class MutationService {
       response = await runWork(work, mutation);
     } finally {
       mutation.finish();
+    }
+    if (mutation.isUnchanged) {
+      // BIB-27 `m.unchanged()`: nothing was written through the mutation (StudyMutation refuses a
+      // write before or after the declaration), so there is no revision to check, no event and no
+      // counter to write. The caller still stores the response on the receipt and commits.
+      if (mutation.eventsAppended !== 0 || lock.countersChanged) {
+        throw new Error('MutationService: an unchanged mutation wrote counters');
+      }
+      lock.release();
+      return response;
     }
     if (!creating && !mutation.revisionChecked) {
       throw new Error(

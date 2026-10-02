@@ -2,6 +2,8 @@ import {
   type AnchorProblemCode,
   ANNOTATION_LIMIT_EXCEEDED,
   ANNOTATION_UNCHANGED,
+  EDGE_ERROR_MESSAGES,
+  type EdgeErrorCode,
   type AnnotationErrorCode,
   LIFECYCLE_TRANSITION_INVALID,
   MAX_ANNOTATIONS_PER_STUDY,
@@ -337,5 +339,19 @@ export class NodeRuleError extends Error {
   constructor(readonly code: NodeErrorCode) {
     super(NODE_ERROR_MESSAGES[code]);
     this.name = 'NodeRuleError';
+  }
+}
+
+/**
+ * A relationship change the study's or edge's state cannot apply (BIB-27; PRD section 24: 422):
+ * `answers` / `raises_question` into a node that is not a Question, the per-study edge cap, a type
+ * change across direction classes, a retype that would duplicate another live edge, or an edit
+ * that changes nothing. Raised under the study lock, so nothing is written. Fixed messages: never
+ * a node's text, a label or a note.
+ */
+export class EdgeRuleError extends Error {
+  constructor(readonly code: EdgeErrorCode) {
+    super(EDGE_ERROR_MESSAGES[code]);
+    this.name = 'EdgeRuleError';
   }
 }

@@ -22,6 +22,7 @@ import { NoteVersion } from '../src/database/models/note-version.model';
 import { Note } from '../src/database/models/note.model';
 import { ScriptureReference } from '../src/database/models/scripture-reference.model';
 import { StudyBranch } from '../src/database/models/study-branch.model';
+import { StudyEdge } from '../src/database/models/study-edge.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { StudyTag } from '../src/database/models/study-tag.model';
@@ -777,6 +778,58 @@ describe('Sequelize models against the real schema', () => {
     }
     await Study.destroy({ where: { id: study.id } });
     expect(await Annotation.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('creates a StudyEdge with only required fields and reads it back with DB defaults; the model cannot cross studies or break its CHECKs (BIB-27)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const a = await StudyNode.create({ ...scope, ...THOUGHT });
+    const b = await StudyNode.create({ ...scope, ...THOUGHT });
+    const elsewhere = await StudyNode.create({ studyId: other.id, ownerId: owner.id, ...THOUGHT });
+    const edge = await StudyEdge.create({
+      ...scope,
+      sourceNodeId: a.id,
+      targetNodeId: b.id,
+      type: 'supports',
+      origin: 'user',
+    });
+    expect(
+      (await StudyEdge.findByPk(edge.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      studyId: study.id,
+      ownerId: owner.id,
+      sourceNodeId: a.id,
+      targetNodeId: b.id,
+      type: 'supports',
+      note: null,
+      origin: 'user',
+      revision: 1,
+      deletedAt: null,
+      createdAt: expect.any(Date),
+      updatedAt: expect.any(Date),
+    });
+    const base = { ...scope, sourceNodeId: b.id, targetNodeId: a.id, origin: 'user' as const };
+    await expect(
+      StudyEdge.create({ ...base, type: 'supports', targetNodeId: elsewhere.id }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    for (const bad of [
+      { type: 'implies' },
+      { type: 'supports', targetNodeId: b.id },
+      { type: 'supports', note: '' },
+      { type: 'supports', note: 'x'.repeat(2001) },
+      { type: 'supports', origin: 'external' },
+      // Two-way types need the lower id as source; b → a is sorted only if b < a.
+      { type: 'related_to', ...(a.id < b.id ? {} : { sourceNodeId: a.id, targetNodeId: b.id }) },
+    ]) {
+      await expect(StudyEdge.create({ ...base, ...bad } as never)).rejects.toBeInstanceOf(
+        DatabaseError,
+      );
+    }
+    await Study.destroy({ where: { id: study.id } });
+    expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('creates an AuthChallenge with only required fields and reads it back with defaults', async () => {

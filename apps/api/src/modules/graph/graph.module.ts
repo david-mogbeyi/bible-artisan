@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { MutationModule } from '../../common/mutation/mutation.module';
 import { BibleContentModule } from '../bible-content/bible-content.module';
 import { StudyModule } from '../study/study.module';
+import { EdgesController } from './edges.controller';
+import { EdgesService } from './edges.service';
 import { NodesController } from './nodes.controller';
 import { NodesService } from './nodes.service';
 
@@ -11,12 +13,13 @@ import { NodesService } from './nodes.service';
  * at study creation and BIB-20's new main question, and keeps the `StudyAccessService` lookups
  * every module uses. Writes run through `MutationService` (the StudyEvent commits in the same
  * transaction); the study revision check goes through `StudyRevisionService`, never the `study`
- * table, and Scripture references through `ReferenceService`. StudyEdge, NodeVersion and branch
+ * table, and Scripture references through `ReferenceService`. Graph owns `study_edge` (BIB-27,
+ * `/studies/:id/edges`; `connectNodes` composes into other mutations). NodeVersion and branch
  * membership arrive with Graph's later tickets.
  */
 @Module({
   imports: [MutationModule, StudyModule, BibleContentModule],
-  controllers: [NodesController],
-  providers: [NodesService],
+  controllers: [NodesController, EdgesController],
+  providers: [NodesService, EdgesService],
 })
 export class GraphModule {}

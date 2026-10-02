@@ -47,10 +47,13 @@ export type CreatedStudyValues = Partial<
  *
  * `work` must call `appendEvent` at least once, and (except when creating the study, where there
  * is no earlier revision to compare against) `updateWithExpectedRevision` at least once, or the
- * pipeline throws and rolls everything back.
+ * pipeline throws and rolls everything back, unless it declares `unchanged()` (BIB-27) before
+ * writing anything.
  */
 export class StudyMutation {
   private revisionChecks = 0;
+  private childWrites = 0;
+  private declaredUnchanged = false;
   private finished = false;
 
   /** @internal Created by `MutationService.execute` and `MutationService.create`. */
@@ -96,7 +99,7 @@ export class StudyMutation {
     model: ModelStatic<M>,
     { id, expectedRevision, values, where = {} }: RevisionedUpdate<M>,
   ): Promise<M> {
-    this.assertOpen();
+    this.assertWritable();
     if (!isResourceId(id)) throw new NotFoundError();
     const scope = this.scopeFor(model, id);
     const filter = { ...where, ...scope } as WhereAttributeHash<Attributes<M>>;
@@ -131,7 +134,7 @@ export class StudyMutation {
     model: ModelStatic<M>,
     values: Omit<CreationAttributes<M>, 'studyId' | 'ownerId'>,
   ): Promise<M> {
-    this.assertOpen();
+    this.assertWritable();
     const attributes = model.getAttributes();
     if (!('studyId' in attributes) || !('ownerId' in attributes)) {
       throw new Error('StudyMutation: model is not a study-scoped child');
@@ -139,6 +142,7 @@ export class StudyMutation {
     // TypeScript cannot prove `Omit<T, K> & Pick<T, K>` is `T` for a generic T; the attribute
     // check above is what guarantees both keys exist on this model.
     const row = { ...values, studyId: this.studyId, ownerId: this.ownerId };
+    this.childWrites += 1;
     return model.create(row as unknown as CreationAttributes<M>, {
       transaction: this.transaction,
     });
@@ -150,7 +154,7 @@ export class StudyMutation {
    * Refused for an existing study, whose changes go through `updateWithExpectedRevision`.
    */
   async updateCreatedStudy(values: CreatedStudyValues): Promise<void> {
-    this.assertOpen();
+    this.assertWritable();
     if (!this.creating) {
       throw new Error('StudyMutation: updateCreatedStudy is only for the study being created');
     }
@@ -168,14 +172,41 @@ export class StudyMutation {
    * Declare `bumpsContentRevision: true` on the spec instead when every run changes content.
    */
   bumpContentRevision(): void {
-    this.assertOpen();
+    this.assertWritable();
     this.lock.bumpContentRevision();
   }
 
   /** Appends a Study Thread event for this study in this transaction; returns its sequence. */
   async appendEvent(input: AppendEventInput): Promise<AppendedEvent> {
-    this.assertOpen();
+    this.assertWritable();
     return this.thread.appendEvent(this.lock, input);
+  }
+
+  /**
+   * Declares that this mutation found nothing to change (BIB-27: connecting two nodes that already
+   * have that relationship answers 200 `existing`). The pipeline then requires no revision check
+   * and no event, writes no counters (study `revision`, `content_revision`, `last_event_sequence`
+   * and `last_activity_at` stay as they are), and still stores the response on the
+   * Idempotency-Key receipt, so a retry replays it exactly. The lifecycle guard has already run.
+   *
+   * Allowed only before any write through this context (a revision check, a child insert, an
+   * event, a content bump, or a spec declaring `bumpsContentRevision: true`), and no write through
+   * it is allowed afterwards: either throws, a programming error that rolls everything back
+   * (500). Writes that bypass this context cannot be tracked, so an unchanged work must not make
+   * any.
+   */
+  unchanged(): void {
+    this.assertOpen();
+    if (this.creating) throw new Error('StudyMutation: creating a study always changes it');
+    if (this.revisionChecks > 0 || this.childWrites > 0 || this.lock.countersChanged) {
+      throw new Error('StudyMutation: unchanged() after this mutation already wrote');
+    }
+    this.declaredUnchanged = true;
+  }
+
+  /** @internal Checked by `MutationService` once `work` resolves. */
+  get isUnchanged(): boolean {
+    return this.declaredUnchanged;
   }
 
   /** @internal Checked by `MutationService` once `work` resolves. */
@@ -196,6 +227,13 @@ export class StudyMutation {
   private assertOpen(): void {
     if (this.finished) throw new Error('StudyMutation used after its work finished');
     this.lock.assertHeld();
+  }
+
+  private assertWritable(): void {
+    this.assertOpen();
+    if (this.declaredUnchanged) {
+      throw new Error('StudyMutation: a write after unchanged() was declared');
+    }
   }
 
   private scopeFor(model: ModelStatic<Model>, id: string): Record<string, string> {

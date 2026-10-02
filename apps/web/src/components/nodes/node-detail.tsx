@@ -9,6 +9,7 @@ import {
   NODE_TYPE_NAMES,
   NODE_UNCHANGED,
   type NodeResponse,
+  type NodeSummary,
   OBSERVATION_KIND_NAMES,
   OBSERVATION_KINDS,
   type ObservationKind,
@@ -36,6 +37,7 @@ import {
   sourceInputOf,
   TextAreaField,
 } from './node-fields';
+import { Relationships } from './relationships';
 
 export const NODE_DETAIL_COPY = {
   conflict: 'This node changed somewhere else, so your edit was not saved.',
@@ -76,6 +78,7 @@ const isEditable = (node: NodeResponse): node is EditableNode =>
  * (the reader shows the verse text; this panel never does). Observations, thoughts and sources of
  * an active study can be edited; "Saved" is announced only after the server's 200. A deliberate
  * duplicate Scripture node (BIB-26) says "Duplicate of <passage>" with "Show the original".
+ * Its Relationships (BIB-27) list, connect, edit and remove this node's typed relationships.
  */
 export function NodeDetail({
   studyId,
@@ -87,6 +90,9 @@ export function NodeDetail({
   onLocked,
   labelOf,
   onShowNode,
+  nodes,
+  studyRevision,
+  onReload,
 }: {
   studyId: string;
   nodeId: string;
@@ -99,6 +105,12 @@ export function NodeDetail({
   labelOf: (nodeId: string) => string | null;
   /** Selects another node and focuses its heading. */
   onShowNode: (nodeId: string) => void;
+  /** The study's live nodes, for the Relationships labels and "Other node" (BIB-27). */
+  nodes: NodeSummary[];
+  /** The study's current revision: connecting is a study change. */
+  studyRevision: number;
+  /** Re-reads the study after a connect refused for a stale study revision. */
+  onReload: () => Promise<unknown>;
 }) {
   const headingId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
@@ -164,6 +176,16 @@ export function NodeDetail({
           refetch={() => node.refetch()}
         />
       ) : null}
+      <Relationships
+        studyId={studyId}
+        node={data}
+        nodes={nodes}
+        studyRevision={studyRevision}
+        editable={editable}
+        onLocked={onLocked}
+        onReload={onReload}
+        onShowNode={onShowNode}
+      />
     </section>
   );
 }

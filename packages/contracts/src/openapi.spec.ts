@@ -675,6 +675,73 @@ describe('buildOpenApiDocument', () => {
             'UpdateNodeRequest',
           ),
         },
+        '/studies/{studyId}/edges': {
+          post: {
+            ...noteOperation(
+              [
+                'FR-GRAPH-004/005/006',
+                'two-way',
+                'self-edge is 400',
+                'EDGE_TARGET_NOT_QUESTION',
+                'EDGE_LIMIT_EXCEEDED',
+                'outcome existing',
+                'nothing is written',
+                'never conflicts',
+                'node_connected',
+                'never carries the note',
+                ...MUTATION,
+              ],
+              [idempotencyHeader, studyId],
+              201,
+              'The new edge, without its note',
+              'CreateEdgeResponse',
+              'CreateEdgeRequest',
+            ),
+            responses: {
+              200: {
+                description: 'existing: the live edge already there, without its note',
+                content: json('CreateEdgeResponse'),
+              },
+              201: {
+                description: 'The new edge, without its note',
+                content: json('CreateEdgeResponse'),
+              },
+              default: errorResponse,
+            },
+          },
+          get: noteOperation(
+            ['source or the target', 'oldest first', 'with their notes', SAME_404],
+            [studyId, { ...uuidParam('nodeId', 'query'), required: true }],
+            200,
+            "The node's relationships",
+            'EdgeListResponse',
+          ),
+        },
+        '/studies/{studyId}/edges/{edgeId}': {
+          patch: noteOperation(
+            [
+              'never change',
+              'EDGE_TYPE_CHANGE_NOT_ALLOWED',
+              'EDGE_EXISTS',
+              'EDGE_UNCHANGED',
+              'edge_updated',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId, uuidParam('edgeId')],
+            200,
+            'The edge as saved, without its note',
+            'EdgeMutationResponse',
+            'UpdateEdgeRequest',
+          ),
+          delete: noteOperation(
+            ['soft delete', 'both nodes', 'edge_removed', ...MUTATION],
+            [idempotencyHeader, studyId, uuidParam('edgeId')],
+            200,
+            'The removed edge',
+            'EdgeMutationResponse',
+            'EdgeStateRequest',
+          ),
+        },
         '/bible/translations': {
           get: {
             description:
@@ -829,6 +896,12 @@ describe('buildOpenApiDocument', () => {
       'NodeMutationResponse',
       'NodeListResponse',
       'NodeResponse',
+      'CreateEdgeRequest',
+      'CreateEdgeResponse',
+      'UpdateEdgeRequest',
+      'EdgeStateRequest',
+      'EdgeMutationResponse',
+      'EdgeListResponse',
       'NoteBlock',
       'NoteListItem',
     ]);

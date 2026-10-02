@@ -65,6 +65,16 @@ import {
   nodeResponseSchema,
   updateNodeRequestSchema,
 } from './node';
+import {
+  createEdgeRequestSchema,
+  createEdgeResponseSchema,
+  edgeListResponseSchema,
+  edgeMutationResponseSchema,
+  edgeStateRequestSchema,
+  MAX_EDGE_NOTE_LENGTH,
+  MAX_EDGES_PER_STUDY,
+  updateEdgeRequestSchema,
+} from './edge';
 import { createStudyRequestSchema, createStudyResponseSchema, studyResponseSchema } from './study';
 import {
   DEFAULT_LIBRARY_LIMIT,
@@ -196,6 +206,12 @@ const NOTE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with 
 
 const NODE_OWNERSHIP =
   "Another user's, an absent and a malformed study or node id, a node of another study, and a study trashed 30 or more days ago are the same 404.";
+
+const EDGE_OWNERSHIP =
+  "Another user's, an absent and a malformed study, edge or node id, an edge or node of another study, a removed edge, and a study trashed 30 or more days ago are the same 404.";
+
+/** What every edge mutation (BIB-27) shares. */
+const EDGE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent (ids and enums only) commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. The response never carries the note. ${EDGE_OWNERSHIP}`;
 
 /** What every node mutation (BIB-25) shares. */
 const NODE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NODE_OWNERSHIP}`;
@@ -677,6 +693,56 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/studies/{studyId}/edges': {
+        post: {
+          description: `Connects two live nodes of the study with a typed relationship (FR-GRAPH-004/005/006): sourceNodeId, targetNodeId, type (one of 15; parallels and related_to are two-way and stored with the lower node id as source) and an optional plain-text note (at most ${MAX_EDGE_NOTE_LENGTH.toLocaleString('en-US')} characters; blank is none). A self-edge is 400; an endpoint that is not a live node of this study is 404; answers and raises_question need a Question target (422 EDGE_TARGET_NOT_QUESTION); at most ${MAX_EDGES_PER_STUDY.toLocaleString('en-US')} live edges per study (422 EDGE_LIMIT_EXCEEDED). expectedRevision is the study's. When a live edge already joins the nodes with this type (in either order for a two-way type), the answer is 200 outcome existing with that edge: nothing is written (no event, no revision change, the note is not applied), and it is found before the revision check, so it never conflicts. Otherwise 201 outcome created, studyRevision moved, contentRevision moves, one node_connected event. For inference_from, the source is a conclusion inferred from the target. The client never sends origin (always user). ${EDGE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam],
+          requestBody: jsonBody('CreateEdgeRequest'),
+          responses: {
+            200: jsonResponse(
+              'existing: the live edge already there, without its note',
+              'CreateEdgeResponse',
+            ),
+            201: jsonResponse('The new edge, without its note', 'CreateEdgeResponse'),
+            default: errorResponse,
+          },
+        },
+        get: {
+          description: `Lists the live edges where the live node nodeId is the source or the target, oldest first, unpaginated (bounded by the edge cap), with their notes. nodeId is required (400 when missing). Archived and trashed studies stay readable. ${EDGE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [
+            studyIdParam,
+            queryParam('nodeId', true, { type: 'string', format: 'uuid' }),
+          ],
+          responses: {
+            200: jsonResponse("The node's relationships", 'EdgeListResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/edges/{edgeId}': {
+        patch: {
+          description: `Changes an edge's type and/or note (null clears it). Endpoints and direction never change. expectedRevision is the edge's. Checked in order: 422 lifecycle, 404, 409, then 422 EDGE_TYPE_CHANGE_NOT_ALLOWED (directed and two-way types do not mix), EDGE_TARGET_NOT_QUESTION, EDGE_EXISTS (another live edge between the same nodes has that type) and EDGE_UNCHANGED. contentRevision moves. edge_updated with the previous type. ${EDGE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('edgeId')],
+          requestBody: jsonBody('UpdateEdgeRequest'),
+          responses: {
+            200: jsonResponse('The edge as saved, without its note', 'EdgeMutationResponse'),
+            default: errorResponse,
+          },
+        },
+        delete: {
+          description: `Removes an edge (soft delete); both nodes and every other edge stay. expectedRevision is the edge's. contentRevision moves. edge_removed. ${EDGE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('edgeId')],
+          requestBody: jsonBody('EdgeStateRequest'),
+          responses: {
+            200: jsonResponse('The removed edge', 'EdgeMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/bible/translations': {
         get: {
           description:
@@ -755,6 +821,12 @@ function buildDocument(): OpenApiDocument {
         NodeMutationResponse: toSchema(nodeMutationResponseSchema),
         NodeListResponse: toSchema(nodeListResponseSchema),
         NodeResponse: toSchema(nodeResponseSchema),
+        CreateEdgeRequest: toInputSchema(createEdgeRequestSchema),
+        CreateEdgeResponse: toSchema(createEdgeResponseSchema),
+        UpdateEdgeRequest: toInputSchema(updateEdgeRequestSchema),
+        EdgeStateRequest: toInputSchema(edgeStateRequestSchema),
+        EdgeMutationResponse: toSchema(edgeMutationResponseSchema),
+        EdgeListResponse: toSchema(edgeListResponseSchema),
         // Filled while the entries above were converted.
         ...hoisted,
       },

@@ -86,6 +86,42 @@ What the pipeline guarantees, so a route must not re-implement any of it:
    Never check lifecycle in a route. Only the lifecycle routes set `lifecycleTransition` on the
    spec, which allows exactly that transition's starting states.
 
+### A mutation that finds nothing to change (BIB-27): `m.unchanged()`
+
+Some requests are idempotent by meaning, not only by key: connecting two nodes that already have
+that relationship answers `200 outcome: 'existing'` (PRD section 24) and must write nothing. Such a
+`work` calls `m.unchanged()` instead of making a revision check and appending an event:
+
+```ts
+return this.mutations.execute(ownerId, mutation, {
+  studyId,
+  bumpsContentRevision: false,                   // required: a declared bump is already a write
+  work: async (m) => {
+    const result = await connectNodes(m, body, {
+      beforeCreate: () => this.studyRevisions.checkStudyRevision(m, expectedRevision),
+    });
+    if (result.outcome === 'existing') {
+      m.unchanged();                               // before any write through `m`
+      return { status: 200, body: { …, studyRevision: await this.studyRevisions.currentRevision(m) } };
+    }
+    …                                              // created: revision checked, event appended
+  },
+});
+```
+
+- **Still applies**: the receipt claim, the study lock, the lifecycle guard (an archived study is
+  422 `STUDY_ARCHIVED` even for a duplicate), and storing the response on the receipt before
+  COMMIT, so a retry with the same key replays it exactly (and a retried `created` replays its 201,
+  never turning into `existing`).
+- **Skipped**: the revision check (decided: nothing is written, so a stale client cannot lose an
+  update; the dedup lookup comes first so a duplicate never conflicts), the event, and the counter
+  write: study `revision`, `content_revision`, `last_event_sequence` and `last_activity_at` stay as
+  they were.
+- **Guarded**: `unchanged()` after any write through `m` (revision check, `createChild`, event,
+  `bumpContentRevision`, or a spec with `bumpsContentRevision: true`) throws, and so does any write
+  through `m` after it: a programming error, 500, everything rolled back. Not allowed in `create`.
+  Writes that bypass `m` cannot be tracked, so an unchanged work must not make any.
+
 ### Creating a study (BIB-19): `MutationService.create`
 
 A new study has no row to lock and no revision a client could have seen, so creation has its own
