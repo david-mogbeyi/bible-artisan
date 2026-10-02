@@ -276,7 +276,15 @@ export function SourceFields({
       <TextAreaField
         label="Excerpt"
         value={value.excerpt}
-        onChange={(next) => set('excerpt', next)}
+        // Emptying the excerpt clears its kind too: a kind without an excerpt is refused (400),
+        // and the user would otherwise have no way to see why.
+        onChange={(next) =>
+          onChange({
+            ...value,
+            excerpt: next,
+            excerptKind: next.trim() === '' ? '' : value.excerptKind,
+          })
+        }
         max={MAX_SOURCE_EXCERPT_LENGTH}
         error={errors['source.excerpt']}
         rows={3}
@@ -285,8 +293,18 @@ export function SourceFields({
         className="flex flex-col gap-1"
         aria-describedby={errors['source.excerptKind'] ? `${id}-excerpt-kind-error` : undefined}
       >
-        <legend className="font-medium">The excerpt is a</legend>
+        <legend className="font-medium">Excerpt kind</legend>
         <div className="flex flex-wrap gap-4">
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name={`${id}-excerpt-kind`}
+              value=""
+              checked={value.excerptKind === ''}
+              onChange={() => set('excerptKind', '')}
+            />
+            No excerpt
+          </label>
           {EXCERPT_KINDS.map((kind) => (
             <label key={kind} className="flex items-center gap-2">
               <input

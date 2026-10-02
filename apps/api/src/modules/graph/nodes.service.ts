@@ -3,23 +3,19 @@ import { Injectable } from '@nestjs/common';
 import {
   createNodeRequestSchema,
   type CreateNodeResponse,
-  MAX_NODES_PER_STUDY,
-  NODE_LIMIT_EXCEEDED,
   NODE_NOT_EDITABLE,
   NODE_UNCHANGED,
   type NodeListResponse,
   type NodeMutationResponse,
-  nodePreview,
+  nodeLabel,
   type NodeResponse,
   type ScriptureReference,
-  SCRIPTURE_LABEL_UNAVAILABLE,
   SCRIPTURE_NODE_EXISTS,
   type Source,
   type SourceCitation,
   updateNodeRequestSchema,
 } from '@bible-artisan/contracts';
 import type { z } from 'zod';
-import type { CreationAttributes } from 'sequelize';
 import {
   NodeRuleError,
   NotFoundError,
@@ -35,22 +31,25 @@ import { parseBody } from '../../common/validation/parse-body';
 import { StudyNode } from '../../database/models/study-node.model';
 import { ReferenceService } from '../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study/study-access.service';
+import { QUESTION_CREATED } from '../study/study-events';
+import { type NewNodeValues, StudyGraphService } from '../study/study-graph.service';
 import { StudyRevisionService } from '../study/study-revision.service';
 
 type CreateNodeBody = z.output<typeof createNodeRequestSchema>;
 type UpdateNodeBody = z.output<typeof updateNodeRequestSchema>;
-type NodeValues = Omit<CreationAttributes<StudyNode>, 'studyId' | 'ownerId'>;
+type NodeValues = NewNodeValues;
 
 /**
  * Node events (BIB-25), one per mutation, ids and enums only: never text, titles, citations,
  * excerpts, URLs or labels (PRD section 23, NFR-PRIV-001). Intended visibility, for BIB-55's
- * column: all thread-visible. `question_created` has BIB-20's shape (`branchId` is null: new
- * questions do not create branches here). `source_created`, `thought_updated` and
+ * column: all thread-visible. `question_created` is the Study module's event with BIB-20's shape
+ * (`branchId`: the initial branch a blank study's first question roots, else null; see
+ * `StudyGraphService.ensureInitialBranch`). `source_created`, `thought_updated` and
  * `source_updated` are not in PRD section 13's list and are named by analogy.
  */
 export const NODE_EVENTS = {
   scripture: 'scripture_added_to_graph',
-  question: 'question_created',
+  question: QUESTION_CREATED,
   observation: 'observation_created',
   thought: 'thought_created',
   conclusion: 'conclusion_created',
@@ -93,7 +92,7 @@ function sourceColumns({ title, ...payload }: SourceCitation) {
   return { title, payloadJson: payload };
 }
 
-function createdEvent(node: StudyNode) {
+function createdEvent(node: StudyNode, branchId: string | null) {
   switch (node.type) {
     case 'scripture':
       return {
@@ -103,7 +102,7 @@ function createdEvent(node: StudyNode) {
     case 'question':
       return {
         eventType: NODE_EVENTS.question,
-        payload: { questionNodeId: node.id, branchId: null },
+        payload: { questionNodeId: node.id, branchId },
       };
     case 'observation':
       return {
@@ -176,13 +175,17 @@ export class NodesService {
     private readonly mutations: MutationService,
     private readonly access: StudyAccessService,
     private readonly studyRevisions: StudyRevisionService,
+    private readonly graph: StudyGraphService,
     private readonly references: ReferenceService,
   ) {}
 
   /**
    * `POST /studies/:studyId/nodes`. A new node is a study change: `expectedRevision` is the
    * study's, checked first (so of two creates from one revision, one is 409 before any rule) and
-   * bumped. The node cap and the duplicate-Scripture guard are checked under the study lock.
+   * bumped. The node cap (`StudyGraphService.addNode`, shared with every node-creating path) and
+   * the duplicate-Scripture guard are checked under the study lock. A question on a study without
+   * a branch (a blank one) roots its initial branch (`StudyGraphService.ensureInitialBranch`),
+   * reported as the event's `branchId`.
    * A Scripture reference is validated before the transaction, as study creation does: reference
    * rows are immutable and an active edition stays active, so the check cannot go stale, and a
    * refusal writes nothing, not even a receipt.
@@ -200,10 +203,10 @@ export class NodesService {
       bumpsContentRevision: true,
       work: async (m) => {
         const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
-        await requireRoomForNode(m);
         if (body.type === 'scripture') await requireNewScripture(m, body.referenceId);
-        const node = await m.createChild(StudyNode, newNodeValues(body));
-        const event = await m.appendEvent(createdEvent(node));
+        const node = await this.graph.addNode(m, newNodeValues(body));
+        const branchId = node.type === 'question' ? await this.graph.ensureInitialBranch(m) : null;
+        const event = await m.appendEvent(createdEvent(node, branchId));
         const response: CreateNodeResponse = {
           ...mutationBody(node, event.sequence),
           studyRevision,
@@ -215,10 +218,14 @@ export class NodesService {
 
   /**
    * `PATCH /studies/:studyId/nodes/:nodeId`: new content for an Observation, Thought or Source.
-   * `expectedRevision` is the node's. Checked in order, all under the study lock: an absent node
-   * is 404, a stale revision 409, a type or field not editable here 422 `NODE_NOT_EDITABLE`, and
-   * an edit that changes nothing 422 `NODE_UNCHANGED`. So a client with an old copy always
-   * reloads before it sees a rule error.
+   * `expectedRevision` is the node's. Checked in order, all under the study lock: the pipeline's
+   * lifecycle guard first (an archived study is 422 `STUDY_ARCHIVED`, a trashed one 422
+   * `STUDY_TRASHED`, whatever the node), then an absent node is 404, a stale revision 409, a type
+   * or field not editable here 422 `NODE_NOT_EDITABLE`, and an edit that changes nothing 422
+   * `NODE_UNCHANGED`. So a client with an old copy always reloads before it sees a node rule
+   * error. The lifecycle refusal coming first is the central guard's property (every study
+   * mutation refuses a read-only study before its work runs); it reveals nothing, because the
+   * study is already resolved as the caller's own (another owner's study is 404 at the lock).
    */
   async update(
     ownerId: string,
@@ -250,9 +257,11 @@ export class NodesService {
   }
 
   /**
-   * `GET /studies/:studyId/nodes`: the study's live nodes, oldest first (ties by id), each with
-   * its label (`nodePreview` of its statement, text or source title; a Scripture node's reference
-   * label, in one batched lookup). Unpaginated: the live-node cap bounds it. Archived and trashed
+   * `GET /studies/:studyId/nodes`: every live node of the study, oldest first (ties by id), each
+   * with its label (`nodeLabel`, shared with a note's target; Scripture labels in one batched
+   * lookup). Unpaginated and never truncated: every creating path enforces the live-node cap, so
+   * the list is bounded by it, and a study over the cap (rows written before the cap existed)
+   * still lists all of its nodes rather than silently dropping the newest. Archived and trashed
    * studies stay readable.
    */
   async list(ownerId: string, studyId: string): Promise<NodeListResponse> {
@@ -263,7 +272,6 @@ export class NodesService {
         ['createdAt', 'ASC'],
         ['id', 'ASC'],
       ],
-      limit: MAX_NODES_PER_STUDY,
     });
     const references = await this.references.storedReferences(
       nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
@@ -273,9 +281,7 @@ export class NodesService {
         id: node.id,
         type: node.type,
         origin: node.origin,
-        label: node.scriptureReferenceId
-          ? (references.get(node.scriptureReferenceId)?.label ?? SCRIPTURE_LABEL_UNAVAILABLE)
-          : nodePreview(node.title ?? node.body ?? ''),
+        label: nodeLabel(node, references),
         status: node.questionStatus ?? node.conclusionStatus,
         observationKind: node.observationKind,
         referenceId: node.scriptureReferenceId,
@@ -409,14 +415,6 @@ async function lockedNode(m: StudyMutation, nodeId: string, expectedRevision: nu
   if (!node) throw new NotFoundError();
   if (node.revision !== expectedRevision) throw new RevisionConflictError(node.revision);
   return node;
-}
-
-/** Live nodes only count (NFR-SCALE-002); counted under the study lock, so creates cannot race. */
-async function requireRoomForNode(m: StudyMutation): Promise<void> {
-  const live = await StudyNode.count({
-    where: { studyId: m.studyId, ownerId: m.ownerId, deletedAt: null },
-  });
-  if (live >= MAX_NODES_PER_STUDY) throw new NodeRuleError(NODE_LIMIT_EXCEEDED);
 }
 
 /**

@@ -1,7 +1,7 @@
 import type { StudyResponse } from '@bible-artisan/contracts';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { studyQueryKey } from '@/lib/studies';
+import { libraryQueryKey, studyQueryKey } from '@/lib/studies';
 import { EDITION_ID, TRANSLATION } from '@/test/bible-fixtures';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { ADD_NODE_COPY } from './add-node-form';
@@ -598,6 +598,92 @@ describe('NodesSection', () => {
     );
     expect(screen.getByText('Saved')).toBeTruthy();
     expect(await within(region).findByText('Second look')).toBeTruthy();
+  });
+
+  it('edits a source to drop its excerpt: emptying the excerpt clears its kind, the edit saves and the library is marked stale', async () => {
+    const citation = {
+      title: 'Commentary',
+      kind: 'commentary',
+      author: null,
+      workTitle: null,
+      publicationDetails: null,
+      url: null,
+      locator: 'ch. 9',
+      excerpt: 'Witness of God',
+      excerptKind: 'paraphrase',
+    };
+    const source = { type: 'source', ...common({ origin: 'external' }), source: citation };
+    const listed = jsonResponse(200, {
+      items: [summary({ type: 'source', origin: 'external', label: 'Commentary' })],
+    });
+    reply(`GET ${NODES}`, listed, listed.clone());
+    reply(
+      `GET ${NODE}`,
+      jsonResponse(200, source),
+      jsonResponse(200, {
+        ...source,
+        revision: 2,
+        source: { ...citation, excerpt: null, excerptKind: null },
+      }),
+    );
+    reply(`PATCH ${NODE}`, jsonResponse(200, mutation({ type: 'source', revision: 2 })));
+    const view = renderSection();
+    const library = libraryQueryKey({ sort: 'recent' });
+    view.queryClient.setQueryData(library, { items: [], nextCursor: null });
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Source · External Source Commentary' }),
+    );
+    const region = await screen.findByRole('region', { name: 'Source' });
+    fireEvent.click(within(region).getByRole('button', { name: 'Edit' }));
+    const form = within(region).getByRole('form', { name: 'Edit source' });
+    const radio = (name: string) => within(form).getByRole<HTMLInputElement>('radio', { name });
+    expect([radio('No excerpt').checked, radio('Paraphrase').checked]).toStrictEqual([false, true]);
+    fireEvent.change(within(form).getByLabelText('Excerpt'), { target: { value: '' } });
+    expect([radio('No excerpt').checked, radio('Paraphrase').checked]).toStrictEqual([true, false]);
+    fireEvent.click(within(form).getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Saved')).toBeTruthy();
+    expect(requests.filter((r) => r.method === 'PATCH').map((r) => r.body)).toStrictEqual([
+      {
+        expectedRevision: 1,
+        source: {
+          title: 'Commentary',
+          kind: 'commentary',
+          author: '',
+          workTitle: '',
+          publicationDetails: '',
+          url: '',
+          locator: 'ch. 9',
+          excerpt: '',
+        },
+      },
+    ]);
+    expect(view.queryClient.getQueryState(library)?.isInvalidated).toBe(true);
+  });
+
+  it('offers No excerpt as an explicit choice that unsets a kind picked by mistake', async () => {
+    reply(`GET ${NODES}`, jsonResponse(200, { items: [] }), jsonResponse(200, { items: [] }));
+    reply(`POST ${NODES}`, new TypeError('stop here'));
+    renderSection();
+    const group = await openAdd();
+    fireEvent.click(within(group).getByRole('radio', { name: 'Source' }));
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'Commentary' } });
+    fireEvent.change(screen.getByLabelText('Locator'), { target: { value: 'p. 1' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Quotation' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'No excerpt' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await screen.findByText(ADD_NODE_COPY.unknown);
+    expect(posts().map((r) => (r.body as { source: object }).source)).toStrictEqual([
+      {
+        title: 'Commentary',
+        kind: 'book',
+        author: '',
+        workTitle: '',
+        publicationDetails: '',
+        url: '',
+        locator: 'p. 1',
+        excerpt: '',
+      },
+    ]);
   });
 
   it('keeps the draft on a 409 and replaces it only after Reload is confirmed; says when nothing changed', async () => {

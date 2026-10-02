@@ -4,6 +4,7 @@ import {
   NODE_EDIT_EMPTY,
   NODE_ORIGIN_NAMES,
   NODE_ORIGINS,
+  nodeLabel,
   nodePreview,
   SOURCE_EXCERPT_KIND_REQUIRED,
   SOURCE_EXCERPT_REQUIRED,
@@ -211,5 +212,29 @@ describe('nodePreview', () => {
       'External Source',
       'Scripture Text',
     ]);
+  });
+});
+
+describe('nodeLabel', () => {
+  const references = new Map([['ref-1', { label: 'Romans 9:1' }]]);
+  const node = (fields: Partial<Parameters<typeof nodeLabel>[0]>) => ({
+    title: null,
+    body: null,
+    scriptureReferenceId: null,
+    ...fields,
+  });
+
+  it('labels a Scripture node with its reference, or as unavailable once its edition is inactive', () => {
+    expect([
+      nodeLabel(node({ scriptureReferenceId: 'ref-1' }), references),
+      nodeLabel(node({ scriptureReferenceId: 'ref-2' }), references),
+    ]).toStrictEqual(['Romans 9:1', 'Passage (translation unavailable)']);
+  });
+
+  it('labels any other node with the preview of its statement, text or source title', () => {
+    expect([
+      nodeLabel(node({ title: '  What is   conscience? ' }), references),
+      nodeLabel(node({ body: 'A\nthought' }), references),
+    ]).toStrictEqual(['What is conscience?', 'A thought']);
   });
 });

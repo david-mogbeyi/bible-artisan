@@ -148,6 +148,29 @@ export function nodePreview(text: string): string {
 /** A Scripture node's label when its edition is no longer active (no label can be derived). */
 export const SCRIPTURE_LABEL_UNAVAILABLE = 'Passage (translation unavailable)';
 
+/** The stored fields a node's label comes from. */
+export interface NodeLabelSource {
+  title: string | null;
+  body: string | null;
+  scriptureReferenceId: string | null;
+}
+
+/**
+ * A node's label, the one rule for every place that names a node (the node list, a note's
+ * target): a Scripture node's reference label from `references` (keyed by reference id, holding
+ * only references of active editions), or `SCRIPTURE_LABEL_UNAVAILABLE` when its edition is no
+ * longer active; otherwise the `nodePreview` of its statement, text or source title.
+ */
+export function nodeLabel(
+  node: NodeLabelSource,
+  references: ReadonlyMap<string, { label: string }>,
+): string {
+  if (node.scriptureReferenceId !== null) {
+    return references.get(node.scriptureReferenceId)?.label ?? SCRIPTURE_LABEL_UNAVAILABLE;
+  }
+  return nodePreview(node.title ?? node.body ?? '');
+}
+
 export const SOURCE_LOCATION_REQUIRED = 'Add a URL or a locator';
 export const SOURCE_EXCERPT_KIND_REQUIRED =
   'Say whether the excerpt is a quotation or a paraphrase';

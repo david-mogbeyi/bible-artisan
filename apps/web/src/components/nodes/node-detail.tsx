@@ -26,6 +26,7 @@ import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert
 import { ApiError } from '@/lib/api-client';
 import { bibleHref, fetchTranslations, TRANSLATIONS_QUERY_KEY } from '@/lib/bible';
 import { fetchNode, formatNodeTime, nodeQueryKey, nodesQueryKey, updateNode } from '@/lib/nodes';
+import { invalidateLibrary } from '@/lib/studies';
 import {
   type FieldErrors,
   fieldErrorsOf,
@@ -325,6 +326,8 @@ function EditNode({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nodeQueryKey(studyId, node.id) }),
         queryClient.invalidateQueries({ queryKey: nodesQueryKey(studyId) }),
+        // An edit is study activity: the library's "recent" order moves, as after a create.
+        invalidateLibrary(queryClient),
       ]);
       close();
       onSaved();

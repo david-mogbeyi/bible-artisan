@@ -31,6 +31,7 @@ import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
 import { AnchorService } from '../src/modules/bible-content/anchor/anchor.service';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
+import { ReferenceService } from '../src/modules/bible-content/reference/reference.service';
 import { SessionService } from '../src/modules/identity/session.service';
 import { createTestApp } from './app';
 import { envelope, NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
@@ -464,6 +465,44 @@ describe('notes (BIB-23)', () => {
         nodeType: 'scripture',
         label: 'Romans 9:1',
         deleted: false,
+      });
+    });
+
+    it('labels a note on a Scripture node whose edition is no longer active as the node list does', async () => {
+      const edition = await BibleEdition.findOne({
+        where: {
+          code: ENGWEBP_RELEASE.code,
+          sourceRelease: ENGWEBP_RELEASE.sourceRelease,
+          activatedAt: { [Op.ne]: null },
+        },
+        rejectOnEmpty: true,
+      });
+      const resolved = await send(alice, 'post', '/v1/bible/resolve', {
+        input: 'Rom 9:2',
+        editionId: edition.id,
+      });
+      const outcome = resolved.body as ResolveReferenceResponse;
+      if (outcome.outcome !== 'resolved') throw new Error('expected a resolved reference');
+      const study = await createStudy(alice, { startingReferenceId: outcome.reference.id });
+      const note = await createNote(alice, study.studyId, doc('Paul grieves'), {
+        targetNodeId: study.rootNodeId,
+      });
+      // Activated editions can never be deactivated (BIB-14 triggers): stand one in.
+      vi.spyOn(app.get(ReferenceService), 'storedReferences').mockResolvedValue(new Map());
+      const read = await send(alice, 'get', notePath(study.studyId, note.id));
+      const list = await send(alice, 'get', `/v1/studies/${study.studyId}/nodes`);
+      expect({
+        target: (read.body as { target: unknown }).target,
+        listed: (list.body as { items: { label: string }[] }).items.map((n) => n.label),
+      }).toStrictEqual({
+        target: {
+          kind: 'node',
+          nodeId: study.rootNodeId,
+          nodeType: 'scripture',
+          label: 'Passage (translation unavailable)',
+          deleted: false,
+        },
+        listed: ['Passage (translation unavailable)'],
       });
     });
 

@@ -325,6 +325,7 @@ describe('study editing (BIB-20)', () => {
             fromNodeId: questionNodeId,
             toNodeId: newNodeId,
             originalQuestionNodeId: questionNodeId,
+            branchId: null,
           },
         },
         {
@@ -334,6 +335,7 @@ describe('study editing (BIB-20)', () => {
             fromNodeId: newNodeId,
             toNodeId: questionNodeId,
             originalQuestionNodeId: questionNodeId,
+            branchId: null,
           },
         },
       ]);
@@ -370,9 +372,54 @@ describe('study editing (BIB-20)', () => {
             fromNodeId: null,
             toNodeId: body.mainQuestion?.nodeId,
             originalQuestionNodeId: body.mainQuestion?.nodeId,
+            // Reported once, on question_created.
+            branchId: null,
           },
         },
       ]);
+    });
+
+    it('gives a study without a branch its initial branch, rooted at its first question, when an existing question is made main', async () => {
+      const { studyId } = await createStudy(alice, { blank: true });
+      // Questions from before every question path rooted a branch: stand two in directly.
+      const question = (title: string, createdAt: Date) =>
+        StudyNode.create({
+          studyId,
+          ownerId: alice.user.id,
+          type: 'question',
+          origin: 'user',
+          title,
+          questionStatus: 'open',
+          createdAt,
+        });
+      const first = await question('First?', new Date(Date.now() - 60_000));
+      const later = await question('Later?', new Date());
+      const res = await patch(alice, studyId, {
+        expectedRevision: 1,
+        mainQuestion: { nodeId: later.id },
+      });
+      expect(res.status).toBe(200);
+      const branch = await StudyBranch.findOne({ where: { studyId }, rejectOnEmpty: true });
+      expect({
+        branchId: (res.body as UpdateStudyResponse).branchId,
+        root: branch.rootNodeId,
+        events: (await events(studyId)).slice(1),
+      }).toStrictEqual({
+        branchId: branch.id,
+        root: first.id,
+        events: [
+          {
+            sequence: '2',
+            eventType: 'main_question_changed',
+            payload: {
+              fromNodeId: null,
+              toNodeId: later.id,
+              originalQuestionNodeId: later.id,
+              branchId: branch.id,
+            },
+          },
+        ],
+      });
     });
 
     it('moves the revision but not the content revision for pin and tag changes, and clears a description', async () => {

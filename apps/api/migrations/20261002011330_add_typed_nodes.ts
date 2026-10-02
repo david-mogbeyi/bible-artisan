@@ -137,6 +137,13 @@ export async function down({ context }: { context: MigrationContext }): Promise<
   // With the opt-in, the four types this migration made storable lose their content, so their
   // rows go too (a re-applied `up` could not validate them). A note attached to one stays, as a
   // note on the study. Question and Scripture rows keep their BIB-19 columns.
+  //
+  // Part of the opt-in data loss, deliberately left as is: `study_event` rows
+  // (`observation_created`, `thought_updated`, `source_created`, ...) and `mutation_receipt` rows
+  // (their stored responses) keep naming the deleted node ids. The thread is append-only history
+  // and events carry ids only, so nothing here rewrites or deletes them; after this `down` those
+  // ids resolve to no node, and a replayed Idempotency-Key returns a response for a node that no
+  // longer exists. That is acceptable only because ALLOW_STUDY_DATA_DROP=1 is a dev/test opt-in.
   await context.query(`
     UPDATE note SET target_node_id = NULL
      WHERE target_node_id IN (

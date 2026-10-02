@@ -16,8 +16,7 @@ export function noteTargetText(note: Pick<NoteSummary, 'target'>): string {
     const where = target.anchorKind === 'phrase' ? `On a phrase in ${label}` : `On ${label}`;
     return target.problem ? `${where} (no longer matches the text)` : where;
   }
-  const label = target.label ?? 'a study item';
-  return target.nodeType === 'question' ? `On the question: ${label}` : `On ${label}`;
+  return target.nodeType === 'question' ? `On the question: ${target.label}` : `On ${target.label}`;
 }
 
 /**

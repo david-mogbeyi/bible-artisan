@@ -16,6 +16,7 @@ import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
+import { StudyBranch } from '../src/database/models/study-branch.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { Study } from '../src/database/models/study.model';
@@ -180,9 +181,25 @@ describe('typed graph nodes (BIB-25)', () => {
         order: [['id', 'ASC']],
         raw: true,
       }),
+      branches: await StudyBranch.count({ where }),
       events: await StudyEvent.count({ where }),
       receipts: await MutationReceipt.count({ where }),
     };
+  }
+
+  /** Inserts `count` Thought rows straight into the table (fixtures for the node cap). */
+  function insertThoughts(studyId: string, owner: Owner, count: number, deleted = false) {
+    return db.query(
+      `INSERT INTO study_node (study_id, owner_id, type, origin, body, deleted_at)
+       SELECT $1, $2, 'thought', 'user', 'Filler', ${deleted ? 'now()' : 'NULL'}
+         FROM generate_series(1, $3)`,
+      { bind: [studyId, owner.user.id, count] },
+    );
+  }
+
+  async function branches(studyId: string) {
+    const rows = await StudyBranch.findAll({ where: { studyId }, order: [['createdAt', 'ASC']] });
+    return rows.map((b) => ({ id: b.id, rootNodeId: b.rootNodeId }));
   }
 
   /** Waits until `n` other backends of this database are blocked on a lock (the gate pattern). */
@@ -442,13 +459,17 @@ describe('typed graph nodes (BIB-25)', () => {
         source: { title: 'Private title', kind: 'book', locator: 'p. 9' },
       });
       const after = await Study.findByPk(study.studyId, { rejectOnEmpty: true });
+      const [branch] = await branches(study.studyId);
       expect({
         revision: after.revision - before.revision,
         contentRevision: after.contentRevision - before.contentRevision,
+        // The blank study's first question roots its initial branch.
+        branch,
         events: await events(study.studyId),
       }).toStrictEqual({
         revision: 6,
         contentRevision: 6,
+        branch: { id: anyId, rootNodeId: question.id },
         events: [
           { sequence: '1', eventType: 'study_created', payload: expect.any(Object) },
           {
@@ -459,7 +480,7 @@ describe('typed graph nodes (BIB-25)', () => {
           {
             sequence: '3',
             eventType: 'question_created',
-            payload: { questionNodeId: question.id, branchId: null },
+            payload: { questionNodeId: question.id, branchId: branch?.id },
           },
           {
             sequence: '4',
@@ -937,15 +958,8 @@ describe('typed graph nodes (BIB-25)', () => {
 
     it('caps a study at 2,000 live nodes with 422 NODE_LIMIT_EXCEEDED, writing nothing; deleted nodes do not count', async () => {
       const study = await createStudy(alice);
-      const insert = (count: number, deleted: boolean) =>
-        db.query(
-          `INSERT INTO study_node (study_id, owner_id, type, origin, body, deleted_at)
-           SELECT $1, $2, 'thought', 'user', 'Filler', ${deleted ? 'now()' : 'NULL'}
-             FROM generate_series(1, $3)`,
-          { bind: [study.studyId, alice.user.id, count] },
-        );
-      await insert(1999, false);
-      await insert(5, true);
+      await insertThoughts(study.studyId, alice, 1999);
+      await insertThoughts(study.studyId, alice, 5, true);
       await createNode(alice, study.studyId, { type: 'thought', text: 'Number 2,000' });
       const before = await ownerRows(alice);
       const refused = await send(
@@ -961,6 +975,109 @@ describe('typed graph nodes (BIB-25)', () => {
       }).toStrictEqual({ answer: [422, NODE_LIMIT_EXCEEDED], unchanged: true });
       const list = await send(alice, 'get', nodesPath(study.studyId));
       expect((list.body as { items: unknown[] }).items).toHaveLength(2000);
+    });
+
+    it("applies the same cap to a study edit's new main question: 422 NODE_LIMIT_EXCEEDED, writing nothing", async () => {
+      const study = await createStudy(alice);
+      await insertThoughts(study.studyId, alice, 2000);
+      const before = await ownerRows(alice);
+      const refused = await send(
+        alice,
+        'patch',
+        `${STUDIES}/${study.studyId}`,
+        { expectedRevision: 1, mainQuestion: { text: 'One too many' } },
+        randomUUID(),
+      );
+      expect({
+        answer: [refused.status, refused.body],
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({ answer: [422, NODE_LIMIT_EXCEEDED], unchanged: true });
+    });
+
+    it('lists every live node, newest included, even for a study over the cap from earlier data', async () => {
+      const study = await createStudy(alice);
+      await insertThoughts(study.studyId, alice, 2001);
+      // Created after the filler rows, so it sorts last in the oldest-first list.
+      const [newest] = await db.query<{ id: string }>(
+        `INSERT INTO study_node (study_id, owner_id, type, origin, body, created_at)
+         VALUES ($1, $2, 'thought', 'user', 'The newest', now() + interval '1 minute')
+         RETURNING id`,
+        { bind: [study.studyId, alice.user.id], type: QueryTypes.SELECT },
+      );
+      const list = await send(alice, 'get', nodesPath(study.studyId));
+      const items = (list.body as { items: { id: string; label: string }[] }).items;
+      expect([list.status, items.length, items.at(-1)]).toStrictEqual([
+        200,
+        2002,
+        expect.objectContaining({ id: newest?.id, label: 'The newest' }),
+      ]);
+    });
+  });
+
+  describe('initial branch', () => {
+    it("roots a blank study's initial branch at its first question created through the node API; a Scripture node alone roots none, a later question none", async () => {
+      const study = await createStudy(alice);
+      const scripture = await createNode(alice, study.studyId, {
+        type: 'scripture',
+        referenceId: romans.id,
+      });
+      const afterScripture = await branches(study.studyId);
+      const first = await createNode(alice, study.studyId, { type: 'question', text: 'First?' });
+      const second = await createNode(alice, study.studyId, { type: 'question', text: 'Then?' });
+      const all = await branches(study.studyId);
+      expect({
+        afterScripture,
+        branches: all,
+        events: (await events(study.studyId)).slice(1),
+      }).toStrictEqual({
+        afterScripture: [],
+        branches: [{ id: anyId, rootNodeId: first.id }],
+        events: [
+          {
+            sequence: '2',
+            eventType: 'scripture_added_to_graph',
+            payload: { nodeId: scripture.id, referenceId: romans.id },
+          },
+          {
+            sequence: '3',
+            eventType: 'question_created',
+            payload: { questionNodeId: first.id, branchId: all[0]?.id },
+          },
+          {
+            sequence: '4',
+            eventType: 'question_created',
+            payload: { questionNodeId: second.id, branchId: null },
+          },
+        ],
+      });
+    });
+
+    it('keeps the branch a passage rooted at creation: a later question creates none', async () => {
+      const study = await createStudy(alice, { startingReferenceId: romans.id });
+      const question = await createNode(alice, study.studyId, { type: 'question', text: 'Why?' });
+      expect({
+        branches: await branches(study.studyId),
+        event: (await events(study.studyId)).at(-1),
+      }).toStrictEqual({
+        branches: [{ id: study.branchId, rootNodeId: study.rootNodeId }],
+        event: {
+          sequence: '2',
+          eventType: 'question_created',
+          payload: { questionNodeId: question.id, branchId: null },
+        },
+      });
+    });
+  });
+
+  describe('labels', () => {
+    it('lists a Scripture node whose edition is no longer active as "Passage (translation unavailable)"', async () => {
+      const study = await createStudy(alice, { startingReferenceId: romans.id });
+      // Activated editions can never be deactivated (BIB-14 triggers): stand one in.
+      vi.spyOn(app.get(ReferenceService), 'storedReferences').mockResolvedValueOnce(new Map());
+      const list = await send(alice, 'get', nodesPath(study.studyId));
+      expect((list.body as { items: { label: string }[] }).items.map((n) => n.label)).toStrictEqual(
+        ['Passage (translation unavailable)'],
+      );
     });
   });
 
@@ -1013,6 +1130,25 @@ describe('typed graph nodes (BIB-25)', () => {
         reads: [200, 200],
         unchanged: true,
       });
+    });
+  });
+
+  describe('edit check order', () => {
+    it('refuses an edit on an archived study with 422 STUDY_ARCHIVED before looking for the node: an absent node is not 404', async () => {
+      const study = await createStudy(alice);
+      const archived = await send(alice, 'post', `${STUDIES}/${study.studyId}/archive`, {
+        expectedRevision: 1,
+      });
+      expect(archived.status).toBe(200);
+      const before = await ownerRows(alice);
+      const res = await send(alice, 'patch', nodePath(study.studyId, randomUUID()), {
+        expectedRevision: 1,
+        text: 'y',
+      });
+      expect({
+        answer: [res.status, res.body],
+        unchanged: isDeepStrictEqual(await ownerRows(alice), before),
+      }).toStrictEqual({ answer: [422, STUDY_ARCHIVED], unchanged: true });
     });
   });
 
