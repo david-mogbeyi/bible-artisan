@@ -1,0 +1,438 @@
+import { isDeepStrictEqual } from 'node:util';
+import { Injectable } from '@nestjs/common';
+import {
+  createNodeRequestSchema,
+  type CreateNodeResponse,
+  MAX_NODES_PER_STUDY,
+  NODE_LIMIT_EXCEEDED,
+  NODE_NOT_EDITABLE,
+  NODE_UNCHANGED,
+  type NodeListResponse,
+  type NodeMutationResponse,
+  nodePreview,
+  type NodeResponse,
+  type ScriptureReference,
+  SCRIPTURE_LABEL_UNAVAILABLE,
+  SCRIPTURE_NODE_EXISTS,
+  type Source,
+  type SourceCitation,
+  updateNodeRequestSchema,
+} from '@bible-artisan/contracts';
+import type { z } from 'zod';
+import type { CreationAttributes } from 'sequelize';
+import {
+  NodeRuleError,
+  NotFoundError,
+  ReferenceNotFoundError,
+  RevisionConflictError,
+} from '../../common/errors/domain-errors';
+import type { MutationRequestInfo } from '../../common/mutation/mutation-request';
+import { MutationResult, MutationService } from '../../common/mutation/mutation.service';
+import type { StudyMutation } from '../../common/mutation/study-mutation';
+import { requireExpectedRevision } from '../../common/revision/expected-revision';
+import { isResourceId } from '../../common/validation/resource-id';
+import { parseBody } from '../../common/validation/parse-body';
+import { StudyNode } from '../../database/models/study-node.model';
+import { ReferenceService } from '../bible-content/reference/reference.service';
+import { StudyAccessService } from '../study/study-access.service';
+import { StudyRevisionService } from '../study/study-revision.service';
+
+type CreateNodeBody = z.output<typeof createNodeRequestSchema>;
+type UpdateNodeBody = z.output<typeof updateNodeRequestSchema>;
+type NodeValues = Omit<CreationAttributes<StudyNode>, 'studyId' | 'ownerId'>;
+
+/**
+ * Node events (BIB-25), one per mutation, ids and enums only: never text, titles, citations,
+ * excerpts, URLs or labels (PRD section 23, NFR-PRIV-001). Intended visibility, for BIB-55's
+ * column: all thread-visible. `question_created` has BIB-20's shape (`branchId` is null: new
+ * questions do not create branches here). `source_created`, `thought_updated` and
+ * `source_updated` are not in PRD section 13's list and are named by analogy.
+ */
+export const NODE_EVENTS = {
+  scripture: 'scripture_added_to_graph',
+  question: 'question_created',
+  observation: 'observation_created',
+  thought: 'thought_created',
+  conclusion: 'conclusion_created',
+  source: 'source_created',
+  observationUpdated: 'observation_updated',
+  thoughtUpdated: 'thought_updated',
+  sourceUpdated: 'source_updated',
+} as const;
+
+/** The columns of a new node. `origin` comes from the type, never from the client. */
+function newNodeValues(body: CreateNodeBody): NodeValues {
+  switch (body.type) {
+    case 'scripture':
+      return { type: 'scripture', origin: 'scripture', scriptureReferenceId: body.referenceId };
+    case 'question':
+      return { type: 'question', origin: 'user', title: body.text, questionStatus: 'open' };
+    case 'observation':
+      return {
+        type: 'observation',
+        origin: 'user',
+        body: body.text,
+        observationKind: body.observationKind,
+      };
+    case 'thought':
+      return { type: 'thought', origin: 'user', body: body.text };
+    case 'conclusion':
+      return {
+        type: 'conclusion',
+        origin: 'user',
+        title: body.text,
+        conclusionStatus: 'tentative',
+      };
+    case 'source':
+      return { type: 'source', origin: 'external', ...sourceColumns(body.source) };
+  }
+}
+
+/** A citation as stored: the title in `title`, everything else in `payload_json`. */
+function sourceColumns({ title, ...payload }: SourceCitation) {
+  return { title, payloadJson: payload };
+}
+
+function createdEvent(node: StudyNode) {
+  switch (node.type) {
+    case 'scripture':
+      return {
+        eventType: NODE_EVENTS.scripture,
+        payload: { nodeId: node.id, referenceId: node.scriptureReferenceId },
+      };
+    case 'question':
+      return {
+        eventType: NODE_EVENTS.question,
+        payload: { questionNodeId: node.id, branchId: null },
+      };
+    case 'observation':
+      return {
+        eventType: NODE_EVENTS.observation,
+        payload: { nodeId: node.id, observationKind: node.observationKind },
+      };
+    case 'thought':
+      return { eventType: NODE_EVENTS.thought, payload: { nodeId: node.id } };
+    case 'conclusion':
+      return { eventType: NODE_EVENTS.conclusion, payload: { nodeId: node.id } };
+    case 'source':
+      return {
+        eventType: NODE_EVENTS.source,
+        payload: { nodeId: node.id, sourceKind: node.payloadJson?.kind ?? null },
+      };
+  }
+}
+
+function mutationBody(node: StudyNode, lastEventSequence: string): NodeMutationResponse {
+  return {
+    id: node.id,
+    studyId: node.studyId,
+    type: node.type,
+    origin: node.origin,
+    revision: node.revision,
+    referenceId: node.scriptureReferenceId,
+    createdAt: node.createdAt.toISOString(),
+    updatedAt: node.updatedAt.toISOString(),
+    lastEventSequence,
+  };
+}
+
+function sourceOf(node: StudyNode): Source {
+  const payload = node.payloadJson;
+  if (node.title === null || payload === null) throw new Error('source node without a citation');
+  return {
+    title: node.title,
+    kind: payload.kind,
+    author: payload.author ?? null,
+    workTitle: payload.workTitle ?? null,
+    publicationDetails: payload.publicationDetails ?? null,
+    url: payload.url ?? null,
+    locator: payload.locator ?? null,
+    excerpt: payload.excerpt ?? null,
+    excerptKind: payload.excerptKind ?? null,
+  };
+}
+
+/** The column a statement or text lives in, for types whose CHECKs require it. */
+function required<T>(value: T | null): T {
+  if (value === null) throw new Error('study_node row is missing a column its type requires');
+  return value;
+}
+
+/**
+ * Typed graph nodes (BIB-25; FR-GRAPH-001; PRD sections 8, 12, 15, 16, 23, 24).
+ *
+ * Every write goes through `MutationService.execute`: one transaction with its Idempotency-Key
+ * receipt, the study lock, the lifecycle guard (archived/trashed studies are refused before the
+ * work runs), the revision check and exactly one StudyEvent. Every read resolves the study (and a
+ * node) through `StudyAccessService`, then queries nodes by study id and owner id.
+ *
+ * Scripture references are checked by the Bible content context (`ReferenceService`), never read
+ * from its tables here, and never repaired: an unknown reference or one whose edition is not
+ * active is 422 `REFERENCE_NOT_FOUND`.
+ */
+@Injectable()
+export class NodesService {
+  constructor(
+    private readonly mutations: MutationService,
+    private readonly access: StudyAccessService,
+    private readonly studyRevisions: StudyRevisionService,
+    private readonly references: ReferenceService,
+  ) {}
+
+  /**
+   * `POST /studies/:studyId/nodes`. A new node is a study change: `expectedRevision` is the
+   * study's, checked first (so of two creates from one revision, one is 409 before any rule) and
+   * bumped. The node cap and the duplicate-Scripture guard are checked under the study lock.
+   * A Scripture reference is validated before the transaction, as study creation does: reference
+   * rows are immutable and an active edition stays active, so the check cannot go stale, and a
+   * refusal writes nothing, not even a receipt.
+   */
+  async create(
+    ownerId: string,
+    studyId: string,
+    mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    const body = parseBody(createNodeRequestSchema, mutation.body);
+    if (body.type === 'scripture') await this.requireReference(body.referenceId);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: true,
+      work: async (m) => {
+        const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
+        await requireRoomForNode(m);
+        if (body.type === 'scripture') await requireNewScripture(m, body.referenceId);
+        const node = await m.createChild(StudyNode, newNodeValues(body));
+        const event = await m.appendEvent(createdEvent(node));
+        const response: CreateNodeResponse = {
+          ...mutationBody(node, event.sequence),
+          studyRevision,
+        };
+        return { status: 201, body: response };
+      },
+    });
+  }
+
+  /**
+   * `PATCH /studies/:studyId/nodes/:nodeId`: new content for an Observation, Thought or Source.
+   * `expectedRevision` is the node's. Checked in order, all under the study lock: an absent node
+   * is 404, a stale revision 409, a type or field not editable here 422 `NODE_NOT_EDITABLE`, and
+   * an edit that changes nothing 422 `NODE_UNCHANGED`. So a client with an old copy always
+   * reloads before it sees a rule error.
+   */
+  async update(
+    ownerId: string,
+    studyId: string,
+    nodeId: string,
+    mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    const body = parseBody(updateNodeRequestSchema, mutation.body);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: true,
+      work: async (m) => {
+        const current = await lockedNode(m, nodeId, expectedRevision);
+        const { values, eventType, payload } = editOf(current, body);
+        const updated = await m.updateWithExpectedRevision(StudyNode, {
+          id: current.id,
+          expectedRevision,
+          values,
+          where: { deletedAt: null },
+        });
+        const event = await m.appendEvent({
+          eventType,
+          payload: { nodeId: updated.id, ...payload },
+        });
+        return { status: 200, body: mutationBody(updated, event.sequence) };
+      },
+    });
+  }
+
+  /**
+   * `GET /studies/:studyId/nodes`: the study's live nodes, oldest first (ties by id), each with
+   * its label (`nodePreview` of its statement, text or source title; a Scripture node's reference
+   * label, in one batched lookup). Unpaginated: the live-node cap bounds it. Archived and trashed
+   * studies stay readable.
+   */
+  async list(ownerId: string, studyId: string): Promise<NodeListResponse> {
+    await this.access.requireOwnedStudy(ownerId, studyId);
+    const nodes = await StudyNode.findAll({
+      where: { studyId, ownerId, deletedAt: null },
+      order: [
+        ['createdAt', 'ASC'],
+        ['id', 'ASC'],
+      ],
+      limit: MAX_NODES_PER_STUDY,
+    });
+    const references = await this.references.storedReferences(
+      nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
+    );
+    return {
+      items: nodes.map((node) => ({
+        id: node.id,
+        type: node.type,
+        origin: node.origin,
+        label: node.scriptureReferenceId
+          ? (references.get(node.scriptureReferenceId)?.label ?? SCRIPTURE_LABEL_UNAVAILABLE)
+          : nodePreview(node.title ?? node.body ?? ''),
+        status: node.questionStatus ?? node.conclusionStatus,
+        observationKind: node.observationKind,
+        referenceId: node.scriptureReferenceId,
+        revision: node.revision,
+        createdAt: node.createdAt.toISOString(),
+        updatedAt: node.updatedAt.toISOString(),
+      })),
+    };
+  }
+
+  /** `GET /studies/:studyId/nodes/:nodeId`: one live node with its full typed content. */
+  async get(ownerId: string, studyId: string, nodeId: string): Promise<NodeResponse> {
+    const node = await this.access.requireOwnedNode(ownerId, studyId, nodeId);
+    const common = {
+      id: node.id,
+      studyId: node.studyId,
+      origin: node.origin,
+      revision: node.revision,
+      createdAt: node.createdAt.toISOString(),
+      updatedAt: node.updatedAt.toISOString(),
+    };
+    switch (node.type) {
+      case 'scripture': {
+        const referenceId = required(node.scriptureReferenceId);
+        const stored = await this.references.storedReferences([referenceId]);
+        const reference: ScriptureReference | null = stored.get(referenceId) ?? null;
+        return { type: 'scripture', ...common, reference };
+      }
+      case 'question':
+        return {
+          type: 'question',
+          ...common,
+          text: required(node.title),
+          status: required(node.questionStatus),
+        };
+      case 'observation':
+        return {
+          type: 'observation',
+          ...common,
+          text: required(node.body),
+          observationKind: required(node.observationKind),
+        };
+      case 'thought':
+        return { type: 'thought', ...common, text: required(node.body) };
+      case 'conclusion':
+        return {
+          type: 'conclusion',
+          ...common,
+          text: required(node.title),
+          status: required(node.conclusionStatus),
+        };
+      case 'source':
+        return { type: 'source', ...common, source: sourceOf(node) };
+    }
+  }
+
+  private async requireReference(referenceId: string): Promise<void> {
+    try {
+      await this.references.storedReference(referenceId);
+    } catch (error) {
+      if (error instanceof NotFoundError) throw new ReferenceNotFoundError();
+      throw error;
+    }
+  }
+}
+
+/**
+ * What a PATCH changes on this node, or why it cannot. Observation: `text` and/or
+ * `observationKind`; Thought: `text`; Source: `source`, replaced whole. Anything else (another
+ * type, or a field of another type) is `NODE_NOT_EDITABLE`; no change at all is `NODE_UNCHANGED`.
+ */
+function editOf(
+  node: StudyNode,
+  body: UpdateNodeBody,
+): { values: Partial<NodeValues>; eventType: string; payload: Record<string, unknown> } {
+  const { text, observationKind, source } = body;
+  switch (node.type) {
+    case 'observation': {
+      if (source !== undefined) throw new NodeRuleError(NODE_NOT_EDITABLE);
+      const values = {
+        body: text ?? node.body,
+        observationKind: observationKind ?? node.observationKind,
+      };
+      if (values.body === node.body && values.observationKind === node.observationKind) {
+        throw new NodeRuleError(NODE_UNCHANGED);
+      }
+      return {
+        values,
+        eventType: NODE_EVENTS.observationUpdated,
+        payload: { observationKind: values.observationKind },
+      };
+    }
+    case 'thought': {
+      if (observationKind !== undefined || source !== undefined || text === undefined) {
+        throw new NodeRuleError(NODE_NOT_EDITABLE);
+      }
+      if (text === node.body) throw new NodeRuleError(NODE_UNCHANGED);
+      return { values: { body: text }, eventType: NODE_EVENTS.thoughtUpdated, payload: {} };
+    }
+    case 'source': {
+      if (text !== undefined || observationKind !== undefined || source === undefined) {
+        throw new NodeRuleError(NODE_NOT_EDITABLE);
+      }
+      const values = sourceColumns(source);
+      if (values.title === node.title && isDeepStrictEqual(values.payloadJson, node.payloadJson)) {
+        throw new NodeRuleError(NODE_UNCHANGED);
+      }
+      return {
+        values,
+        eventType: NODE_EVENTS.sourceUpdated,
+        payload: { sourceKind: source.kind },
+      };
+    }
+    default:
+      // Questions are never rewritten in place (BIB-20 makes a new one), conclusions version
+      // every semantic edit (BIB-30), and a Scripture node's identity is immutable.
+      throw new NodeRuleError(NODE_NOT_EDITABLE);
+  }
+}
+
+/**
+ * The live node being changed, read inside the mutation (the study lock is held, so no other
+ * mutation of the study can change it meanwhile): absent, deleted, another study's or another
+ * owner's is 404; a stale `expectedRevision` is 409 before any rule.
+ */
+async function lockedNode(m: StudyMutation, nodeId: string, expectedRevision: number) {
+  if (!isResourceId(nodeId)) throw new NotFoundError();
+  const node = await StudyNode.findOne({
+    where: { id: nodeId, studyId: m.studyId, ownerId: m.ownerId, deletedAt: null },
+  });
+  if (!node) throw new NotFoundError();
+  if (node.revision !== expectedRevision) throw new RevisionConflictError(node.revision);
+  return node;
+}
+
+/** Live nodes only count (NFR-SCALE-002); counted under the study lock, so creates cannot race. */
+async function requireRoomForNode(m: StudyMutation): Promise<void> {
+  const live = await StudyNode.count({
+    where: { studyId: m.studyId, ownerId: m.ownerId, deletedAt: null },
+  });
+  if (live >= MAX_NODES_PER_STUDY) throw new NodeRuleError(NODE_LIMIT_EXCEEDED);
+}
+
+/**
+ * At most one live Scripture node per reference in a study, checked under the study lock. A
+ * placeholder for BIB-26's canonical dedupe, which replaces this refusal with "focus existing".
+ * Overlapping ranges, and the same range in another edition, are other references.
+ */
+async function requireNewScripture(m: StudyMutation, referenceId: string): Promise<void> {
+  const existing = await StudyNode.count({
+    where: {
+      studyId: m.studyId,
+      ownerId: m.ownerId,
+      deletedAt: null,
+      type: 'scripture',
+      scriptureReferenceId: referenceId,
+    },
+  });
+  if (existing > 0) throw new NodeRuleError(SCRIPTURE_NODE_EXISTS);
+}

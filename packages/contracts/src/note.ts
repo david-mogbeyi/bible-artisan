@@ -457,8 +457,9 @@ export const listNotesQuerySchema = z.strictObject({
 /**
  * What a note is attached to (null: the study).
  *
- * `node`: `label` is what identifies it to the owner: a question's text, a Scripture node's
- * reference label; null for a type without one yet. `deleted`: the node was deleted, so the note
+ * `node`: `label` is what identifies it to the owner, as the node list shows it (BIB-25): the
+ * `nodePreview` of its statement, text or source title, or a Scripture node's reference label
+ * (null once its edition is no longer active). `deleted`: the node was deleted, so the note
  * is listed for orphaned-note review (FR-NOTE-002); it keeps its target.
  *
  * `scripture` (BIB-24): a verse range or phrase anchor, re-checked against the corpus on every

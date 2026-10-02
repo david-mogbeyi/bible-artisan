@@ -155,10 +155,14 @@ describe('schema (composite-key owner isolation)', () => {
     const studyId = await insertStudy(owner);
 
     await expect(
-      db.query(`INSERT INTO study_node (study_id, owner_id, type) VALUES ($1, $2, 'thought')`, {
-        bind: [studyId, otherOwner],
-        type: QueryTypes.INSERT,
-      }),
+      db.query(
+        `INSERT INTO study_node (study_id, owner_id, type, origin, body)
+         VALUES ($1, $2, 'thought', 'user', 'T')`,
+        {
+          bind: [studyId, otherOwner],
+          type: QueryTypes.INSERT,
+        },
+      ),
     ).rejects.toThrow(/study_node_study_owner_fk/);
   });
 
@@ -178,8 +182,8 @@ describe('schema (composite-key owner isolation)', () => {
 
   async function insertNode(studyId: string, ownerId: string): Promise<string> {
     const [row] = await db.query<{ id: string }>(
-      `INSERT INTO study_node (study_id, owner_id, type, title, question_status)
-       VALUES ($1, $2, 'question', 'Q', 'open') RETURNING id`,
+      `INSERT INTO study_node (study_id, owner_id, type, origin, title, question_status)
+       VALUES ($1, $2, 'question', 'user', 'Q', 'open') RETURNING id`,
       { bind: [studyId, ownerId], type: QueryTypes.SELECT },
     );
     if (!row) throw new Error('no node');
@@ -234,7 +238,8 @@ describe('schema (composite-key owner isolation)', () => {
     const studyId = await insertStudy(owner);
     const questionId = await insertNode(studyId, owner);
     const [thought] = await db.query<{ id: string }>(
-      `INSERT INTO study_node (study_id, owner_id, type) VALUES ($1, $2, 'thought') RETURNING id`,
+      `INSERT INTO study_node (study_id, owner_id, type, origin, body)
+       VALUES ($1, $2, 'thought', 'user', 'T') RETURNING id`,
       { bind: [studyId, owner], type: QueryTypes.SELECT },
     );
     if (!thought) throw new Error('no node');
@@ -257,13 +262,15 @@ describe('schema (composite-key owner isolation)', () => {
     ).rejects.toThrow(/question_node_type" can only be updated to DEFAULT/);
 
     await point('main_question_node_id', questionId);
-    // The type of a node a pointer names cannot change underneath it (node type is immutable).
+    // The type of a node a pointer names cannot change underneath it (node type is immutable):
+    // since BIB-25 the identity trigger refuses any type change first; the FK stays the backstop.
     await expect(
       db.query(
-        `UPDATE study_node SET type = 'thought', title = NULL, question_status = NULL WHERE id = $1`,
+        `UPDATE study_node SET type = 'thought', title = NULL, question_status = NULL, body = 'T'
+          WHERE id = $1`,
         { bind: [questionId] },
       ),
-    ).rejects.toThrow(/study_main_question_node_fk/);
+    ).rejects.toThrow(/type, study, owner, origin and reference are immutable/);
   });
 
   it('cascades hard deletes from user to study to every study-scoped row (BIB-19, BIB-20 tags)', async () => {
@@ -316,32 +323,122 @@ describe('schema (composite-key owner isolation)', () => {
     ).rejects.toThrow(/study_branch_root_node_fk/);
   });
 
+  // Columns: type, origin, title, question_status, scripture_reference_id, body,
+  // observation_kind, conclusion_status, payload_json. Each row breaks exactly one rule.
   it.each([
-    ['an unknown type', `'note', NULL, NULL, NULL`, /study_node_type_check/],
+    [
+      'an unknown type',
+      `'note', 'user', NULL, NULL, NULL, NULL, NULL, NULL, NULL`,
+      /study_node_type_check/,
+    ],
     [
       'a question without a statement',
-      `'question', NULL, 'open', NULL`,
+      `'question', 'user', NULL, 'open', NULL, NULL, NULL, NULL, NULL`,
+      /study_node_title_check/,
+    ],
+    [
+      'a question without a status',
+      `'question', 'user', 'Q', NULL, NULL, NULL, NULL, NULL, NULL`,
       /study_node_question_check/,
     ],
-    ['a question without a status', `'question', 'Q', NULL, NULL`, /study_node_question_check/],
-    ['an unknown question status', `'question', 'Q', 'maybe', NULL`, /study_node_question_check/],
-    ['an empty question statement', `'question', '', 'open', NULL`, /study_node_question_check/],
+    [
+      'an unknown question status',
+      `'question', 'user', 'Q', 'maybe', NULL, NULL, NULL, NULL, NULL`,
+      /study_node_question_check/,
+    ],
+    [
+      'an empty question statement',
+      `'question', 'user', '', 'open', NULL, NULL, NULL, NULL, NULL`,
+      /study_node_title_check/,
+    ],
     [
       'a question status on a thought',
-      `'thought', NULL, 'open', NULL`,
+      `'thought', 'user', NULL, 'open', NULL, 'T', NULL, NULL, NULL`,
       /study_node_question_check/,
     ],
     [
       'a Scripture node without a reference',
-      `'scripture', NULL, NULL, NULL`,
+      `'scripture', 'scripture', NULL, NULL, NULL, NULL, NULL, NULL, NULL`,
       /study_node_scripture_check/,
     ],
-  ])('refuses %s in study_node (BIB-19)', async (_, values, constraint) => {
+    // BIB-25: origin and the four remaining types.
+    [
+      'an unknown origin',
+      `'thought', 'robot', NULL, NULL, NULL, 'T', NULL, NULL, NULL`,
+      /study_node_origin_check/,
+    ],
+    [
+      'no origin',
+      `'thought', NULL, NULL, NULL, NULL, 'T', NULL, NULL, NULL`,
+      /null value in column "origin"/,
+    ],
+    [
+      'a thought without text',
+      `'thought', 'user', NULL, NULL, NULL, NULL, NULL, NULL, NULL`,
+      /study_node_body_check/,
+    ],
+    [
+      'a thought over 10,000 characters',
+      `'thought', 'user', NULL, NULL, NULL, repeat('x', 10001), NULL, NULL, NULL`,
+      /study_node_body_check/,
+    ],
+    [
+      'a title on a thought',
+      `'thought', 'user', 'T', NULL, NULL, 'T', NULL, NULL, NULL`,
+      /study_node_title_check/,
+    ],
+    [
+      'text on a question',
+      `'question', 'user', 'Q', 'open', NULL, 'T', NULL, NULL, NULL`,
+      /study_node_body_check/,
+    ],
+    [
+      'an observation without a kind',
+      `'observation', 'user', NULL, NULL, NULL, 'O', NULL, NULL, NULL`,
+      /study_node_observation_check/,
+    ],
+    [
+      'an observation kind on a thought',
+      `'thought', 'user', NULL, NULL, NULL, 'T', 'interpretation', NULL, NULL`,
+      /study_node_observation_check/,
+    ],
+    [
+      'a conclusion without a status',
+      `'conclusion', 'user', 'C', NULL, NULL, NULL, NULL, NULL, NULL`,
+      /study_node_conclusion_check/,
+    ],
+    [
+      'an unknown conclusion status',
+      `'conclusion', 'user', 'C', NULL, NULL, NULL, NULL, 'proven', NULL`,
+      /study_node_conclusion_check/,
+    ],
+    [
+      'a source without a citation',
+      `'source', 'external', 'S', NULL, NULL, NULL, NULL, NULL, NULL`,
+      /study_node_source_check/,
+    ],
+    [
+      'a source citation with neither URL nor locator',
+      `'source', 'external', 'S', NULL, NULL, NULL, NULL, NULL, '{"kind": "web"}'`,
+      /study_node_source_check/,
+    ],
+    [
+      'a source title over 200 characters',
+      `'source', 'external', repeat('x', 201), NULL, NULL, NULL, NULL, NULL, '{"locator": "p. 1"}'`,
+      /study_node_title_check/,
+    ],
+    [
+      'a citation on a thought',
+      `'thought', 'user', NULL, NULL, NULL, 'T', NULL, NULL, '{"locator": "p. 1"}'`,
+      /study_node_source_check/,
+    ],
+  ])('refuses %s in study_node (BIB-19, BIB-25)', async (_, values, constraint) => {
     const owner = await insertUser();
     const studyId = await insertStudy(owner);
     await expect(
       db.query(
-        `INSERT INTO study_node (study_id, owner_id, type, title, question_status, scripture_reference_id)
+        `INSERT INTO study_node (study_id, owner_id, type, origin, title, question_status,
+           scripture_reference_id, body, observation_kind, conclusion_status, payload_json)
          VALUES ($1, $2, ${values})`,
         { bind: [studyId, owner], type: QueryTypes.INSERT },
       ),

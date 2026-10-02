@@ -95,7 +95,7 @@ entry point on the same pipeline (`POST /v1/studies`, `modules/study/http/studie
 return this.mutations.create(ownerId, mutation, {
   study: { title, startingReferenceId },          // owner = ownerId (session); counters are the pipeline's
   work: async (m) => {                             // m.creating === true
-    const node = await m.createChild(StudyNode, { type: 'question', title, questionStatus: 'open' });
+    const node = await m.createChild(StudyNode, { type: 'question', origin: 'user', title, questionStatus: 'open' });
     await m.updateCreatedStudy({ mainQuestionNodeId: node.id });  // root pointers, revision stays 1
     const event = await m.appendEvent({ eventType: 'study_created', payload: { … } });
     return { status: 201, body: dto };

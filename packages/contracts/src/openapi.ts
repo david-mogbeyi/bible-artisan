@@ -55,6 +55,16 @@ import {
   noteVersionResponseSchema,
   updateNoteRequestSchema,
 } from './note';
+import {
+  createNodeRequestSchema,
+  createNodeResponseSchema,
+  MAX_NODE_TEXT_LENGTH,
+  MAX_NODES_PER_STUDY,
+  nodeListResponseSchema,
+  nodeMutationResponseSchema,
+  nodeResponseSchema,
+  updateNodeRequestSchema,
+} from './node';
 import { createStudyRequestSchema, createStudyResponseSchema, studyResponseSchema } from './study';
 import {
   DEFAULT_LIBRARY_LIMIT,
@@ -183,6 +193,12 @@ const NOTE_OWNERSHIP =
 
 /** What every note mutation (BIB-23) shares. */
 const NOTE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent (ids only) commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NOTE_OWNERSHIP}`;
+
+const NODE_OWNERSHIP =
+  "Another user's, an absent and a malformed study or node id, a node of another study, and a study trashed 30 or more days ago are the same 404.";
+
+/** What every node mutation (BIB-25) shares. */
+const NODE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NODE_OWNERSHIP}`;
 
 /** The note document rules (NFR-SEC-002), for the routes that take one. */
 const NOTE_DOCUMENT_RULES = `content is a Tiptap/ProseMirror document checked against an allowlist: paragraph, heading (level 1-3), bulletList, orderedList (start), listItem, blockquote, text, hardBreak and scriptureReference (referenceId and label, at most ${MAX_NOTE_REFERENCES} per note) nodes; bold, italic and link (href only, http or https, no credentials) marks. A scriptureReference must name a reference of an active edition and carry exactly its canonical label, else 422 NOTE_REFERENCE_INVALID; it never creates a node. Anything else (another node, mark or attribute, HTML, an unsafe link, nesting deeper than 12 levels, more than 20,000 nodes) is 400 and nothing is stored. The server derives the plain text; more than ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters of it is 413 NOTE_TOO_LONG, and a body over 1 MiB is 413.`;
@@ -615,6 +631,48 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/studies/{studyId}/nodes': {
+        post: {
+          description: `Creates a typed graph node (FR-GRAPH-001): scripture {referenceId} (from POST /bible/resolve; unknown or in an inactive edition is 422 REFERENCE_NOT_FOUND, never another passage; a live Scripture node with the same reference in the study is 422 SCRIPTURE_NODE_EXISTS), question {text} (status open), observation {text, observationKind}, thought {text}, conclusion {text} (status tentative) or source {source} (a manual citation: title, kind, optional author, workTitle, publicationDetails, an http/https url that is stored and never fetched, locator, excerpt with excerptKind; a url or a locator is required). Statements are at most 4,000 characters, observation and thought text ${MAX_NODE_TEXT_LENGTH.toLocaleString('en-US')}. The server sets origin (scripture, external for a source, else user); a client cannot send origin, status or any other field (400). Creating a node is a study change: expectedRevision is the study's revision (studyRevision in the response); contentRevision moves. One event: scripture_added_to_graph, question_created, observation_created, thought_created, conclusion_created or source_created (ids and enums only). At most ${MAX_NODES_PER_STUDY.toLocaleString('en-US')} live nodes per study (422 NODE_LIMIT_EXCEEDED). The response carries no text. ${NODE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam],
+          requestBody: jsonBody('CreateNodeRequest'),
+          responses: {
+            201: jsonResponse('The new node, without its text', 'CreateNodeResponse'),
+            default: errorResponse,
+          },
+        },
+        get: {
+          description: `Lists the study's live nodes, oldest first, each with its type, origin, status or observation kind and a label (at most 160 characters of its statement, text or source title; a Scripture node's reference label). Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam],
+          responses: {
+            200: jsonResponse("The study's nodes", 'NodeListResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/nodes/{nodeId}': {
+        get: {
+          description: `Returns one live node with its full typed content: a Scripture node's reference (never verse text), a statement or text with its status or kind, or a source citation. ${NODE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam, uuidPathParam('nodeId')],
+          responses: {
+            200: jsonResponse('The node', 'NodeResponse'),
+            default: errorResponse,
+          },
+        },
+        patch: {
+          description: `Edits an observation (text and/or observationKind), a thought (text) or a source (source, replaced whole). expectedRevision is the node's. A node's type never changes (type is not accepted, 400). Editing a question, conclusion or Scripture node, or a field of another type, is 422 NODE_NOT_EDITABLE; nothing to change is 422 NODE_UNCHANGED. contentRevision moves. One event: observation_updated, thought_updated or source_updated (ids and enums only). The response carries no text. ${NODE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('nodeId')],
+          requestBody: jsonBody('UpdateNodeRequest'),
+          responses: {
+            200: jsonResponse('The node as saved, without its text', 'NodeMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/bible/translations': {
         get: {
           description:
@@ -687,6 +745,12 @@ function buildDocument(): OpenApiDocument {
         AnnotationStateRequest: toSchema(annotationStateRequestSchema),
         AnnotationMutationResponse: toSchema(annotationMutationResponseSchema),
         AnnotationListResponse: toSchema(annotationListResponseSchema),
+        CreateNodeRequest: toInputSchema(createNodeRequestSchema),
+        CreateNodeResponse: toSchema(createNodeResponseSchema),
+        UpdateNodeRequest: toInputSchema(updateNodeRequestSchema),
+        NodeMutationResponse: toSchema(nodeMutationResponseSchema),
+        NodeListResponse: toSchema(nodeListResponseSchema),
+        NodeResponse: toSchema(nodeResponseSchema),
         // Filled while the entries above were converted.
         ...hoisted,
       },

@@ -22,6 +22,7 @@ import {
   type NoteListResponse,
   type NoteMutationResponse,
   notePlainText,
+  nodePreview,
   notePreview,
   noteReferenceLinks,
   type NoteResponse,
@@ -575,8 +576,8 @@ export class NotesService {
   /**
    * The targets of these notes, in order (null: a study note).
    *
-   * Nodes, deleted ones included (orphaned-note review, FR-NOTE-002), with their labels: a
-   * question's text, a Scripture node's reference label. Scripture targets (BIB-24) with their
+   * Nodes, deleted ones included (orphaned-note review, FR-NOTE-002), with their labels: the
+   * `nodePreview` of a node's statement, text or source title, a Scripture node's reference label. Scripture targets (BIB-24) with their
    * reference and the problem the caller's anchor check found (never moved). One node query and
    * one batched reference lookup, whatever the count.
    */
@@ -599,9 +600,11 @@ export class NotesService {
 
     const nodeTargets = new Map<string, NoteTarget>();
     for (const node of nodes) {
+      // The node list's label (BIB-25): a Scripture node's reference label, else the preview
+      // of its statement, text or source title.
       const label = node.scriptureReferenceId
         ? (references.get(node.scriptureReferenceId)?.label ?? null)
-        : node.title;
+        : nodePreview(node.title ?? node.body ?? '');
       nodeTargets.set(node.id, {
         kind: 'node',
         nodeId: node.id,

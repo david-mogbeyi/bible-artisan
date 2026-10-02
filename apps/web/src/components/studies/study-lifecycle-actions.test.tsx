@@ -85,6 +85,8 @@ beforeEach(() => {
       if (path.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
       // The page's notes panel (BIB-23): no notes in these tests.
       if (path.includes('/notes')) return Promise.resolve(jsonResponse(200, { items: [] }));
+      // The page's Nodes section (BIB-25): no nodes in these tests.
+      if (path.includes('/nodes')) return Promise.resolve(jsonResponse(200, { items: [] }));
       const method = init.method ?? 'GET';
       const queue = method === 'GET' ? reads : writes;
       if (method !== 'GET') {

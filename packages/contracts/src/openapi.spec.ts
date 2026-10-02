@@ -608,6 +608,55 @@ describe('buildOpenApiDocument', () => {
             'AnnotationStateRequest',
           ),
         },
+        '/studies/{studyId}/nodes': {
+          post: noteOperation(
+            [
+              'REFERENCE_NOT_FOUND',
+              'SCRIPTURE_NODE_EXISTS',
+              'never fetched',
+              'The server sets origin',
+              'scripture_added_to_graph',
+              'NODE_LIMIT_EXCEEDED',
+              'The response carries no text',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId],
+            201,
+            'The new node, without its text',
+            'CreateNodeResponse',
+            'CreateNodeRequest',
+          ),
+          get: noteOperation(
+            ['oldest first', '160 characters', SAME_404],
+            [studyId],
+            200,
+            "The study's nodes",
+            'NodeListResponse',
+          ),
+        },
+        '/studies/{studyId}/nodes/{nodeId}': {
+          get: noteOperation(
+            ['never verse text', SAME_404],
+            [studyId, uuidParam('nodeId')],
+            200,
+            'The node',
+            'NodeResponse',
+          ),
+          patch: noteOperation(
+            [
+              'type never changes',
+              'NODE_NOT_EDITABLE',
+              'NODE_UNCHANGED',
+              'observation_updated',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId, uuidParam('nodeId')],
+            200,
+            'The node as saved, without its text',
+            'NodeMutationResponse',
+            'UpdateNodeRequest',
+          ),
+        },
         '/bible/translations': {
           get: {
             description:
@@ -756,6 +805,12 @@ describe('buildOpenApiDocument', () => {
       'AnnotationStateRequest',
       'AnnotationMutationResponse',
       'AnnotationListResponse',
+      'CreateNodeRequest',
+      'CreateNodeResponse',
+      'UpdateNodeRequest',
+      'NodeMutationResponse',
+      'NodeListResponse',
+      'NodeResponse',
       'NoteBlock',
       'NoteListItem',
     ]);

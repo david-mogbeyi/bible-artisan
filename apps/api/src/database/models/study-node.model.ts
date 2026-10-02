@@ -7,24 +7,28 @@ import {
   Table,
   UpdatedAt,
 } from 'sequelize-typescript';
-import type { QUESTION_STATUSES } from '@bible-artisan/contracts';
-
-/** CHECK-constrained in the migration (PRD section 8: the six MVP node types). */
-export type StudyNodeType =
-  'scripture' | 'question' | 'observation' | 'thought' | 'conclusion' | 'source';
-
-export type QuestionStatus = (typeof QUESTION_STATUSES)[number];
+import type {
+  ConclusionStatus,
+  NodeOrigin,
+  ObservationKind,
+  QuestionStatus,
+  SourceCitation,
+  StudyNodeType,
+} from '@bible-artisan/contracts';
 
 /**
  * Hand-written model class for `study_node`. Carries `study_id` + `owner_id` with a composite FK
  * to `study(owner_id, id)` declared only in the migration's raw SQL (Sequelize's association API
  * cannot express composite FKs — ADR 0001's amendment). CHECKs in the migrations pin `type` to
- * the six MVP types and keep the Question and Scripture columns to their own type (BIB-19);
- * Observation/Conclusion/Source columns land with the tickets that add them. Nullability and
- * defaults mirror the migration.
+ * the six MVP types and keep each type's columns to that type (BIB-19, BIB-25): Question and
+ * Conclusion `title` + status, Observation `body` + `observation_kind`, Thought `body`, Source
+ * `title` + `payload_json`, Scripture `scripture_reference_id`. Nullability and defaults mirror
+ * the migrations.
  *
- * `type` is immutable after creation: enforced here by never exposing an update path for it (no
- * node-update endpoint exists yet — Graph's mutation ticket owns that and must preserve this).
+ * `type`, `study_id`, `owner_id`, `origin` and `scripture_reference_id` are immutable after
+ * creation: no API edits them, and the `study_node_identity_immutable` trigger refuses any
+ * UPDATE that would (BIB-25). Graph owns node creation and edits; Study still creates the roots
+ * at study creation and BIB-20's new main question.
  */
 @Table({ tableName: 'study_node', timestamps: true })
 export class StudyNode extends Model {
@@ -41,9 +45,35 @@ export class StudyNode extends Model {
   @Column({ type: DataType.TEXT, allowNull: false })
   declare type: StudyNodeType;
 
-  /** A Question node's statement (required for questions, 1–4,000 characters). */
+  /** Server-set provenance (PRD section 16): never from a client. No default in the database. */
+  @Column({ type: DataType.TEXT, allowNull: false })
+  declare origin: NodeOrigin;
+
+  /**
+   * A Question's or Conclusion's statement (1–4,000 characters) or a Source's title (1–200);
+   * NULL for every other type.
+   */
   @Column({ type: DataType.TEXT, allowNull: true })
   declare title: string | null;
+
+  /** Observation and Thought text (1–10,000 characters, plain); NULL otherwise. */
+  @Column({ type: DataType.TEXT, allowNull: true })
+  declare body: string | null;
+
+  /** On, and only on, Observation nodes. */
+  @Column({ field: 'observation_kind', type: DataType.TEXT, allowNull: true })
+  declare observationKind: ObservationKind | null;
+
+  /** On, and only on, Conclusion nodes (`tentative` at creation; transitions are BIB-30's). */
+  @Column({ field: 'conclusion_status', type: DataType.TEXT, allowNull: true })
+  declare conclusionStatus: ConclusionStatus | null;
+
+  /**
+   * A Source's citation without its title (which is `title`): `sourceSchema`'s output, only the
+   * fields given. NULL for every other type.
+   */
+  @Column({ field: 'payload_json', type: DataType.JSONB, allowNull: true })
+  declare payloadJson: Omit<SourceCitation, 'title'> | null;
 
   /** A Question node's user-owned status (required for questions); only the user changes it. */
   @Column({ field: 'question_status', type: DataType.TEXT, allowNull: true })

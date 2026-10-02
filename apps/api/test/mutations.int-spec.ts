@@ -29,6 +29,7 @@ import { ThreadService } from '../src/modules/thread/thread.service';
 import { createTestApp } from './app';
 import { NOT_FOUND } from './support/envelopes';
 import { MutationProbeModule } from './support/mutation-probe';
+import { THOUGHT } from './support/nodes';
 
 interface Owner {
   user: User;
@@ -148,7 +149,7 @@ describe('revision-safe, event-atomic mutations', () => {
     return StudyNode.create({
       studyId: study.id,
       ownerId: owner.user.id,
-      type: 'thought',
+      ...THOUGHT,
       deletedAt,
     });
   }
@@ -792,7 +793,7 @@ describe('revision-safe, event-atomic mutations', () => {
         execute(alice, study.id, async (m) => {
           await minimalWork(m);
           // No `{ transaction }`: it must still join the mutation transaction.
-          await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, type: 'thought' });
+          await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, ...THOUGHT });
           await db.query(`UPDATE study SET title = 'Stray' WHERE id = $1`, { bind: [study.id] });
           throw new Error('work failed after a stray write');
         }),
@@ -805,7 +806,7 @@ describe('revision-safe, event-atomic mutations', () => {
     it('commits a write inside work that did not pass the transaction together with the mutation', async () => {
       const study = await newStudy(alice);
       await execute(alice, study.id, async (m) => {
-        await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, type: 'thought' });
+        await StudyNode.create({ studyId: study.id, ownerId: alice.user.id, ...THOUGHT });
         const [row] = await db.query<{ same: boolean }>(
           // Same transaction ⇒ it sees the uncommitted node and shares the backend's xid.
           `SELECT count(*) = 1 AS same FROM study_node WHERE study_id = $1`,
@@ -1038,7 +1039,7 @@ describe('revision-safe, event-atomic mutations', () => {
     it('creates the study at revision 1 and content revision 1 with event 1, needing no revision check', async () => {
       const title = `New ${randomUUID()}`;
       const result = await create(title, async (m) => {
-        const node = await m.createChild(StudyNode, { type: 'thought' });
+        const node = await m.createChild(StudyNode, THOUGHT);
         const event = await m.appendEvent({ eventType: 'study_created' });
         return {
           status: 201,
@@ -1073,13 +1074,13 @@ describe('revision-safe, event-atomic mutations', () => {
       const title = `Rolled back ${randomUUID()}`;
       await expect(
         create(title, async (m) => {
-          await m.createChild(StudyNode, { type: 'thought' });
+          await m.createChild(StudyNode, THOUGHT);
           return { status: 201, body: {} };
         }),
       ).rejects.toThrow('work appended no StudyEvent');
       await expect(
         create(title, async (m) => {
-          await m.createChild(StudyNode, { type: 'thought' });
+          await m.createChild(StudyNode, THOUGHT);
           await m.appendEvent({ eventType: 'study_created' });
           throw new Error('work failed after writing');
         }),

@@ -9,6 +9,7 @@ import {
   DependencyUnavailableError,
   IdempotencyKeyReusedError,
   NotFoundError,
+  NodeRuleError,
   NoteRuleError,
   NoteTooLongError,
   OtpError,
@@ -156,7 +157,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof TagLimitExceededError ||
       exception instanceof StudyLifecycleError ||
       exception instanceof NoteRuleError ||
-      exception instanceof AnnotationRuleError
+      exception instanceof AnnotationRuleError ||
+      exception instanceof NodeRuleError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,

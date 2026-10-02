@@ -115,6 +115,7 @@ export class StudiesService {
         const scripture = reference
           ? await m.createChild(StudyNode, {
               type: 'scripture',
+              origin: 'scripture',
               scriptureReferenceId: reference.id,
             })
           : null;
@@ -123,6 +124,7 @@ export class StudiesService {
             ? null
             : await m.createChild(StudyNode, {
                 type: 'question',
+                origin: 'user',
                 title: body.question,
                 questionStatus: 'open',
               });
@@ -254,6 +256,7 @@ export class StudiesService {
         if (target && 'text' in target) {
           const node = await m.createChild(StudyNode, {
             type: 'question',
+            origin: 'user',
             title: target.text,
             questionStatus: 'open',
           });

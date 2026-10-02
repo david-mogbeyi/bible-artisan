@@ -22,6 +22,8 @@ const LIFECYCLE_MIGRATION = '20261001194710_add_study_lifecycle.ts';
 const NOTE_MIGRATION = '20261001222927_create_note.ts';
 /** BIB-24's highlights and note Scripture targets migration. */
 const ANNOTATION_MIGRATION = '20261001235033_create_annotation.ts';
+/** BIB-25's typed graph nodes migration. */
+const TYPED_NODES_MIGRATION = '20261002011330_add_typed_nodes.ts';
 
 const DOMAIN_TABLES = [
   'annotation',
@@ -119,12 +121,12 @@ describe('migration reversibility', () => {
                 = (${firstVerse})
          RETURNING id, owner_id, starting_reference_id
        ), q AS (
-         INSERT INTO study_node (study_id, owner_id, type, title, question_status)
-         SELECT s.id, s.owner_id, 'question', 'Seeded question', 'open' FROM s
+         INSERT INTO study_node (study_id, owner_id, type, origin, title, question_status)
+         SELECT s.id, s.owner_id, 'question', 'user', 'Seeded question', 'open' FROM s
          RETURNING id, study_id, owner_id
        ), p AS (
-         INSERT INTO study_node (study_id, owner_id, type, scripture_reference_id)
-         SELECT s.id, s.owner_id, 'scripture', s.starting_reference_id FROM s
+         INSERT INTO study_node (study_id, owner_id, type, origin, scripture_reference_id)
+         SELECT s.id, s.owner_id, 'scripture', 'scripture', s.starting_reference_id FROM s
        ), b AS (
          INSERT INTO study_branch (study_id, owner_id, root_node_id)
          SELECT q.study_id, q.owner_id, q.id FROM q
@@ -226,12 +228,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-24's highlights) is the first `down` toward
-      // the corpus and refuses before anything commits, though this study has no highlight.
+      // No opt-in at all: the newest migration (BIB-25's typed nodes) is the first `down` toward
+      // the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: 'annotation drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        message: 'typed nodes drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -313,6 +315,114 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies typed nodes (BIB-25) only with the study-data opt-in; the columns, constraints and identity trigger come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const nodeSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid = 'study_node'::regclass AND contype = 'c'
+         UNION ALL
+         SELECT tgname FROM pg_trigger WHERE tgname = 'study_node_identity_immutable'
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    const nodes = async () =>
+      db.query(
+        `SELECT type, title, question_status, scripture_reference_id IS NOT NULL AS has_reference
+           FROM study_node WHERE owner_id = $1 ORDER BY type`,
+        { bind: [userId], type: QueryTypes.SELECT },
+      );
+    try {
+      // One node of each new type, and a note attached to the thought.
+      await db.query(
+        `WITH s AS (SELECT id, owner_id FROM study WHERE owner_id = $1),
+              t AS (
+                INSERT INTO study_node (study_id, owner_id, type, origin, body)
+                SELECT id, owner_id, 'thought', 'user', 'Seeded thought' FROM s
+                RETURNING id, study_id, owner_id
+              ),
+              o AS (
+                INSERT INTO study_node (study_id, owner_id, type, origin, body, observation_kind)
+                SELECT id, owner_id, 'observation', 'user', 'Seeded', 'interpretation' FROM s
+              ),
+              c AS (
+                INSERT INTO study_node (study_id, owner_id, type, origin, title, conclusion_status)
+                SELECT id, owner_id, 'conclusion', 'user', 'Seeded', 'tentative' FROM s
+              ),
+              src AS (
+                INSERT INTO study_node (study_id, owner_id, type, origin, title, payload_json)
+                SELECT id, owner_id, 'source', 'external', 'Seeded', '{"kind":"book","locator":"p. 1"}'
+                  FROM s
+              )
+         INSERT INTO note (study_id, owner_id, target_node_id, rich_text_json, plain_text, search_text)
+         SELECT study_id, owner_id, id, '{"type":"doc","content":[{"type":"paragraph"}]}', '', ''
+           FROM t`,
+        { bind: [userId] },
+      );
+      const schemaBefore = await nodeSchema();
+      expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'study_node_body_check',
+        'study_node_conclusion_check',
+        'study_node_identity_immutable',
+        'study_node_observation_check',
+        'study_node_origin_check',
+        'study_node_question_check',
+        'study_node_scripture_check',
+        'study_node_source_check',
+        'study_node_title_check',
+        'study_node_type_check',
+      ]);
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(TYPED_NODES_MIGRATION);
+      const nodesBefore = await nodes();
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: 'typed nodes drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)',
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect([await recordedMigrations(db), await nodes()]).toStrictEqual([before, nodesBefore]);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(
+        (await columns(['study_node'])).filter((name) =>
+          /origin|body|observation_kind|conclusion_status|payload_json/.test(name),
+        ),
+      ).toStrictEqual([]);
+      // The new types' rows went with their content; the note stays, on the study.
+      expect(await nodes()).toStrictEqual([
+        {
+          type: 'question',
+          title: 'Seeded question',
+          question_status: 'open',
+          has_reference: false,
+        },
+        { type: 'scripture', title: null, question_status: null, has_reference: true },
+      ]);
+      expect(
+        await db.query(`SELECT target_node_id FROM note WHERE owner_id = $1`, {
+          bind: [userId],
+          type: QueryTypes.SELECT,
+        }),
+      ).toStrictEqual([{ target_node_id: null }]);
+
+      await migrator.up();
+      expect(await nodeSchema()).toStrictEqual(schemaBefore);
+      expect(
+        await db.query(`SELECT type, origin FROM study_node WHERE owner_id = $1 ORDER BY type`, {
+          bind: [userId],
+          type: QueryTypes.SELECT,
+        }),
+      ).toStrictEqual([
+        { type: 'question', origin: 'user' },
+        { type: 'scripture', origin: 'scripture' },
+      ]);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies highlights and note Scripture targets (BIB-24) only with the study-data opt-in; the table, columns and constraints come back', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
@@ -353,6 +463,8 @@ describe('migration reversibility', () => {
         'note_target_node_fk',
         'note_target_reference_id_fkey',
       ]);
+      // Past BIB-25's step (which refuses first, from latest), the highlights' own guard refuses.
+      await withStudyDataDropAllowed(() => migrator.down({ to: TYPED_NODES_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(ANNOTATION_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -417,7 +529,8 @@ describe('migration reversibility', () => {
         'note_version_note_id_version_number_key',
       ]);
       const before = await recordedMigrations(db);
-      // Past BIB-24's step (which refuses first, from latest), note's own guard refuses too.
+      // Past BIB-25's and BIB-24's steps (which refuse first, from latest), note's own guard
+      // refuses too.
       await withStudyDataDropAllowed(() => migrator.down({ to: ANNOTATION_MIGRATION }));
       const refused = await migrator.down().catch((e: unknown) => e);
       expect((refused as { cause?: unknown }).cause).toMatchObject({
@@ -425,7 +538,7 @@ describe('migration reversibility', () => {
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(
-        before.filter((name) => name !== ANNOTATION_MIGRATION),
+        before.filter((name) => name !== ANNOTATION_MIGRATION && name !== TYPED_NODES_MIGRATION),
       );
       expect(
         await db.query('SELECT 1 FROM note_version', { type: QueryTypes.SELECT }),

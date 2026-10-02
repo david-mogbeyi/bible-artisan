@@ -293,6 +293,13 @@ describe('study editing (BIB-20)', () => {
       // The original question node is untouched.
       const originalNode = await StudyNode.findByPk(questionNodeId, { rejectOnEmpty: true });
       expect([originalNode.title, originalNode.revision]).toStrictEqual(['What is conscience?', 1]);
+      // BIB-25: the new main question is the user's own (origin set by the server).
+      const newNode = await StudyNode.findByPk(newNodeId ?? '', { rejectOnEmpty: true });
+      expect([newNode.type, newNode.origin, newNode.questionStatus]).toStrictEqual([
+        'question',
+        'user',
+        'open',
+      ]);
 
       const restored = await patch(alice, studyId, {
         expectedRevision: 2,

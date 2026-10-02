@@ -15,6 +15,7 @@ import { StudyAccessService } from '../src/modules/study/study-access.service';
 import { createTestApp } from './app';
 import { NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
 import { OwnerIsolationProbeModule } from './support/owner-isolation-probe';
+import { THOUGHT } from './support/nodes';
 
 interface Owner {
   user: User;
@@ -68,18 +69,18 @@ describe('owner isolation for private study-scoped resources', () => {
     aliceNode = await StudyNode.create({
       studyId: aliceStudy.id,
       ownerId: alice.user.id,
-      type: 'thought',
+      ...THOUGHT,
     });
     aliceDeletedNode = await StudyNode.create({
       studyId: aliceStudy.id,
       ownerId: alice.user.id,
-      type: 'thought',
+      ...THOUGHT,
       deletedAt: new Date(),
     });
     bobNode = await StudyNode.create({
       studyId: bobStudy.id,
       ownerId: bob.user.id,
-      type: 'thought',
+      ...THOUGHT,
     });
   });
 

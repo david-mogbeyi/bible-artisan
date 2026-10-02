@@ -15,6 +15,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useId, useRef, useState } from 'react';
 import { ApiError } from '@/lib/api-client';
 import { classifyError } from '@/lib/api-errors';
+import { listNodes, nodeOptionText, nodesQueryKey } from '@/lib/nodes';
 import {
   changeNoteState,
   createNote,
@@ -37,7 +38,7 @@ export const NOTES_COPY = {
   createConflict:
     'This study changed somewhere else, so the note was not created. Reload, then try again.',
   createUnknown: "Couldn't confirm the note was created. Retry won't create it twice.",
-  createTarget: "That question isn't part of this study any more. Reload the study.",
+  createTarget: "That node isn't part of this study any more. Reload the study.",
   createLimit: 'This study has the most notes it can hold. Move some to the note trash first.',
   restoreLimit:
     'This study has the most notes it can hold, so the note stays in the trash. Move another note to the note trash first.',
@@ -49,8 +50,6 @@ export const NOTES_COPY = {
   readOnly: 'This study is read-only, so its notes are too.',
 } as const;
 
-type Target = 'study' | 'main';
-
 interface FrozenCreate {
   key: string;
   body: CreateNoteRequest;
@@ -59,7 +58,7 @@ interface FrozenCreate {
 /**
  * The study's notes (BIB-23; PRD sections 11, 15): the live notes, notes whose question or passage
  * was deleted (orphaned-note review, FR-NOTE-002), and the note trash. New notes attach to the
- * study or its main question. One note is open at a time, in the editor; a read-only study shows
+ * study or to any of its live nodes (BIB-25), listed from the same query as the Nodes section. One note is open at a time, in the editor; a read-only study shows
  * its notes without one. Note text appears only in the page, never in the URL or browser storage.
  */
 export function NotesPanel({
@@ -77,7 +76,8 @@ export function NotesPanel({
   const [showTrash, setShowTrash] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [freshId, setFreshId] = useState<string | null>(null);
-  const [target, setTarget] = useState<Target>('study');
+  /** "study", or the id of a live node of the study. */
+  const [target, setTarget] = useState('study');
   const [creating, setCreating] = useState(false);
   const [createProblem, setCreateProblem] = useState<{ text: string; retry: boolean } | null>(null);
   const frozenCreate = useRef<FrozenCreate | null>(null);
@@ -96,6 +96,14 @@ export function NotesPanel({
     enabled,
   });
   const live = useQuery(listOf('active'));
+  const nodes = useQuery({
+    queryKey: nodesQueryKey(study.id),
+    queryFn: () => listNodes(study.id),
+    enabled: editable,
+  });
+  // A node that left the list (deleted elsewhere) falls back to the study.
+  const attachTo =
+    target === 'study' || nodes.data?.items.some((node) => node.id === target) ? target : 'study';
   const trashed = useQuery(listOf('trashed', showTrash));
   const open = useQuery({
     queryKey: noteQueryKey(study.id, openId ?? ''),
@@ -157,9 +165,7 @@ export function NotesPanel({
         body: {
           expectedRevision: study.revision,
           content: EMPTY_NOTE_DOCUMENT,
-          ...(target === 'main' && study.mainQuestion
-            ? { targetNodeId: study.mainQuestion.nodeId }
-            : {}),
+          ...(attachTo !== 'study' ? { targetNodeId: attachTo } : {}),
         },
       };
     }
@@ -275,12 +281,17 @@ export function NotesPanel({
             Attach to
             <select
               id={ids.target}
-              value={target}
-              onChange={(event) => setTarget(event.target.value as Target)}
+              value={attachTo}
+              onChange={(event) => setTarget(event.target.value)}
               className="rounded border border-muted bg-canvas px-2 py-1"
             >
               <option value="study">This study</option>
-              {study.mainQuestion ? <option value="main">Main question</option> : null}
+              {(nodes.data?.items ?? []).map((node) => (
+                <option key={node.id} value={node.id}>
+                  {nodeOptionText(node)}
+                  {node.id === study.mainQuestion?.nodeId ? ' (main question)' : ''}
+                </option>
+              ))}
             </select>
           </label>
           <button
