@@ -346,6 +346,8 @@ describe('graph snapshot and positions (BIB-28)', () => {
           {
             id: created.branchId,
             rootNodeId: question,
+            memberNodeIds: [],
+            revision: 1,
             createdAt: expect.stringMatching(ISO) as string,
           },
         ],

@@ -76,6 +76,13 @@ import {
   updateEdgeRequestSchema,
 } from './edge';
 import {
+  branchMutationResponseSchema,
+  createBranchRequestSchema,
+  createBranchResponseSchema,
+  MAX_BRANCH_MEMBER_CHANGES,
+  updateBranchMembersRequestSchema,
+} from './branch';
+import {
   graphResponseSchema,
   MAX_POSITIONS_PER_REQUEST,
   savePositionsRequestSchema,
@@ -218,6 +225,12 @@ const EDGE_OWNERSHIP =
 
 /** What every edge mutation (BIB-27) shares. */
 const EDGE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent (ids and enums only) commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. The response never carries the note. ${EDGE_OWNERSHIP}`;
+
+const BRANCH_OWNERSHIP =
+  "Another user's, an absent and a malformed study, branch or node id, a branch or node of another study, a deleted node, and a study trashed 30 or more days ago are the same 404.";
+
+/** What both branch mutations (BIB-60) share. */
+const BRANCH_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. Branches are navigation grouping, not content: contentRevision never moves. The change and its StudyEvent (ids only) commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${BRANCH_OWNERSHIP}`;
 
 /** What every node mutation (BIB-25) shares. */
 const NODE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NODE_OWNERSHIP}`;
@@ -749,9 +762,33 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/studies/{studyId}/branches': {
+        post: {
+          description: `Starts a branch (PRD section 8: a navigation grouping rooted in a question or passage) at rootNodeId, a live Question or Scripture node of the study: any other type is 422 BRANCH_ROOT_TYPE_NOT_ALLOWED, and a node that already roots a branch (the study's initial branch included) is 422 BRANCH_EXISTS. The branch starts with no members at revision 1 and has no label: it is named by its root. Starting a branch is a study change: expectedRevision is the study's revision (studyRevision in the response). One thread-visible branch_created event. ${BRANCH_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam],
+          requestBody: jsonBody('CreateBranchRequest'),
+          responses: {
+            201: jsonResponse('The new branch', 'CreateBranchResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/branches/{branchId}/members': {
+        patch: {
+          description: `Adds and/or removes member nodes of a branch: add and remove each hold at most ${MAX_BRANCH_MEMBER_CHANGES} live nodes of the study, no node twice in a list and none in both, at least one id overall (400). A node can belong to many branches; membership never adds, removes or implies a relationship. Adding the root or a member, and removing a non-member or the root, change nothing; when nothing changes at all the answer is 422 BRANCH_UNCHANGED with nothing written. expectedRevision is the branch's revision: the study revision never moves, so a membership change never conflicts with a node or relationship edit. Answers the branch with its full live member list. One internal branch_members_changed event listing the net change. ${BRANCH_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('branchId')],
+          requestBody: jsonBody('UpdateBranchMembersRequest'),
+          responses: {
+            200: jsonResponse('The branch as changed', 'BranchMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/studies/{studyId}/graph': {
         get: {
-          description: `Returns one consistent snapshot of the study's graph, read in one transaction: every live node (exactly the GET /nodes items), every live edge between live nodes without its note, the study's branches (id and root), the stored positions of live nodes, contentRevision and viewRevision (the layout's revision, 1 before the first position save). Library-independent metadata only. Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
+          description: `Returns one consistent snapshot of the study's graph, read in one transaction: every live node (exactly the GET /nodes items), every live edge between live nodes without its note, the study's branches (id, root, revision and live member node ids, oldest membership first), the stored positions of live nodes, contentRevision and viewRevision (the layout's revision, 1 before the first position save). Library-independent metadata only. Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
           security: sessionCookie,
           parameters: [studyIdParam],
           responses: {
@@ -856,6 +893,10 @@ function buildDocument(): OpenApiDocument {
         EdgeStateRequest: toInputSchema(edgeStateRequestSchema),
         EdgeMutationResponse: toSchema(edgeMutationResponseSchema),
         EdgeListResponse: toSchema(edgeListResponseSchema),
+        CreateBranchRequest: toInputSchema(createBranchRequestSchema),
+        CreateBranchResponse: toSchema(createBranchResponseSchema),
+        UpdateBranchMembersRequest: toInputSchema(updateBranchMembersRequestSchema),
+        BranchMutationResponse: toSchema(branchMutationResponseSchema),
         GraphResponse: toSchema(graphResponseSchema),
         SavePositionsRequest: toInputSchema(savePositionsRequestSchema),
         SavePositionsResponse: toSchema(savePositionsResponseSchema),

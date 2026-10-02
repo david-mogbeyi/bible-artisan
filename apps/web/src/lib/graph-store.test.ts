@@ -57,3 +57,32 @@ describe('graph view store: selection history and view mode (BIB-29)', () => {
     expect(createGraphViewStore().getState().viewMode).toBe('graph');
   });
 });
+
+describe('graph view store: branch view options (BIB-60)', () => {
+  it('shows one branch at a time, toggles collapse, and forgets branches no longer in the snapshot', () => {
+    const store = createGraphViewStore();
+    expect([store.getState().soloBranchId, store.getState().collapsedBranchIds]).toStrictEqual([
+      null,
+      [],
+    ]);
+    store.getState().setSoloBranch('a');
+    store.getState().setSoloBranch('b');
+    store.getState().toggleCollapsed('a');
+    store.getState().toggleCollapsed('c');
+    store.getState().toggleCollapsed('a');
+    store.getState().toggleCollapsed('d');
+    expect([store.getState().soloBranchId, store.getState().collapsedBranchIds]).toStrictEqual([
+      'b',
+      ['c', 'd'],
+    ]);
+    const before = store.getState();
+    store.getState().keepBranches(['b', 'c', 'd']);
+    // Nothing to drop: the state object is untouched (no re-render).
+    expect(store.getState()).toBe(before);
+    store.getState().keepBranches(['c']);
+    expect([store.getState().soloBranchId, store.getState().collapsedBranchIds]).toStrictEqual([
+      null,
+      ['c'],
+    ]);
+  });
+});

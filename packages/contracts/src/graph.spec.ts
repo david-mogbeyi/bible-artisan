@@ -120,7 +120,7 @@ describe('graphResponseSchema', () => {
       },
     ],
     edges: [{ id: A, sourceNodeId: A, targetNodeId: B, type: 'supports', origin: 'user' }],
-    branches: [{ id: A, rootNodeId: B, createdAt: T }],
+    branches: [{ id: A, rootNodeId: B, memberNodeIds: [A], revision: 2, createdAt: T }],
     positions: [{ nodeId: B, x: 1.5, y: -2 }],
   };
 

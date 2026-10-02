@@ -71,7 +71,15 @@ describe('toFlowNodes / toFlowEdges', () => {
       node(3, 'scripture', { label: 'Romans 9:1' }),
     ],
     edges: [edge(1, 2, 1, 'raises_question'), edge(2, 2, 3, 'parallels')],
-    branches: [{ id: id(700), rootNodeId: id(1), createdAt: '2026-10-02T10:00:00.000Z' }],
+    branches: [
+      {
+        id: id(700),
+        rootNodeId: id(1),
+        memberNodeIds: [],
+        revision: 1,
+        createdAt: '2026-10-02T10:00:00.000Z',
+      },
+    ],
   });
   const all = new Set([id(1), id(2), id(3)]);
 
@@ -307,11 +315,151 @@ describe('arrange', () => {
   });
 });
 
+const T0 = '2026-10-02T09:00:00.000Z';
+const branch = (n: number, root: number, members: number[], createdAt = T0) => ({
+  id: id(800 + n),
+  rootNodeId: id(root),
+  memberNodeIds: members.map(id),
+  revision: 1,
+  createdAt,
+});
+
+describe('branch view options (BIB-60)', () => {
+  // Branch A: root 1, members 3, 4, 5. Branch B: root 2, members 5, 6. Node 7 is in none.
+  // Node 2 (B's root) is also a member of A.
+  const g = graph({
+    nodes: [
+      node(1, 'question'),
+      node(2, 'question'),
+      node(3),
+      node(4, 'source'),
+      node(5),
+      node(6),
+      node(7),
+    ],
+    edges: [edge(1, 3, 1), edge(2, 5, 2), edge(3, 6, 7)],
+    branches: [branch(1, 1, [3, 4, 5, 2]), branch(2, 2, [5, 6], '2026-10-02T09:30:00.000Z')],
+  });
+  const A = id(801);
+  const B = id(802);
+  const sorted = (set: ReadonlySet<string>) => [...set].sort();
+
+  it('shows only one branch (root and members), intersected with type filters and focus, and counts the rest', () => {
+    const solo = visibility(g, { hiddenTypes: NONE, focus: null, soloBranchId: B });
+    expect(sorted(solo.visible)).toStrictEqual([id(2), id(5), id(6)]);
+    expect(visibilityText(7, solo, false, 'Branch: Question: Node 2')).toBe(
+      'Showing 3 of 7 nodes · 4 outside Branch: Question: Node 2',
+    );
+    const filtered = visibility(g, {
+      hiddenTypes: new Set(['source']),
+      focus: null,
+      soloBranchId: A,
+    });
+    expect(sorted(filtered.visible)).toStrictEqual([id(1), id(2), id(3), id(5)]);
+    expect([filtered.outsideBranch, filtered.hiddenByFilters]).toStrictEqual([2, 1]);
+    const focused = visibility(g, {
+      hiddenTypes: NONE,
+      focus: { nodeId: id(1), depth: 1 },
+      soloBranchId: A,
+    });
+    // One hop from 1 is 3 only (7 is two hops and outside A anyway).
+    expect(sorted(focused.visible)).toStrictEqual([id(1), id(3)]);
+    // A branch no longer in the snapshot is ignored: everything shows.
+    expect(
+      visibility(g, { hiddenTypes: NONE, focus: null, soloBranchId: id(899) }).visible.size,
+    ).toBe(7);
+  });
+
+  it('collapses only exclusive members: a node shared with an open branch and every root stay; a node in two collapsed branches hides; the root counts what it hides', () => {
+    const one = visibility(g, { hiddenTypes: NONE, focus: null, collapsedBranchIds: [A] });
+    // 5 is shared with open B, 2 roots B: both stay. 3 and 4 hide.
+    expect(sorted(one.visible)).toStrictEqual([id(1), id(2), id(5), id(6), id(7)]);
+    expect(one.collapsedByRoot).toStrictEqual(new Map([[id(1), 2]]));
+    expect(visibilityText(7, one, false)).toBe('Showing 5 of 7 nodes · 2 in collapsed branches');
+
+    const both = visibility(g, { hiddenTypes: NONE, focus: null, collapsedBranchIds: [A, B] });
+    // 5 is now in two collapsed branches: hidden, and counted on both roots. Roots 1 and 2 stay.
+    expect(sorted(both.visible)).toStrictEqual([id(1), id(2), id(7)]);
+    expect(both.collapsedByRoot).toStrictEqual(
+      new Map([
+        [id(1), 3],
+        [id(2), 2],
+      ]),
+    );
+    expect(both.hiddenByCollapse).toBe(4);
+    // Edges touching hidden nodes are not drawn.
+    expect(toFlowEdges(g, both.visible)).toStrictEqual([]);
+    // The "+N hidden" count reaches the canvas node's data and accessible name.
+    const data = nodeData(g, both.collapsedByRoot);
+    expect(data.get(id(1))?.hiddenCount).toBe(3);
+    const positions = Object.fromEntries(g.nodes.map((n, i) => [n.id, { x: i * 300, y: 0 }]));
+    const [root] = toFlowNodes(g.nodes, data, positions, both.visible, new Set(), false);
+    expect(root?.ariaLabel).toBe('Question: Node 1, Open, 3 hidden');
+  });
+
+  it('places an unpositioned member beside its oldest branch root, deterministically and without overlap; other nodes keep the rows rule', () => {
+    const placed = {
+      [id(1)]: { x: 1000, y: 1000 },
+      [id(2)]: { x: -500, y: -500 },
+      // A node in the first slot right of root 1, so the member skips it.
+      [id(7)]: { x: 1000 + NODE_WIDTH + 40, y: 1000 },
+    };
+    const first = fallbackPositions(g.nodes, placed, {}, g.branches);
+    expect(
+      fallbackPositions([...g.nodes].reverse(), placed, {}, [...g.branches].reverse()),
+    ).toStrictEqual(first);
+    // 3, 4, 5 are members of A (the oldest branch of 5 too); 6 only of B.
+    expect(first).toStrictEqual({
+      [id(3)]: { x: 1000 + 2 * (NODE_WIDTH + 40), y: 1000 },
+      [id(4)]: { x: 1000 + 3 * (NODE_WIDTH + 40), y: 1000 },
+      [id(5)]: { x: 1000 + 4 * (NODE_WIDTH + 40), y: 1000 },
+      [id(6)]: { x: -500 + (NODE_WIDTH + 40), y: -500 },
+    });
+    const boxes = [...Object.values(placed), ...Object.values(first)];
+    for (let i = 0; i < boxes.length; i += 1) {
+      for (let j = i + 1; j < boxes.length; j += 1) {
+        const [a, b] = [boxes[i], boxes[j]];
+        if (!a || !b) continue;
+        expect(Math.abs(a.x - b.x) < NODE_WIDTH && Math.abs(a.y - b.y) < NODE_HEIGHT).toBe(false);
+      }
+    }
+    // A full row beside the root wraps to the next row down.
+    const crowded = graph({
+      nodes: Array.from({ length: 7 }, (_, i) => node(i + 1)),
+      branches: [branch(9, 1, [2, 3, 4, 5, 6, 7])],
+    });
+    const wrapped = fallbackPositions(
+      crowded.nodes,
+      { [id(1)]: { x: 0, y: 0 } },
+      {},
+      crowded.branches,
+    );
+    expect(wrapped[id(7)]).toStrictEqual({ x: NODE_WIDTH + 40, y: NODE_HEIGHT + 40 });
+  });
+
+  it('arranges a branch around its root: the root keeps its position and only branch nodes are returned', () => {
+    const current = Object.fromEntries(g.nodes.map((n, i) => [n.id, { x: i * 37, y: 500 - i }]));
+    const ids = [id(1), id(3), id(4), id(5), id(2)];
+    const proposed = arrange(ids, g, current, id(1));
+    expect(Object.keys(proposed).sort()).toStrictEqual([...ids].sort());
+    expect(proposed[id(1)]).toStrictEqual(current[id(1)]);
+    expect(arrange([...ids].reverse(), g, current, id(1))).toStrictEqual(proposed);
+  });
+});
+
 describe('focusStart', () => {
   const many = Array.from({ length: 501 }, (_, i) => node(i + 1, i === 9 ? 'question' : 'thought'));
 
   it('opens a study over 500 nodes on the main question, else the oldest branch root, else the oldest node', () => {
-    const branches = [{ id: id(800), rootNodeId: id(20), createdAt: '2026-10-02T10:00:00.000Z' }];
+    const branches = [
+      {
+        id: id(800),
+        rootNodeId: id(20),
+        memberNodeIds: [],
+        revision: 1,
+        createdAt: '2026-10-02T10:00:00.000Z',
+      },
+    ];
     expect(focusStart(graph({ nodes: many, branches }), id(10))).toBe(id(10));
     expect(focusStart(graph({ nodes: many, branches }), null)).toBe(id(20));
     expect(focusStart(graph({ nodes: many }), id(77777))).toBe(id(60));

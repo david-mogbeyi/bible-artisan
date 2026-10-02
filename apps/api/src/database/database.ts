@@ -14,6 +14,7 @@ import { StudyEdge } from './models/study-edge.model';
 import { StudyNodePosition } from './models/study-node-position.model';
 import { StudyViewState } from './models/study-view-state.model';
 import { StudyBranch } from './models/study-branch.model';
+import { StudyBranchMember } from './models/study-branch-member.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudyNode } from './models/study-node.model';
 import { StudyTag } from './models/study-tag.model';
@@ -89,6 +90,7 @@ export function createDatabase(
       StudyEdge,
       StudyViewState,
       StudyNodePosition,
+      StudyBranchMember,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous
