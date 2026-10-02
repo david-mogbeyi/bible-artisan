@@ -27,7 +27,8 @@ function defaultViewMode(): GraphViewMode {
  * One study page's canvas interaction state (BIB-28, AGENTS.md: "canvas selection, drafts, and
  * the pending-save queue go in a lightweight client store"). It holds no server data and no text:
  * node ids, view options and coordinates only, in memory for the page session (never in the URL
- * or browser storage). Saved zoom, filters and selection are BIB-34's.
+ * or browser storage). Saved zoom, filters, selection, collapsed branches and show-only are
+ * BIB-34's.
  */
 export interface GraphViewState {
   /**
@@ -51,6 +52,10 @@ export interface GraphViewState {
   viewMode: GraphViewMode;
   hiddenTypes: ReadonlySet<StudyNodeType>;
   focus: FocusOption | null;
+  /** The branch shown alone (BIB-60), or null for every branch. Ids only, never a name. */
+  soloBranchId: string | null;
+  /** Collapsed branches (BIB-60), in the order they were collapsed. */
+  collapsedBranchIds: string[];
   /** Positions moved or arranged in this session, over the snapshot's (saved or not yet). */
   localPositions: Positions;
   /** Node ids whose local position still has to be saved (the pending-save queue), oldest first. */
@@ -69,6 +74,11 @@ export interface GraphViewState {
   setViewMode: (mode: GraphViewMode) => void;
   toggleType: (type: StudyNodeType) => void;
   setFocus: (focus: FocusOption | null) => void;
+  /** Shows only this branch (null: every branch). Only one at a time. */
+  setSoloBranch: (branchId: string | null) => void;
+  toggleCollapsed: (branchId: string) => void;
+  /** Drops show-only and collapsed ids that are no longer branches of the snapshot. */
+  keepBranches: (branchIds: readonly string[]) => void;
   /**
    * Places nodes locally and queues them for saving. `together` (an arrangement, at most one
    * request's worth) queues them as one group, after everything queued before.
@@ -97,6 +107,8 @@ export function createGraphViewStore(): GraphViewStore {
     viewMode: defaultViewMode(),
     hiddenTypes: new Set(),
     focus: null,
+    soloBranchId: null,
+    collapsedBranchIds: [],
     localPositions: {},
     pendingIds: new Set(),
     pendingGroup: new Set(),
@@ -133,6 +145,21 @@ export function createGraphViewStore(): GraphViewStore {
         return { hiddenTypes: next };
       }),
     setFocus: (focus) => set({ focus }),
+    setSoloBranch: (soloBranchId) => set({ soloBranchId }),
+    toggleCollapsed: (branchId) =>
+      set(({ collapsedBranchIds }) => ({
+        collapsedBranchIds: collapsedBranchIds.includes(branchId)
+          ? collapsedBranchIds.filter((id) => id !== branchId)
+          : [...collapsedBranchIds, branchId],
+      })),
+    keepBranches: (branchIds) => {
+      const { soloBranchId, collapsedBranchIds } = get();
+      const live = new Set(branchIds);
+      const collapsed = collapsedBranchIds.filter((id) => live.has(id));
+      const solo = soloBranchId && live.has(soloBranchId) ? soloBranchId : null;
+      if (solo === soloBranchId && collapsed.length === collapsedBranchIds.length) return;
+      set({ soloBranchId: solo, collapsedBranchIds: collapsed });
+    },
     move: (positions, { together = false } = {}) =>
       set(({ localPositions, pendingIds, pendingGroup }) => {
         const ids = Object.keys(positions);

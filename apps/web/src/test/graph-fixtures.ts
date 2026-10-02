@@ -136,13 +136,18 @@ type Reply = Response | Error | Promise<Response>;
 
 /**
  * Stubs `fetch` for a study page's graph. `graph` answers every snapshot read (replace it to
- * change what the next read returns); `edgeReplies` answer `POST /edges` in order. `requests`
- * logs every call; `graphReads` counts snapshot reads.
+ * change what the next read returns); `edgeReplies` answer `POST /edges` in order, and
+ * `branchReplies` answer `POST /branches` and `PATCH /branches/:id/members` (BIB-60) in order;
+ * `positionReplies` answer `PATCH /positions` (a 200 with the next view revision when none is
+ * queued). `requests` logs every call; `graphReads` counts snapshot reads.
  */
 export function stubGraphApi() {
   const api = {
     graph: GRAPH,
     edgeReplies: [] as Reply[],
+    branchReplies: [] as Reply[],
+    positionReplies: [] as Reply[],
+    viewRevision: GRAPH.viewRevision,
     requests: [] as Sent[],
     graphReads: 0,
     mutations: () => api.requests.filter((r) => r.method !== 'GET'),
@@ -180,6 +185,22 @@ export function stubGraphApi() {
         const next = api.edgeReplies.shift();
         if (!next) return Promise.reject(new Error('unexpected edge create'));
         return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+      }
+      if (
+        (method === 'POST' && path === `${study}/branches`) ||
+        (method === 'PATCH' && /\/branches\/[^/]+\/members$/.test(url.pathname))
+      ) {
+        const next = api.branchReplies.shift();
+        if (!next) return Promise.reject(new Error('unexpected branch change'));
+        return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+      }
+      if (method === 'PATCH' && path === `${study}/positions`) {
+        const next = api.positionReplies.shift();
+        if (next) return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+        api.viewRevision += 1;
+        return Promise.resolve(
+          jsonResponse(200, { viewRevision: api.viewRevision, lastEventSequence: '20' }),
+        );
       }
       return Promise.reject(new Error(`unexpected ${method} ${path}`));
     }),

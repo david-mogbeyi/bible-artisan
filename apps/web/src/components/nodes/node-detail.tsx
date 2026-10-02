@@ -38,6 +38,7 @@ import {
   sourceInputOf,
   TextAreaField,
 } from './node-fields';
+import { Branches } from './branches';
 import { Relationships } from './relationships';
 
 export const NODE_DETAIL_COPY = {
@@ -79,7 +80,8 @@ const isEditable = (node: NodeResponse): node is EditableNode =>
  * (the reader shows the verse text; this panel never does). Observations, thoughts and sources of
  * an active study can be edited; "Saved" is announced only after the server's 200. A deliberate
  * duplicate Scripture node (BIB-26) says "Duplicate of <passage>" with "Show the original".
- * Its Relationships (BIB-27) list, connect, edit and remove this node's typed relationships.
+ * Its Relationships (BIB-27) list, connect, edit and remove this node's typed relationships, and
+ * its Branches (BIB-60) add it to or remove it from branches, or start one at it.
  * It reports an open edit with unsaved changes (`onUnsavedChange`), so the section keeps it open
  * when the canvas selection moves away (BIB-28).
  */
@@ -188,6 +190,13 @@ export function NodeDetail({
         editable={editable}
         onLocked={onLocked}
         onShowNode={onShowNode}
+      />
+      <Branches
+        studyId={studyId}
+        node={data}
+        studyRevision={studyRevision}
+        editable={editable}
+        onLocked={onLocked}
       />
     </section>
   );

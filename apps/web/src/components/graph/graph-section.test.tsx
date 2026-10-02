@@ -56,7 +56,15 @@ const GRAPH: GraphResponse = {
   viewRevision: 5,
   nodes: NODES as GraphResponse['nodes'],
   edges: [{ id: E1, sourceNodeId: O, targetNodeId: Q, type: 'supports', origin: 'user' }],
-  branches: [{ id: '40000000-2222-4333-8444-555555555555', rootNodeId: Q, createdAt: T }],
+  branches: [
+    {
+      id: '40000000-2222-4333-8444-555555555555',
+      rootNodeId: Q,
+      memberNodeIds: [],
+      revision: 1,
+      createdAt: T,
+    },
+  ],
   positions: [
     { nodeId: Q, x: 0, y: 0 },
     { nodeId: O, x: 0, y: 200 },
