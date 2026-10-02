@@ -8,6 +8,7 @@ import type {
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chapter, OTHER_TRANSLATION, TRANSLATION } from '@/test/bible-fixtures';
+import { studyQueryKey } from '@/lib/studies';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { BibleReader } from './bible-reader';
 import type { ReaderStudy } from './study-highlights';
@@ -298,26 +299,28 @@ describe('highlights in the reader (BIB-24)', () => {
       }),
       created(),
     );
-    reply(
-      `GET /studies/${STUDY_ID}`,
-      jsonResponse(200, {
-        id: STUDY_ID,
-        title: 'Conscience',
-        description: null,
-        lifecycle: 'active',
-        pinned: false,
-        revision: 9,
-        contentRevision: 5,
-        startingReference: null,
-        mainQuestion: null,
-        originalQuestion: null,
-        tags: [],
-        branchId: null,
-        purgeAt: null,
-        createdAt: T,
-      }),
-    );
-    await renderReader();
+    const studyAt = (revision: number) => ({
+      id: STUDY_ID,
+      title: 'Conscience',
+      description: null,
+      lifecycle: 'active',
+      pinned: false,
+      revision,
+      contentRevision: 5,
+      startingReference: null,
+      mainQuestion: null,
+      originalQuestion: null,
+      tags: [],
+      branchId: null,
+      purgeAt: null,
+      createdAt: T,
+    });
+    reply(`GET /studies/${STUDY_ID}`, jsonResponse(200, studyAt(9)));
+    const view = await renderReader();
+    // As in the app (providers.tsx): a cached study counts as fresh for 30 s, so the re-read
+    // after a 409 must still go to the server.
+    view.queryClient.setDefaultOptions({ queries: { retry: false, staleTime: 30_000 } });
+    view.queryClient.setQueryData(studyQueryKey(STUDY_ID), studyAt(7));
     const form = await chooseHighlight();
 
     const alert = await within(form).findByRole('alert');

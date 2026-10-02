@@ -337,9 +337,11 @@ export function CapturedActions({
   const catchUp = async () => {
     void queryClient.invalidateQueries({ queryKey: annotationListsKey(study.id) });
     try {
+      // staleTime 0: the cached study may still count as fresh, and a 409 proves it is not.
       const current = await queryClient.fetchQuery({
         queryKey: studyQueryKey(study.id),
         queryFn: () => fetchStudy(study.id),
+        staleTime: 0,
       });
       setKnownRevision((known) => Math.max(known, current.revision));
     } catch {
