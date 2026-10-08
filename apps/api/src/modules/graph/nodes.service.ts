@@ -10,9 +10,14 @@ import {
   nodeLabel,
   type NodeResponse,
   type NodeSummary,
+  type NodeVersionListResponse,
+  type NodeWarning,
+  QUESTION_STATUSES,
+  type QuestionStatus,
   type ScriptureReference,
   type Source,
   type SourceCitation,
+  STATUS_NOT_FOR_NODE_TYPE,
   updateNodeRequestSchema,
 } from '@bible-artisan/contracts';
 import type { z } from 'zod';
@@ -21,6 +26,7 @@ import {
   NotFoundError,
   ReferenceNotFoundError,
   RevisionConflictError,
+  ValidationError,
 } from '../../common/errors/domain-errors';
 import type { MutationRequestInfo } from '../../common/mutation/mutation-request';
 import { MutationResult, MutationService } from '../../common/mutation/mutation.service';
@@ -28,12 +34,24 @@ import type { StudyMutation } from '../../common/mutation/study-mutation';
 import { requireExpectedRevision } from '../../common/revision/expected-revision';
 import { isResourceId } from '../../common/validation/resource-id';
 import { parseBody } from '../../common/validation/parse-body';
+import { NodeVersion } from '../../database/models/node-version.model';
+import { NodeVersionEvidence } from '../../database/models/node-version-evidence.model';
+import { StudyEdge } from '../../database/models/study-edge.model';
 import { StudyNode } from '../../database/models/study-node.model';
 import { ReferenceService } from '../bible-content/reference/reference.service';
 import { StudyAccessService } from '../study/study-access.service';
 import { QUESTION_CREATED } from '../study/study-events';
 import { type NewNodeValues, StudyGraphService } from '../study/study-graph.service';
 import { StudyRevisionService } from '../study/study-revision.service';
+import {
+  CONCLUSION_EVENTS,
+  establishedAtFor,
+  isEvidenceIncomplete,
+  liveEvidence,
+  planConclusionChange,
+  supportCounts,
+  writeConclusionVersion,
+} from './conclusions';
 
 type CreateNodeBody = z.output<typeof createNodeRequestSchema>;
 type UpdateNodeBody = z.output<typeof updateNodeRequestSchema>;
@@ -57,7 +75,8 @@ export const NODE_EVENTS = {
   question: QUESTION_CREATED,
   observation: 'observation_created',
   thought: 'thought_created',
-  conclusion: 'conclusion_created',
+  conclusion: CONCLUSION_EVENTS.created,
+  questionStatusChanged: 'question_status_changed',
   source: 'source_created',
   observationUpdated: 'observation_updated',
   thoughtUpdated: 'thought_updated',
@@ -97,7 +116,7 @@ function sourceColumns({ title, ...payload }: SourceCitation) {
   return { title, payloadJson: payload };
 }
 
-function createdEvent(node: StudyNode, branchId: string | null) {
+function createdEvent(node: StudyNode, branchId: string | null, versionId: string | null = null) {
   switch (node.type) {
     case 'scripture':
       return {
@@ -121,7 +140,7 @@ function createdEvent(node: StudyNode, branchId: string | null) {
     case 'thought':
       return { eventType: NODE_EVENTS.thought, payload: { nodeId: node.id } };
     case 'conclusion':
-      return { eventType: NODE_EVENTS.conclusion, payload: { nodeId: node.id } };
+      return { eventType: NODE_EVENTS.conclusion, payload: { nodeId: node.id, versionId } };
     case 'source':
       return {
         eventType: NODE_EVENTS.source,
@@ -130,8 +149,22 @@ function createdEvent(node: StudyNode, branchId: string | null) {
   }
 }
 
-function mutationBody(node: StudyNode, lastEventSequence: string): NodeMutationResponse {
+/** The conclusion version a change wrote and the one before it, and what it warned about. */
+interface VersionInfo {
+  versionId: string | null;
+  previousVersionId: string | null;
+  warnings: NodeWarning[];
+}
+
+const NO_VERSION: VersionInfo = { versionId: null, previousVersionId: null, warnings: [] };
+
+function mutationBody(
+  node: StudyNode,
+  lastEventSequence: string,
+  version: VersionInfo = NO_VERSION,
+): NodeMutationResponse {
   return {
+    ...version,
     id: node.id,
     studyId: node.studyId,
     type: node.type,
@@ -158,6 +191,20 @@ function sourceOf(node: StudyNode): Source {
     excerpt: payload.excerpt ?? null,
     excerptKind: payload.excerptKind ?? null,
   };
+}
+
+function isQuestionStatus(status: string): status is QuestionStatus {
+  return (QUESTION_STATUSES as readonly string[]).includes(status);
+}
+
+/** The newest version of a conclusion (read under the study lock), or null if it has none. */
+async function latestVersionId(nodeId: string): Promise<string | null> {
+  const latest = await NodeVersion.findOne({
+    where: { nodeId },
+    attributes: ['id'],
+    order: [['versionNumber', 'DESC']],
+  });
+  return latest?.id ?? null;
 }
 
 /** The column a statement or text lives in, for types whose CHECKs require it. */
@@ -219,9 +266,18 @@ export class NodesService {
         const node = await this.graph.addNode(m, newNodeValues(body));
         m.bumpContentRevision();
         const branchId = node.type === 'question' ? await this.graph.ensureInitialBranch(m) : null;
-        const event = await m.appendEvent(createdEvent(node, branchId));
+        // A conclusion is born with version 1 (BIB-30), in the same transaction as the node.
+        const first =
+          node.type === 'conclusion'
+            ? await writeConclusionVersion(m, node, 'created', null)
+            : null;
+        const event = await m.appendEvent(createdEvent(node, branchId, first?.id ?? null));
         const response: CreateNodeResponse = {
-          ...mutationBody(node, event.sequence),
+          ...mutationBody(node, event.sequence, {
+            versionId: first?.id ?? null,
+            previousVersionId: null,
+            warnings: [],
+          }),
           studyRevision,
           outcome: 'created',
           canonicalNodeId: null,
@@ -310,6 +366,8 @@ export class NodesService {
       bumpsContentRevision: true,
       work: async (m) => {
         const current = await lockedNode(m, nodeId, expectedRevision);
+        if (current.type === 'question') return this.changeQuestionStatus(m, current, body);
+        if (current.type === 'conclusion') return this.changeConclusion(m, current, body);
         const { values, eventType, payload } = editOf(current, body);
         const updated = await m.updateWithExpectedRevision(StudyNode, {
           id: current.id,
@@ -324,6 +382,100 @@ export class NodesService {
         return { status: 200, body: mutationBody(updated, event.sequence) };
       },
     });
+  }
+
+  /**
+   * A Question's status (BIB-30; FR-QUESTION-001/002): the only thing about a question a PATCH
+   * changes, and only this explicit request ever does (an `answers` relationship, a study edit
+   * and every read leave it alone; AI proposals are BIB-44's). Any status may follow any other.
+   * One `question_status_changed` event with the previous status.
+   */
+  private async changeQuestionStatus(m: StudyMutation, current: StudyNode, body: UpdateNodeBody) {
+    if (
+      body.text !== undefined ||
+      body.observationKind !== undefined ||
+      body.source !== undefined ||
+      body.establishment !== undefined ||
+      body.changeReason !== undefined
+    ) {
+      throw new NodeRuleError(NODE_NOT_EDITABLE);
+    }
+    const status = body.status;
+    if (status === undefined) throw new NodeRuleError(NODE_NOT_EDITABLE);
+    if (!isQuestionStatus(status)) {
+      throw new ValidationError('Invalid request', { status: [STATUS_NOT_FOR_NODE_TYPE] });
+    }
+    if (status === current.questionStatus) throw new NodeRuleError(NODE_UNCHANGED);
+    const updated = await m.updateWithExpectedRevision(StudyNode, {
+      id: current.id,
+      expectedRevision: current.revision,
+      values: { questionStatus: status },
+      where: { deletedAt: null },
+    });
+    const event = await m.appendEvent({
+      eventType: NODE_EVENTS.questionStatusChanged,
+      payload: { nodeId: updated.id, status, previousStatus: current.questionStatus },
+    });
+    return { status: 200, body: mutationBody(updated, event.sequence) };
+  }
+
+  /**
+   * A Conclusion's explicit actions (BIB-30; FR-CONCLUSION-001...004), applied as one change that
+   * writes one immutable version (with a snapshot of the live evidence, which the server counts
+   * here under the study lock) and one event. The rules are `planConclusionChange`'s.
+   */
+  private async changeConclusion(m: StudyMutation, current: StudyNode, body: UpdateNodeBody) {
+    if (body.observationKind !== undefined || body.source !== undefined) {
+      throw new NodeRuleError(NODE_NOT_EDITABLE);
+    }
+    const support = supportCounts(await liveEvidence(m, [current.id]), [current.id]);
+    const plan = planConclusionChange(
+      {
+        text: required(current.title),
+        status: required(current.conclusionStatus),
+        established: current.establishedAt !== null,
+      },
+      body,
+      support.get(current.id) ?? 0,
+    );
+    const updated = await m.updateWithExpectedRevision(StudyNode, {
+      id: current.id,
+      expectedRevision: current.revision,
+      values: {
+        title: plan.text,
+        conclusionStatus: plan.status,
+        establishedAt: establishedAtFor(plan, current),
+      },
+      where: { deletedAt: null },
+    });
+    const previousVersionId = await latestVersionId(current.id);
+    const version = await writeConclusionVersion(
+      m,
+      updated,
+      plan.action,
+      body.changeReason ?? null,
+    );
+    const event = await m.appendEvent({
+      eventType: plan.eventType,
+      payload: {
+        nodeId: updated.id,
+        versionId: version.id,
+        versionNumber: version.versionNumber,
+        status: plan.status,
+        previousStatus: current.conclusionStatus,
+        established: plan.established,
+        previousEstablished: current.establishedAt !== null,
+        statementChanged: plan.statementChanged,
+      },
+    });
+    return {
+      status: 200,
+      body: mutationBody(updated, event.sequence, {
+        versionId: version.id,
+        previousVersionId,
+        warnings: plan.warnings,
+      }),
+    };
   }
 
   /**
@@ -356,6 +508,11 @@ export class NodesService {
     const references = await this.references.storedReferences(
       nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
     );
+    const conclusionIds = nodes.filter((node) => node.type === 'conclusion').map((n) => n.id);
+    const support = supportCounts(
+      await liveEvidence({ studyId, ownerId }, conclusionIds),
+      conclusionIds,
+    );
     return nodes.map((node) => ({
       id: node.id,
       type: node.type,
@@ -365,6 +522,8 @@ export class NodesService {
       observationKind: node.observationKind,
       referenceId: node.scriptureReferenceId,
       canonicalNodeId: node.canonicalNodeId,
+      established: node.establishedAt !== null,
+      evidenceIncomplete: isEvidenceIncomplete(node.conclusionStatus, support.get(node.id) ?? 0),
       revision: node.revision,
       createdAt: node.createdAt.toISOString(),
       updatedAt: node.updatedAt.toISOString(),
@@ -406,16 +565,105 @@ export class NodesService {
         };
       case 'thought':
         return { type: 'thought', ...common, text: required(node.body) };
-      case 'conclusion':
+      case 'conclusion': {
+        const support =
+          supportCounts(await liveEvidence({ studyId, ownerId }, [node.id]), [node.id]).get(
+            node.id,
+          ) ?? 0;
+        const version = await NodeVersion.findOne({
+          where: { nodeId: node.id, studyId, ownerId },
+          attributes: ['id', 'versionNumber'],
+          order: [['versionNumber', 'DESC']],
+        });
+        if (!version) throw new Error('conclusion without a version');
+        const status = required(node.conclusionStatus);
         return {
           type: 'conclusion',
           ...common,
           text: required(node.title),
-          status: required(node.conclusionStatus),
+          status,
+          establishedAt: node.establishedAt?.toISOString() ?? null,
+          evidenceIncomplete: isEvidenceIncomplete(status, support),
+          liveEvidenceCount: support,
+          version: { id: version.id, number: version.versionNumber },
         };
+      }
       case 'source':
         return { type: 'source', ...common, source: sourceOf(node) };
     }
+  }
+
+  /**
+   * `GET /studies/:studyId/nodes/:nodeId/versions` (BIB-30; FR-CONCLUSION-001/005): a conclusion's
+   * immutable versions, newest first, unpaginated, each with its evidence snapshot and what that
+   * evidence is now (relationship removed or retyped since, node deleted or edited since). Three
+   * statements whatever the history (versions, their evidence, then the edges, nodes and
+   * references to label them). A node that is not a conclusion has none. Archived and trashed
+   * studies stay readable.
+   */
+  async versions(
+    ownerId: string,
+    studyId: string,
+    nodeId: string,
+  ): Promise<NodeVersionListResponse> {
+    const node = await this.access.requireOwnedNode(ownerId, studyId, nodeId);
+    if (node.type !== 'conclusion') return { items: [] };
+    const versions = await NodeVersion.findAll({
+      where: { nodeId: node.id, studyId, ownerId },
+      order: [['versionNumber', 'DESC']],
+    });
+    const evidence = await NodeVersionEvidence.findAll({
+      where: { studyId, ownerId, versionId: versions.map((version) => version.id) },
+      order: [
+        ['role', 'DESC'],
+        ['edgeType', 'ASC'],
+        ['edgeId', 'ASC'],
+      ],
+    });
+    const edges = await StudyEdge.findAll({
+      where: { studyId, ownerId, id: [...new Set(evidence.map((row) => row.edgeId))] },
+      attributes: ['id', 'type', 'deletedAt'],
+    });
+    const nodes = await StudyNode.findAll({
+      where: { studyId, ownerId, id: [...new Set(evidence.map((row) => row.nodeId))] },
+    });
+    const references = await this.references.storedReferences(
+      nodes.flatMap((other) => (other.scriptureReferenceId ? [other.scriptureReferenceId] : [])),
+    );
+    const edgeById = new Map(edges.map((edge) => [edge.id, edge]));
+    const nodeById = new Map(nodes.map((other) => [other.id, other]));
+    return {
+      items: versions.map((version) => ({
+        id: version.id,
+        versionNumber: version.versionNumber,
+        action: version.action as NodeVersionListResponse['items'][number]['action'],
+        statement: version.statement,
+        status: version.conclusionStatus,
+        established: version.established,
+        changeReason: version.changeReason,
+        createdAt: version.createdAt.toISOString(),
+        evidence: evidence
+          .filter((row) => row.versionId === version.id)
+          .map((row) => {
+            const edge = edgeById.get(row.edgeId);
+            const other = nodeById.get(row.nodeId);
+            if (!edge || !other) throw new Error('evidence row without its edge or node');
+            return {
+              edgeId: row.edgeId,
+              edgeType: row.edgeType,
+              role: row.role,
+              nodeId: row.nodeId,
+              nodeType: other.type,
+              label: nodeLabel(other, references),
+              nodeRevision: row.nodeRevision,
+              nodeVersionId: row.nodeVersionId,
+              edgeLive: edge.deletedAt === null && edge.type === row.edgeType,
+              nodeLive: other.deletedAt === null,
+              nodeChangedSince: other.revision !== row.nodeRevision,
+            };
+          }),
+      })),
+    };
   }
 
   private async requireReference(referenceId: string): Promise<void> {
@@ -438,6 +686,14 @@ function editOf(
   body: UpdateNodeBody,
 ): { values: Partial<NodeValues>; eventType: string; payload: Record<string, unknown> } {
   const { text, observationKind, source } = body;
+  if (
+    body.status !== undefined ||
+    body.establishment !== undefined ||
+    body.changeReason !== undefined
+  ) {
+    // Statuses, the marker and reasons belong to questions and conclusions.
+    throw new NodeRuleError(NODE_NOT_EDITABLE);
+  }
   switch (node.type) {
     case 'observation': {
       if (source !== undefined) throw new NodeRuleError(NODE_NOT_EDITABLE);
@@ -476,8 +732,8 @@ function editOf(
       };
     }
     default:
-      // Questions are never rewritten in place (BIB-20 makes a new one), conclusions version
-      // every semantic edit (BIB-30), and a Scripture node's identity is immutable.
+      // Questions and conclusions are handled before this (BIB-30); a Scripture node's
+      // identity is immutable.
       throw new NodeRuleError(NODE_NOT_EDITABLE);
   }
 }

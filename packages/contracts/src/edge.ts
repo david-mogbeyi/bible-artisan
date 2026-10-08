@@ -234,7 +234,7 @@ export const listEdgesQuerySchema = z.strictObject({ nodeId: z.string().max(64) 
  * 200 from `PATCH` and `DELETE`: the edge's new state without its note. Mutation responses are
  * stored on their Idempotency-Key receipt, so the note never reaches `mutation_receipt`.
  */
-export const edgeMutationResponseSchema = z.object({
+const edgeMutationBase = z.object({
   id: z.uuid(),
   studyId: z.uuid(),
   sourceNodeId: z.uuid(),
@@ -245,6 +245,14 @@ export const edgeMutationResponseSchema = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   lastEventSequence: eventSequenceSchema,
+});
+
+/**
+ * `establishmentClearedNodeIds` (BIB-30): the conclusions whose "Established by me" this change
+ * cleared because it removed or retyped their last supporting evidence; usually empty.
+ */
+export const edgeMutationResponseSchema = edgeMutationBase.extend({
+  establishmentClearedNodeIds: z.array(z.uuid()),
 });
 
 export type EdgeMutationResponse = z.infer<typeof edgeMutationResponseSchema>;
@@ -258,7 +266,7 @@ export type EdgeCreateOutcome = (typeof EDGE_CREATE_OUTCOMES)[number];
  * order; nothing was written, so `studyRevision` is the study's current one and
  * `lastEventSequence` is null).
  */
-export const createEdgeResponseSchema = edgeMutationResponseSchema.extend({
+export const createEdgeResponseSchema = edgeMutationBase.extend({
   outcome: z.enum(EDGE_CREATE_OUTCOMES),
   studyRevision: z.number().int().positive(),
   lastEventSequence: eventSequenceSchema.nullable(),

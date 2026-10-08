@@ -63,6 +63,7 @@ import {
   nodeListResponseSchema,
   nodeMutationResponseSchema,
   nodeResponseSchema,
+  nodeVersionListResponseSchema,
   updateNodeRequestSchema,
 } from './node';
 import {
@@ -702,12 +703,23 @@ function buildDocument(): OpenApiDocument {
           },
         },
         patch: {
-          description: `Edits an observation (text and/or observationKind), a thought (text) or a source (source, replaced whole). expectedRevision is the node's. A node's type never changes (type is not accepted, 400). Checked in order: an archived or trashed study is 422 STUDY_ARCHIVED or STUDY_TRASHED (before the node is looked up), then an absent node is 404, a stale revision 409, editing a question, conclusion or Scripture node, or a field of another type, 422 NODE_NOT_EDITABLE, and nothing to change 422 NODE_UNCHANGED. contentRevision moves. One event: observation_updated, thought_updated or source_updated (ids and enums only). The response carries no text. ${NODE_MUTATION_RULES}`,
+          description: `Edits or acts on a node. Observation: text and/or observationKind; thought: text; source: source (replaced whole); one observation_updated, thought_updated or source_updated event. Question (BIB-30): status (open, partially_answered, answered, deferred) is the only change, and only this explicit request ever changes it (an answers relationship never does); one question_status_changed event. Conclusion: text revises the statement (status becomes revised, marker cleared, changeReason required); status (tentative, supported, challenged, abandoned; abandoned needs changeReason); establishment set or clear marks it "Established by me" (needs live supporting evidence: an incoming supports or an outgoing inference_from relationship, else 422 CONCLUSION_EVIDENCE_REQUIRED; not supported 422 CONCLUSION_NOT_SUPPORTED). Challenging, revising, abandoning or setting tentative clears the marker (warnings: establishment_cleared). Every conclusion change writes one immutable version (statement, status, marker, reason, and a server-computed snapshot of the live evidence relationships; the client never sends evidence ids) and one event: conclusion_updated, conclusion_challenged, conclusion_abandoned or conclusion_established (ids and enums only), with versionId and previousVersionId in the response. expectedRevision is the node's. A node's type never changes (type is not accepted, 400). Checked in order: an archived or trashed study is 422 STUDY_ARCHIVED or STUDY_TRASHED (before the node is looked up), then an absent node is 404, a stale revision 409, a Scripture node or a field of another type 422 NODE_NOT_EDITABLE (a status of the wrong kind or a conclusion statement over 4,000 characters is 400), nothing to change 422 NODE_UNCHANGED, then the evidence rules. contentRevision moves. The response carries no text or reason. ${NODE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('nodeId')],
           requestBody: jsonBody('UpdateNodeRequest'),
           responses: {
             200: jsonResponse('The node as saved, without its text', 'NodeMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/nodes/{nodeId}/versions': {
+        get: {
+          description: `Returns a conclusion's immutable versions, newest first, unpaginated (BIB-30; FR-CONCLUSION-001/005): each with its statement, status, "Established by me" flag, reason and the evidence relationships live when it was written (edge type, role, the other node's current label, its revision then, and whether the relationship and node are still live or the node has changed since). A node that is not a conclusion has none ({ items: [] }). Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam, uuidPathParam('nodeId')],
+          responses: {
+            200: jsonResponse("The conclusion's versions", 'NodeVersionListResponse'),
             default: errorResponse,
           },
         },
@@ -742,7 +754,7 @@ function buildDocument(): OpenApiDocument {
       },
       '/studies/{studyId}/edges/{edgeId}': {
         patch: {
-          description: `Changes an edge's type and/or note (null clears it). Endpoints and direction never change. expectedRevision is the edge's. Checked in order: 422 lifecycle, 404, 409, then 422 EDGE_TYPE_CHANGE_NOT_ALLOWED (directed and two-way types do not mix), EDGE_TARGET_NOT_QUESTION, EDGE_EXISTS (another live edge between the same nodes has that type) and EDGE_UNCHANGED. contentRevision moves. edge_updated with the previous type. ${EDGE_MUTATION_RULES}`,
+          description: `Changes an edge's type and/or note (null clears it). Endpoints and direction never change. expectedRevision is the edge's. Checked in order: 422 lifecycle, 404, 409, then 422 EDGE_TYPE_CHANGE_NOT_ALLOWED (directed and two-way types do not mix), EDGE_TARGET_NOT_QUESTION, EDGE_EXISTS (another live edge between the same nodes has that type) and EDGE_UNCHANGED. contentRevision moves. edge_updated with the previous type. When the new type means a conclusion this edge supported (an incoming supports, or an outgoing inference_from) no longer has any live supporting evidence and it was marked "Established by me", the marker is cleared in the same transaction (its status is kept; a version and a conclusion_establishment_cleared event are written) and its id is listed in establishmentClearedNodeIds. ${EDGE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('edgeId')],
           requestBody: jsonBody('UpdateEdgeRequest'),
@@ -752,7 +764,7 @@ function buildDocument(): OpenApiDocument {
           },
         },
         delete: {
-          description: `Removes an edge (soft delete); both nodes and every other edge stay. expectedRevision is the edge's. contentRevision moves. edge_removed. ${EDGE_MUTATION_RULES}`,
+          description: `Removes an edge (soft delete); both nodes and every other edge stay. expectedRevision is the edge's. contentRevision moves. edge_removed. Removing the last live supporting evidence of a conclusion marked "Established by me" clears the marker in the same transaction, as a retype does (establishmentClearedNodeIds). ${EDGE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('edgeId')],
           requestBody: jsonBody('EdgeStateRequest'),
@@ -887,6 +899,7 @@ function buildDocument(): OpenApiDocument {
         NodeMutationResponse: toSchema(nodeMutationResponseSchema),
         NodeListResponse: toSchema(nodeListResponseSchema),
         NodeResponse: toSchema(nodeResponseSchema),
+        NodeVersionListResponse: toSchema(nodeVersionListResponseSchema),
         CreateEdgeRequest: toInputSchema(createEdgeRequestSchema),
         CreateEdgeResponse: toSchema(createEdgeResponseSchema),
         UpdateEdgeRequest: toInputSchema(updateEdgeRequestSchema),

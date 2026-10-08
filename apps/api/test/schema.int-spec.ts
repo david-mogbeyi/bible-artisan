@@ -81,6 +81,12 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'node_version_study_owner_fk',
+        table: 'node_version',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'note_study_owner_fk',
         table: 'note',
         columns: ['owner_id', 'study_id'],
@@ -1094,6 +1100,202 @@ describe('schema (composite-key owner isolation)', () => {
         { bind: [studyId], type: QueryTypes.SELECT },
       );
       expect(row).toStrictEqual({ branches: 0, members: 0 });
+    });
+  });
+
+  describe('node_version, node_version_evidence and study_node.established_at (BIB-30)', () => {
+    async function insertConclusion(
+      studyId: string,
+      ownerId: string,
+      status = 'tentative',
+      establishedAt: string | null = null,
+    ): Promise<string> {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO study_node (id, study_id, owner_id, type, origin, title, conclusion_status,
+                                 established_at)
+         VALUES ($1, $2, $3, 'conclusion', 'user', 'C', $4, $5)`,
+        { bind: [id, studyId, ownerId, status, establishedAt], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    async function insertThought(studyId: string, ownerId: string): Promise<string> {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO study_node (id, study_id, owner_id, type, origin, body)
+         VALUES ($1, $2, $3, 'thought', 'user', 'T')`,
+        { bind: [id, studyId, ownerId], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    async function insertEdge(studyId: string, ownerId: string, source: string, target: string) {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO study_edge (id, study_id, owner_id, source_node_id, target_node_id, type, origin)
+         VALUES ($1, $2, $3, $4, $5, 'supports', 'user')`,
+        { bind: [id, studyId, ownerId, source, target], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    const insertVersion = async (
+      studyId: string,
+      ownerId: string,
+      nodeId: string,
+      overrides: Partial<{
+        number: number;
+        action: string;
+        status: string;
+        established: boolean;
+        reason: string | null;
+      }> = {},
+    ): Promise<string> => {
+      const id = randomUUID();
+      const o = {
+        number: 1,
+        action: 'created',
+        status: 'tentative',
+        established: false,
+        reason: null,
+        ...overrides,
+      };
+      await db.query(
+        `INSERT INTO node_version (id, node_id, study_id, owner_id, version_number, action,
+                                   statement, conclusion_status, established, change_reason)
+         VALUES ($1, $2, $3, $4, $5, $6, 'C', $7, $8, $9)`,
+        {
+          bind: [
+            id,
+            nodeId,
+            studyId,
+            ownerId,
+            o.number,
+            o.action,
+            o.status,
+            o.established,
+            o.reason,
+          ],
+          type: QueryTypes.INSERT,
+        },
+      );
+      return id;
+    };
+
+    const insertEvidence = (
+      studyId: string,
+      ownerId: string,
+      versionId: string,
+      edgeId: string,
+      nodeId: string,
+    ) =>
+      db.query(
+        `INSERT INTO node_version_evidence (version_id, study_id, owner_id, edge_id, edge_type, role,
+                                            node_id, node_revision)
+         VALUES ($1, $2, $3, $4, 'supports', 'supporting', $5, 1)`,
+        { bind: [versionId, studyId, ownerId, edgeId, nodeId], type: QueryTypes.INSERT },
+      );
+
+    const violation = (code: string, constraint: string) => ({
+      parent: expect.objectContaining({ code, constraint }),
+    });
+
+    it('allows established_at only on a supported conclusion', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      await insertConclusion(studyId, owner, 'supported', '2026-10-08T10:00:00Z');
+      await expect(
+        insertConclusion(studyId, owner, 'challenged', '2026-10-08T10:00:00Z'),
+      ).rejects.toMatchObject(violation('23514', 'study_node_established_check'));
+      const thought = await insertThought(studyId, owner);
+      await expect(
+        db.query(`UPDATE study_node SET established_at = now() WHERE id = $1`, { bind: [thought] }),
+      ).rejects.toMatchObject(violation('23514', 'study_node_established_check'));
+    });
+
+    it("refuses a version of a non-conclusion node or of another study's or owner's node, a duplicate number, and the checks on status, marker and reason", async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const conclusion = await insertConclusion(studyId, owner);
+      await insertVersion(studyId, owner, conclusion);
+      const otherStudy = await insertStudy(owner);
+      const elsewhere = await insertConclusion(otherStudy, owner);
+      const thought = await insertThought(studyId, owner);
+      const stranger = await insertUser();
+
+      for (const nodeId of [elsewhere, thought]) {
+        await expect(insertVersion(studyId, owner, nodeId)).rejects.toMatchObject(
+          violation('23503', 'node_version_node_fk'),
+        );
+      }
+      await expect(
+        insertVersion(studyId, stranger, conclusion, { number: 2 }),
+      ).rejects.toMatchObject(violation('23503', 'node_version_study_owner_fk'));
+      await expect(insertVersion(studyId, owner, conclusion)).rejects.toMatchObject(
+        violation('23505', 'node_version_node_id_version_number_key'),
+      );
+      await expect(
+        insertVersion(studyId, owner, conclusion, { number: 2, established: true }),
+      ).rejects.toMatchObject(violation('23514', 'node_version_established_check'));
+      for (const action of ['revised', 'abandoned']) {
+        await expect(
+          insertVersion(studyId, owner, conclusion, { number: 2, action, status: action }),
+        ).rejects.toMatchObject(violation('23514', 'node_version_reason_required_check'));
+      }
+      await expect(
+        insertVersion(studyId, owner, conclusion, { number: 2, status: 'open' }),
+      ).rejects.toMatchObject(violation('23514', 'node_version_status_check'));
+    });
+
+    it("refuses evidence naming another study's edge or node, and refuses every update of a version or its evidence", async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const conclusion = await insertConclusion(studyId, owner);
+      const thought = await insertThought(studyId, owner);
+      const edge = await insertEdge(studyId, owner, thought, conclusion);
+      const version = await insertVersion(studyId, owner, conclusion);
+      const otherStudy = await insertStudy(owner);
+      const otherThought = await insertThought(otherStudy, owner);
+      const otherConclusion = await insertConclusion(otherStudy, owner);
+      const otherEdge = await insertEdge(otherStudy, owner, otherThought, otherConclusion);
+
+      await expect(
+        insertEvidence(studyId, owner, version, otherEdge, thought),
+      ).rejects.toMatchObject(violation('23503', 'node_version_evidence_edge_fk'));
+      await expect(
+        insertEvidence(studyId, owner, version, edge, otherThought),
+      ).rejects.toMatchObject(violation('23503', 'node_version_evidence_node_fk'));
+      await insertEvidence(studyId, owner, version, edge, thought);
+      await expect(
+        db.query(`UPDATE node_version SET statement = 'Rewritten' WHERE id = $1`, {
+          bind: [version],
+        }),
+      ).rejects.toMatchObject({ parent: expect.objectContaining({ code: '23000' }) });
+      await expect(
+        db.query(`UPDATE node_version_evidence SET node_revision = 2 WHERE version_id = $1`, {
+          bind: [version],
+        }),
+      ).rejects.toMatchObject({ parent: expect.objectContaining({ code: '23000' }) });
+    });
+
+    it('purges nodes, edges, versions and evidence in one statement', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const conclusion = await insertConclusion(studyId, owner);
+      const thought = await insertThought(studyId, owner);
+      const edge = await insertEdge(studyId, owner, thought, conclusion);
+      const version = await insertVersion(studyId, owner, conclusion);
+      await insertEvidence(studyId, owner, version, edge, thought);
+      await db.query(`DELETE FROM study WHERE id = $1`, { bind: [studyId] });
+      const [row] = await db.query<Record<string, number>>(
+        `SELECT (SELECT count(*)::int FROM study_node WHERE study_id = $1) AS nodes,
+                (SELECT count(*)::int FROM study_edge WHERE study_id = $1) AS edges,
+                (SELECT count(*)::int FROM node_version WHERE study_id = $1) AS versions,
+                (SELECT count(*)::int FROM node_version_evidence WHERE study_id = $1) AS evidence`,
+        { bind: [studyId], type: QueryTypes.SELECT },
+      );
+      expect(row).toStrictEqual({ nodes: 0, edges: 0, versions: 0, evidence: 0 });
     });
   });
 });

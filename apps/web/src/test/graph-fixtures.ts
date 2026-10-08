@@ -49,6 +49,8 @@ const summary = (
   observationKind: type === 'observation' ? 'textual_observation' : null,
   referenceId: null,
   canonicalNodeId: null,
+  established: false,
+  evidenceIncomplete: false,
   revision: 1,
   createdAt: T,
   updatedAt: T,
