@@ -34,6 +34,10 @@ const EDGE_REFUSED = 'study edge drop refused: study data exists (set ALLOW_STUD
 /** BIB-28's graph layout migration. */
 const LAYOUT_MIGRATION = '20261002103229_add_graph_layout.ts';
 const LAYOUT_REFUSED = 'graph layout drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-60's branch membership migration. */
+const MEMBERSHIP_MIGRATION = '20261002165744_add_branch_membership.ts';
+const MEMBERSHIP_REFUSED =
+  'branch membership drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'annotation',
@@ -49,6 +53,7 @@ const DOMAIN_TABLES = [
   'scripture_reference',
   'study',
   'study_branch',
+  'study_branch_member',
   'study_edge',
   'study_event',
   'study_node',
@@ -241,12 +246,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-28's graph layout) is the first `down`
+      // No opt-in at all: the newest migration (BIB-60's branch membership) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: LAYOUT_REFUSED,
+        message: MEMBERSHIP_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -328,6 +333,88 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies branch membership (BIB-60) only with the study-data opt-in; the member table, the branch revision and keys come back, and branches stay', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const membershipSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid IN ('study_branch'::regclass, 'study_branch_member'::regclass)
+         UNION ALL
+         SELECT indexname FROM pg_indexes
+          WHERE tablename IN ('study_branch', 'study_branch_member')
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    const branches = async () =>
+      db.query(
+        `SELECT b.root_node_id FROM study_branch b JOIN study s ON s.id = b.study_id
+          WHERE s.owner_id = $1 ORDER BY b.root_node_id`,
+        { bind: [userId], type: QueryTypes.SELECT },
+      );
+    try {
+      // A second branch at the seeded passage, with the seeded question as its member.
+      await db.query(
+        `INSERT INTO study_branch (study_id, owner_id, root_node_id, revision)
+         SELECT study_id, owner_id, id, 3 FROM study_node WHERE owner_id = $1 AND type = 'scripture'`,
+        { bind: [userId], type: QueryTypes.INSERT },
+      );
+      await db.query(
+        `INSERT INTO study_branch_member (study_id, owner_id, branch_id, node_id)
+         SELECT b.study_id, b.owner_id, b.id, q.id
+           FROM study_branch b
+           JOIN study_node p ON p.id = b.root_node_id AND p.type = 'scripture'
+           JOIN study_node q ON q.study_id = b.study_id AND q.type = 'question'
+          WHERE b.owner_id = $1`,
+        { bind: [userId], type: QueryTypes.INSERT },
+      );
+      const schemaBefore = await membershipSchema();
+      expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'study_branch_member_branch_fk',
+        'study_branch_member_node_fk',
+        'study_branch_member_node_idx',
+        'study_branch_member_pkey',
+        'study_branch_member_pkey',
+        'study_branch_member_study_owner_fk',
+        'study_branch_owner_id_study_id_id_key',
+        'study_branch_owner_id_study_id_id_key',
+        'study_branch_pkey',
+        'study_branch_pkey',
+        'study_branch_revision_check',
+        'study_branch_root_key',
+        'study_branch_root_key',
+        'study_branch_root_node_fk',
+        'study_branch_study_id_idx',
+        'study_branch_study_owner_fk',
+      ]);
+      const branchesBefore = await branches();
+      expect(branchesBefore).toHaveLength(2);
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(MEMBERSHIP_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: MEMBERSHIP_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, ['study_branch_member'])).toStrictEqual([
+        'study_branch_member',
+      ]);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['study_branch_member'])).toStrictEqual([]);
+      expect(await columns(['study_branch'])).not.toContain('study_branch.revision');
+      expect(await branches()).toStrictEqual(branchesBefore);
+      expect(await recordedMigrations(db)).toStrictEqual(before.slice(0, -1));
+      await migrator.up();
+      expect(await membershipSchema()).toStrictEqual(schemaBefore);
+      expect(await branches()).toStrictEqual(branchesBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies the graph layout (BIB-28) only with the study-data opt-in; both tables and their keys, FKs and CHECKs come back', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
@@ -367,6 +454,8 @@ describe('migration reversibility', () => {
         'study_view_state_study_key',
         'study_view_state_study_owner_fk',
       ]);
+      // Past BIB-60's step (which refuses first, from latest), the layout's own guard refuses.
+      await withStudyDataDropAllowed(() => migrator.down({ to: MEMBERSHIP_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(LAYOUT_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -768,8 +857,8 @@ describe('migration reversibility', () => {
         'note_version_note_id_version_number_key',
       ]);
       const before = await recordedMigrations(db);
-      // Past BIB-28's, BIB-27's, BIB-26's, BIB-25's and BIB-24's steps (which refuse first, from latest), note's own
-      // guard refuses too.
+      // Past BIB-60's, BIB-28's, BIB-27's, BIB-26's, BIB-25's and BIB-24's steps (which refuse
+      // first, from latest), note's own guard refuses too.
       await withStudyDataDropAllowed(() => migrator.down({ to: ANNOTATION_MIGRATION }));
       const refused = await migrator.down().catch((e: unknown) => e);
       expect((refused as { cause?: unknown }).cause).toMatchObject({
@@ -783,7 +872,8 @@ describe('migration reversibility', () => {
             name !== TYPED_NODES_MIGRATION &&
             name !== CANONICAL_MIGRATION &&
             name !== EDGE_MIGRATION &&
-            name !== LAYOUT_MIGRATION,
+            name !== LAYOUT_MIGRATION &&
+            name !== MEMBERSHIP_MIGRATION,
         ),
       );
       expect(

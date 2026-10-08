@@ -333,6 +333,22 @@ const ROUTES: Record<string, Access> = {
       test: 'PATCH /v1/studies/:studyId/positions gives another user the same neutral 404 as an absent or malformed study, writing nothing',
     },
   },
+  // Branches (BIB-60): Bob's calls on Alice's study, branch and nodes, absent and malformed ids,
+  // and Alice's node or branch under his own study.
+  'POST /v1/studies/:studyId/branches': {
+    access: 'private',
+    crossUserTest: {
+      file: 'branches.int-spec.ts',
+      test: "POST /v1/studies/:studyId/branches gives another user the same neutral 404 as an absent or malformed study, and never roots a branch at another user's node, writing nothing",
+    },
+  },
+  'PATCH /v1/studies/:studyId/branches/:branchId/members': {
+    access: 'private',
+    crossUserTest: {
+      file: 'branches.int-spec.ts',
+      test: "PATCH /v1/studies/:studyId/branches/:branchId/members gives another user the same neutral 404 as an absent or malformed id, and never moves another user's node into a branch, writing nothing",
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

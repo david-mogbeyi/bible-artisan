@@ -21,6 +21,7 @@ import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { NoteVersion } from '../src/database/models/note-version.model';
 import { Note } from '../src/database/models/note.model';
 import { ScriptureReference } from '../src/database/models/scripture-reference.model';
+import { StudyBranchMember } from '../src/database/models/study-branch-member.model';
 import { StudyBranch } from '../src/database/models/study-branch.model';
 import { StudyEdge } from '../src/database/models/study-edge.model';
 import { StudyNodePosition } from '../src/database/models/study-node-position.model';
@@ -449,6 +450,7 @@ describe('Sequelize models against the real schema', () => {
       studyId: study.id,
       ownerId: owner.id,
       rootNodeId: question.id,
+      revision: 1,
       createdAt: expect.any(Date),
     });
     const foundQuestion = await StudyNode.findByPk(question.id, { rejectOnEmpty: true });
@@ -892,6 +894,63 @@ describe('Sequelize models against the real schema', () => {
     await Study.destroy({ where: { id: study.id } });
     expect(await StudyNodePosition.count({ where: { studyId: study.id } })).toBe(0);
     expect(await StudyViewState.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it("creates a StudyBranchMember through the model and reads it and the branch's revision back; a member cannot name another study's branch or node, or join a branch twice (BIB-60)", async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const root = await StudyNode.create({
+      ...scope,
+      type: 'question',
+      origin: 'user',
+      title: 'Can conscience be wrong?',
+      questionStatus: 'open',
+    });
+    const node = await StudyNode.create({ ...scope, ...THOUGHT });
+    const elsewhere = await StudyNode.create({ studyId: other.id, ownerId: owner.id, ...THOUGHT });
+    const otherRoot = await StudyNode.create({ studyId: other.id, ownerId: owner.id, ...THOUGHT });
+    const branch = await StudyBranch.create({ ...scope, rootNodeId: root.id });
+    const otherBranch = await StudyBranch.create({
+      studyId: other.id,
+      ownerId: owner.id,
+      rootNodeId: otherRoot.id,
+    });
+    expect((await StudyBranch.findByPk(branch.id, { rejectOnEmpty: true })).revision).toBe(1);
+
+    await StudyBranchMember.create({ ...scope, branchId: branch.id, nodeId: node.id });
+    expect(
+      (
+        await StudyBranchMember.findOne({
+          where: { branchId: branch.id, nodeId: node.id },
+          rejectOnEmpty: true,
+        })
+      ).get({ plain: true }),
+    ).toStrictEqual({
+      ...scope,
+      branchId: branch.id,
+      nodeId: node.id,
+      createdAt: expect.any(Date),
+    });
+    await expect(
+      StudyBranchMember.create({ ...scope, branchId: branch.id, nodeId: node.id }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+    await expect(
+      StudyBranchMember.create({ ...scope, branchId: branch.id, nodeId: elsewhere.id }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(
+      StudyBranchMember.create({ ...scope, branchId: otherBranch.id, nodeId: node.id }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    // One branch per root, and a revision below 1 is refused.
+    await expect(StudyBranch.create({ ...scope, rootNodeId: root.id })).rejects.toBeInstanceOf(
+      UniqueConstraintError,
+    );
+    await expect(
+      StudyBranch.update({ revision: 0 }, { where: { id: branch.id } }),
+    ).rejects.toBeInstanceOf(DatabaseError);
+    await Study.destroy({ where: { id: study.id } });
+    expect(await StudyBranchMember.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('creates an AuthChallenge with only required fields and reads it back with defaults', async () => {

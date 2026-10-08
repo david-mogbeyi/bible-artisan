@@ -87,6 +87,12 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'study_branch_member_study_owner_fk',
+        table: 'study_branch_member',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'study_branch_study_owner_fk',
         table: 'study_branch',
         columns: ['owner_id', 'study_id'],
@@ -979,6 +985,115 @@ describe('schema (composite-key owner isolation)', () => {
       expect(await count()).toStrictEqual({ positions: 2, viewStates: 1 });
       await db.query(`DELETE FROM study WHERE id = $1`, { bind: [studyId] });
       expect(await count()).toStrictEqual({ positions: 0, viewStates: 0 });
+    });
+  });
+
+  describe('study_branch_member and one branch per root (BIB-60)', () => {
+    async function insertNode(studyId: string, ownerId: string, type = 'thought'): Promise<string> {
+      const id = randomUUID();
+      await db.query(
+        type === 'question'
+          ? `INSERT INTO study_node (id, study_id, owner_id, type, origin, title, question_status)
+             VALUES ($1, $2, $3, 'question', 'user', 'Q', 'open')`
+          : `INSERT INTO study_node (id, study_id, owner_id, type, origin, body)
+             VALUES ($1, $2, $3, 'thought', 'user', 'T')`,
+        { bind: [id, studyId, ownerId], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    async function insertBranch(studyId: string, ownerId: string, rootNodeId: string) {
+      const id = randomUUID();
+      await db.query(
+        `INSERT INTO study_branch (id, study_id, owner_id, root_node_id) VALUES ($1, $2, $3, $4)`,
+        { bind: [id, studyId, ownerId, rootNodeId], type: QueryTypes.INSERT },
+      );
+      return id;
+    }
+
+    const insertMember = (studyId: string, ownerId: string, branchId: string, nodeId: string) =>
+      db.query(
+        `INSERT INTO study_branch_member (study_id, owner_id, branch_id, node_id)
+         VALUES ($1, $2, $3, $4)`,
+        { bind: [studyId, ownerId, branchId, nodeId], type: QueryTypes.INSERT },
+      );
+
+    const violation = (code: string, constraint: string) => ({
+      parent: expect.objectContaining({ code, constraint }),
+    });
+
+    it("refuses a member naming another study's branch, another study's or owner's node, or another owner, and a node twice in a branch", async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const branch = await insertBranch(
+        studyId,
+        owner,
+        await insertNode(studyId, owner, 'question'),
+      );
+      const node = await insertNode(studyId, owner);
+      const otherStudy = await insertStudy(owner);
+      const otherBranch = await insertBranch(
+        otherStudy,
+        owner,
+        await insertNode(otherStudy, owner, 'question'),
+      );
+      const elsewhere = await insertNode(otherStudy, owner);
+      const stranger = await insertUser();
+      const foreign = await insertNode(await insertStudy(stranger), stranger);
+
+      await expect(insertMember(studyId, owner, otherBranch, node)).rejects.toMatchObject(
+        violation('23503', 'study_branch_member_branch_fk'),
+      );
+      for (const nodeId of [elsewhere, foreign]) {
+        await expect(insertMember(studyId, owner, branch, nodeId)).rejects.toMatchObject(
+          violation('23503', 'study_branch_member_node_fk'),
+        );
+      }
+      await expect(insertMember(studyId, stranger, branch, node)).rejects.toMatchObject(
+        violation('23503', 'study_branch_member_study_owner_fk'),
+      );
+      await insertMember(studyId, owner, branch, node);
+      await expect(insertMember(studyId, owner, branch, node)).rejects.toMatchObject(
+        violation('23505', 'study_branch_member_pkey'),
+      );
+    });
+
+    it('refuses a second branch with the same root, and a branch revision below 1', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const root = await insertNode(studyId, owner, 'question');
+      const branch = await insertBranch(studyId, owner, root);
+      await expect(insertBranch(studyId, owner, root)).rejects.toMatchObject(
+        violation('23505', 'study_branch_root_key'),
+      );
+      await expect(
+        db.query(`UPDATE study_branch SET revision = 0 WHERE id = $1`, { bind: [branch] }),
+      ).rejects.toMatchObject(violation('23514', 'study_branch_revision_check'));
+    });
+
+    it('purges a study holding branches and members in one statement, and refuses to hard-delete a member node or a branch with members on its own', async () => {
+      const owner = await insertUser();
+      const studyId = await insertStudy(owner);
+      const branch = await insertBranch(
+        studyId,
+        owner,
+        await insertNode(studyId, owner, 'question'),
+      );
+      const node = await insertNode(studyId, owner);
+      await insertMember(studyId, owner, branch, node);
+      await expect(
+        db.query(`DELETE FROM study_node WHERE id = $1`, { bind: [node] }),
+      ).rejects.toMatchObject(violation('23503', 'study_branch_member_node_fk'));
+      await expect(
+        db.query(`DELETE FROM study_branch WHERE id = $1`, { bind: [branch] }),
+      ).rejects.toMatchObject(violation('23503', 'study_branch_member_branch_fk'));
+      await db.query(`DELETE FROM study WHERE id = $1`, { bind: [studyId] });
+      const [row] = await db.query<{ branches: number; members: number }>(
+        `SELECT (SELECT count(*)::int FROM study_branch WHERE study_id = $1) AS branches,
+                (SELECT count(*)::int FROM study_branch_member WHERE study_id = $1) AS members`,
+        { bind: [studyId], type: QueryTypes.SELECT },
+      );
+      expect(row).toStrictEqual({ branches: 0, members: 0 });
     });
   });
 });

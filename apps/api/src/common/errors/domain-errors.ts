@@ -2,6 +2,8 @@ import {
   type AnchorProblemCode,
   ANNOTATION_LIMIT_EXCEEDED,
   ANNOTATION_UNCHANGED,
+  BRANCH_ERROR_MESSAGES,
+  type BranchErrorCode,
   EDGE_ERROR_MESSAGES,
   type EdgeErrorCode,
   type AnnotationErrorCode,
@@ -353,5 +355,18 @@ export class EdgeRuleError extends Error {
   constructor(readonly code: EdgeErrorCode) {
     super(EDGE_ERROR_MESSAGES[code]);
     this.name = 'EdgeRuleError';
+  }
+}
+
+/**
+ * A branch change the study's or branch's state cannot apply (BIB-60; PRD section 24: 422): a
+ * branch started at a node that is not a Question or Scripture node, at a node that already roots
+ * a branch, or a membership change with nothing to change. Raised under the study lock, so nothing
+ * is written. Fixed messages: never a node's text or a branch name.
+ */
+export class BranchRuleError extends Error {
+  constructor(readonly code: BranchErrorCode) {
+    super(BRANCH_ERROR_MESSAGES[code]);
+    this.name = 'BranchRuleError';
   }
 }

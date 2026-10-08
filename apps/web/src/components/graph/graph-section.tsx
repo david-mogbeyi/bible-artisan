@@ -2,6 +2,7 @@
 
 import '@xyflow/react/dist/style.css';
 import {
+  type Branch,
   type GraphResponse,
   NODE_TYPE_NAMES,
   STUDY_NODE_TYPES,
@@ -32,6 +33,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { branchLabel, branchNodeIds } from '@/lib/branches';
 import { fetchGraph, graphQueryKey } from '@/lib/graph';
 import { type GraphViewMode, useGraphView, useGraphViewStore } from '@/lib/graph-store';
 import {
@@ -55,6 +57,7 @@ import {
 } from '@/lib/graph-view';
 import { nodeOptionText } from '@/lib/nodes';
 import { stepBack, stepForward } from '@/lib/selection-history';
+import { BranchesMenu } from './branches-menu';
 import {
   CONNECT_COPY,
   ConnectDialog,
@@ -171,6 +174,8 @@ interface Arrangement {
   ids: string[];
   proposed: Record<string, XY>;
   previous: Record<string, XY>;
+  /** The arranged branch's name (BIB-60), or null for the selection. */
+  label: string | null;
 }
 
 interface OpenConnect {
@@ -198,6 +203,8 @@ function GraphCanvas({
   const selectionSource = useGraphView((s) => s.selectionSource);
   const hiddenTypes = useGraphView((s) => s.hiddenTypes);
   const focus = useGraphView((s) => s.focus);
+  const soloBranchId = useGraphView((s) => s.soloBranchId);
+  const collapsedBranchIds = useGraphView((s) => s.collapsedBranchIds);
   const localPositions = useGraphView((s) => s.localPositions);
   const history = useGraphView((s) => s.history);
   const viewMode = useGraphView((s) => s.viewMode);
@@ -235,14 +242,22 @@ function GraphCanvas({
     if (largeStart) store.getState().setFocus({ nodeId: largeStart, depth: FOCUS_DEPTH });
   }, [largeStart, store]);
 
-  // Fallback slots for unpositioned nodes, kept for the page session (a slot never jumps).
+  // Show-only and collapsed branches that left the snapshot are forgotten (BIB-60).
+  useEffect(() => {
+    store.getState().keepBranches(graph.branches.map((branch) => branch.id));
+  }, [graph.branches, store]);
+
+  // Fallback slots for unpositioned nodes, kept for the page session (a slot never jumps). A
+  // branch member goes beside its branch's root (BIB-60).
   const stored = useMemo(() => storedPositions(graph.positions), [graph.positions]);
-  const [fallback, setFallback] = useState(() => fallbackPositions(graph.nodes, stored));
+  const [fallback, setFallback] = useState(() =>
+    fallbackPositions(graph.nodes, stored, {}, graph.branches),
+  );
   const [placedFor, setPlacedFor] = useState(graph.nodes);
   if (placedFor !== graph.nodes) {
     setPlacedFor(graph.nodes);
     setFallback((previous) =>
-      fallbackPositions(graph.nodes, { ...stored, ...localPositions }, previous),
+      fallbackPositions(graph.nodes, { ...stored, ...localPositions }, previous, graph.branches),
     );
   }
 
@@ -253,6 +268,8 @@ function GraphCanvas({
   const [dragging, setDragging] = useState<Positions>({});
   const arrangeButton = useRef<HTMLButtonElement>(null);
   const applyButton = useRef<HTMLButtonElement>(null);
+  /** The Arrange button that opened the preview (selection or a branch row), for focus return. */
+  const arrangeOpener = useRef<HTMLButtonElement | null>(null);
 
   const positions: Positions = useMemo(
     () => ({
@@ -265,10 +282,14 @@ function GraphCanvas({
     [dragging, fallback, localPositions, preview, stored],
   );
   const view = useMemo(
-    () => visibility(content, { hiddenTypes, focus }),
-    [content, focus, hiddenTypes],
+    () => visibility(content, { hiddenTypes, focus, soloBranchId, collapsedBranchIds }),
+    [collapsedBranchIds, content, focus, hiddenTypes, soloBranchId],
   );
-  const data = useMemo(() => nodeData(content), [content]);
+  const data = useMemo(() => nodeData(content, view.collapsedByRoot), [content, view]);
+  const nodesById = useMemo(
+    () => new Map(graph.nodes.map((node) => [node.id, node])),
+    [graph.nodes],
+  );
   const selected = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
   // Handles start a drag-to-connect only where nodes can be moved too (editable and wide).
   const connectable = movable && !preview && graph.nodes.length >= 2;
@@ -418,15 +439,26 @@ function GraphCanvas({
   const primary = selectedNodeIds.at(-1) ?? null;
   const selectedVisible = selectedNodeIds.filter((id) => view.visible.has(id));
 
-  function startArrange() {
-    const ids = selectedVisible;
+  function openPreview(ids: string[], label: string | null, anchorId: string | null) {
     const previous: Record<string, XY> = {};
     for (const id of ids) {
       const position = positions[id];
       if (position) previous[id] = position;
     }
     setArrangeMessage('');
-    setPreview({ ids, previous, proposed: arrange(ids, content, positions) });
+    setPreview({ ids, previous, proposed: arrange(ids, content, positions, anchorId), label });
+  }
+
+  function startArrange() {
+    arrangeOpener.current = arrangeButton.current;
+    openPreview(selectedVisible, null, null);
+  }
+
+  /** Arrange a branch (BIB-60): its root and live members, the root staying where it is. */
+  function startBranchArrange(branch: Branch, opener: HTMLButtonElement) {
+    arrangeOpener.current = opener;
+    const ids = branchNodeIds(branch).filter((id) => live.has(id));
+    openPreview(ids, branchLabel(branch, nodesById), branch.rootNodeId);
   }
 
   /** Set when a preview closes, so focus returns to Arrange once it is enabled again. */
@@ -435,7 +467,7 @@ function GraphCanvas({
     if (preview) applyButton.current?.focus();
     else if (returnToArrange.current) {
       returnToArrange.current = false;
-      arrangeButton.current?.focus();
+      (arrangeOpener.current?.isConnected ? arrangeOpener.current : arrangeButton.current)?.focus();
     }
   }, [preview]);
 
@@ -471,8 +503,10 @@ function GraphCanvas({
   }
 
   const tooMany = selectedVisible.length > MAX_ARRANGE_NODES;
+  const soloBranch = graph.branches.find((branch) => branch.id === soloBranchId);
+  const soloLabel = soloBranch ? branchLabel(soloBranch, nodesById) : null;
   const summary = [
-    visibilityText(graph.nodes.length, view, focus !== null),
+    visibilityText(graph.nodes.length, view, focus !== null, soloLabel),
     ...(selectedNodeIds.length > 0
       ? [`${selectedNodeIds.length.toLocaleString('en-US')} selected`]
       : []),
@@ -616,11 +650,41 @@ function GraphCanvas({
           </span>
         ) : null}
         {movable && tooMany ? <span className="text-sm">{GRAPH_COPY.arrangeLimit}</span> : null}
+        <BranchesMenu
+          studyId={study.id}
+          branches={graph.branches}
+          nodesById={nodesById}
+          live={live}
+          soloBranchId={soloBranchId}
+          collapsedBranchIds={collapsedBranchIds}
+          editable={editable}
+          movable={movable}
+          arrangeBlocked={viewMode === 'list' || preview !== null}
+          arrangeInList={viewMode === 'list'}
+          selectedNodeIds={selectedNodeIds}
+          onArrange={startBranchArrange}
+          onAnnounce={setAnnouncement}
+          onLocked={() => {
+            focusLocked.current = true;
+            lock();
+          }}
+        />
       </div>
 
-      <p role="status" aria-live="polite" className="text-sm">
-        {summary}
-      </p>
+      <div className="flex flex-wrap items-center gap-3 text-sm">
+        <p role="status" aria-live="polite">
+          {summary}
+        </p>
+        {soloLabel ? (
+          <button
+            type="button"
+            onClick={() => store.getState().setSoloBranch(null)}
+            className="underline"
+          >
+            Show all
+          </button>
+        ) : null}
+      </div>
       {largeNotice ? (
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <p>
@@ -665,7 +729,9 @@ function GraphCanvas({
           className="flex flex-wrap items-center gap-3"
         >
           <p>
-            Previewing arrangement of {preview.ids.length.toLocaleString('en-US')} selected nodes.
+            {preview.label
+              ? `Previewing arrangement of ${preview.label} (${preview.ids.length.toLocaleString('en-US')} nodes).`
+              : `Previewing arrangement of ${preview.ids.length.toLocaleString('en-US')} selected nodes.`}
           </p>
           <button
             type="button"

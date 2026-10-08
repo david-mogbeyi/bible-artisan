@@ -27,14 +27,15 @@ const compactSelector = (state: { transform: [number, number, number] }) =>
 /**
  * One study node on the canvas (BIB-28), memoized: it re-renders only when its data object (built
  * once per snapshot), its selection or the 50% zoom line changes. Everything is text: type, label,
- * origin, status or kind, "Duplicate", "Branch root" and "Selected", never color or position
+ * origin, status or kind, "Duplicate", "Branch root", a collapsed root's "+N hidden" (BIB-60) and
+ * "Selected", never color or position
  * alone. Below 50% zoom only the type, label, status and "Selected" show (PRD section 12). Edges
  * attach to the handles; on an editable study at full width they show and start a drag-to-connect
  * (BIB-29), a pointer shortcut whose keyboard path is "Connect…". They are never in the tab order.
  */
 function GraphNodeComponent({ data, selected, isConnectable }: NodeProps<GraphFlowNode>) {
   const compact = useStore(compactSelector);
-  const { summary, branchRoot } = data;
+  const { summary, branchRoot, hiddenCount } = data;
   const state = nodeStateText(summary);
   return (
     <div
@@ -62,6 +63,9 @@ function GraphNodeComponent({ data, selected, isConnectable }: NodeProps<GraphFl
           <span className="rounded border px-1">Duplicate</span>
         ) : null}
         {!compact && branchRoot ? <span className="rounded border px-1">Branch root</span> : null}
+        {hiddenCount > 0 ? (
+          <span className="rounded border px-1">+{hiddenCount.toLocaleString('en-US')} hidden</span>
+        ) : null}
         {selected ? <span className="rounded border border-accent px-1">Selected</span> : null}
       </p>
       <Handle

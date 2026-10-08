@@ -6,6 +6,7 @@ import { ConnectionError, TimeoutError } from 'sequelize';
 import {
   AnchorInvalidError,
   AnnotationRuleError,
+  BranchRuleError,
   DependencyUnavailableError,
   EdgeRuleError,
   IdempotencyKeyReusedError,
@@ -160,7 +161,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof NoteRuleError ||
       exception instanceof AnnotationRuleError ||
       exception instanceof NodeRuleError ||
-      exception instanceof EdgeRuleError
+      exception instanceof EdgeRuleError ||
+      exception instanceof BranchRuleError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,

@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { MutationModule } from '../../common/mutation/mutation.module';
 import { BibleContentModule } from '../bible-content/bible-content.module';
 import { StudyModule } from '../study/study.module';
+import { BranchesController } from './branches.controller';
+import { BranchesService } from './branches.service';
 import { EdgesController } from './edges.controller';
 import { EdgesService } from './edges.service';
 import { GraphController } from './graph.controller';
@@ -18,12 +20,15 @@ import { NodesService } from './nodes.service';
  * table, and Scripture references through `ReferenceService`. Graph owns `study_edge` (BIB-27,
  * `/studies/:id/edges`; `connectNodes` composes into other mutations), and the persistent layout
  * (BIB-28, `GET /studies/:id/graph`, `PATCH /studies/:id/positions`): `study_view_state` and
- * `study_node_position`. It reads branches through Study's `StudyGraphService`. NodeVersion and
- * branch membership (BIB-60) arrive with Graph's later tickets.
+ * `study_node_position`. Branches (BIB-60, `/studies/:id/branches`): Study creates a study's
+ * initial branch (`StudyGraphService.ensureInitialBranch`) and lists branches for the snapshot;
+ * Graph starts every other branch, owns `study_branch_member` and changes membership
+ * (`changeBranchMembers` composes into other mutations, BIB-33). NodeVersion arrives with Graph's
+ * later tickets.
  */
 @Module({
   imports: [MutationModule, StudyModule, BibleContentModule],
-  controllers: [NodesController, EdgesController, GraphController],
-  providers: [NodesService, EdgesService, GraphService],
+  controllers: [NodesController, EdgesController, GraphController, BranchesController],
+  providers: [NodesService, EdgesService, GraphService, BranchesService],
 })
 export class GraphModule {}

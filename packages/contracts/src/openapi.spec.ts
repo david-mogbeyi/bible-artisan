@@ -742,6 +742,41 @@ describe('buildOpenApiDocument', () => {
             'EdgeStateRequest',
           ),
         },
+        '/studies/{studyId}/branches': {
+          post: noteOperation(
+            [
+              'Question or Scripture node',
+              'BRANCH_ROOT_TYPE_NOT_ALLOWED',
+              'BRANCH_EXISTS',
+              "expectedRevision is the study's revision",
+              'branch_created',
+              'contentRevision never moves',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId],
+            201,
+            'The new branch',
+            'CreateBranchResponse',
+            'CreateBranchRequest',
+          ),
+        },
+        '/studies/{studyId}/branches/{branchId}/members': {
+          patch: noteOperation(
+            [
+              'at most 100',
+              'BRANCH_UNCHANGED',
+              "expectedRevision is the branch's revision",
+              'study revision never moves',
+              'branch_members_changed',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId, uuidParam('branchId')],
+            200,
+            'The branch as changed',
+            'BranchMutationResponse',
+            'UpdateBranchMembersRequest',
+          ),
+        },
         '/studies/{studyId}/graph': {
           get: noteOperation(
             [
@@ -935,6 +970,10 @@ describe('buildOpenApiDocument', () => {
       'EdgeStateRequest',
       'EdgeMutationResponse',
       'EdgeListResponse',
+      'CreateBranchRequest',
+      'CreateBranchResponse',
+      'UpdateBranchMembersRequest',
+      'BranchMutationResponse',
       'GraphResponse',
       'SavePositionsRequest',
       'SavePositionsResponse',

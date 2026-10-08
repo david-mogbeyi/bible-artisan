@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { branchSchema } from './branch';
 import { EDGE_ORIGINS, EDGE_TYPES } from './edge';
 import { eventSequenceSchema, expectedRevisionSchema } from './mutation';
 import { nodeSummarySchema } from './node';
@@ -87,23 +88,12 @@ export const graphEdgeSchema = z.object({
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
 
 /**
- * A study branch as stored today (BIB-19's initial branch): its id and root only. Membership,
- * labels and branch revisions arrive with BIB-60.
- */
-export const graphBranchSchema = z.object({
-  id: z.uuid(),
-  rootNodeId: z.uuid(),
-  createdAt: z.iso.datetime(),
-});
-
-export type GraphBranch = z.infer<typeof graphBranchSchema>;
-
-/**
  * `GET /v1/studies/:studyId/graph`: one consistent snapshot (read in one transaction), so the
  * rows, `contentRevision` and `viewRevision` describe the same moment.
  * - `nodes`: exactly `GET /nodes`'s items (live nodes, oldest first, ties by id);
  * - `edges`: live edges whose two endpoints are live, oldest first (ties by id), without notes;
- * - `branches`: oldest first (ties by id);
+ * - `branches`: oldest first (ties by id), each with its revision and live member nodes (BIB-60,
+ *   `branchSchema`);
  * - `positions`: stored positions of live nodes, by node id;
  * - `viewRevision`: the view-state revision, 1 before the first position save.
  * Unpaginated, bounded by the 2,000-node and 6,000-edge caps.
@@ -114,7 +104,7 @@ export const graphResponseSchema = z.object({
   viewRevision: z.number().int().positive(),
   nodes: z.array(nodeSummarySchema),
   edges: z.array(graphEdgeSchema),
-  branches: z.array(graphBranchSchema),
+  branches: z.array(branchSchema),
   positions: z.array(
     z.object({
       nodeId: z.uuid(),
