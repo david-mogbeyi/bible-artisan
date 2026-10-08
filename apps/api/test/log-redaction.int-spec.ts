@@ -1468,6 +1468,142 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs conclusion versions and status actions (BIB-30) without statements, reasons, labels, ids, or keys, on success and on refusals', async () => {
+    const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
+      .send({ blank: true })
+      .expect(201);
+    const studyId = track((created.body as { studyId: string }).studyId);
+    const listRoute = '/v1/studies/:studyId/nodes';
+    const itemRoute = '/v1/studies/:studyId/nodes/:nodeId';
+    const versionsRoute = '/v1/studies/:studyId/nodes/:nodeId/versions';
+    const send = (method: 'get' | 'post' | 'patch', path: string, body?: object) => {
+      const req = withPrivateChannels(
+        http()[method](`/v1/studies/${studyId}${path}${query()}`),
+        cookie,
+      ).set('Idempotency-Key', track(randomUUID()));
+      return body ? req.send(body) : req;
+    };
+    const conclusion = await send('post', '/nodes', {
+      expectedRevision: 1,
+      type: 'conclusion',
+      text: track(`SENTINEL-conclusion-statement-${randomUUID()}`),
+    });
+    await expectLogged(conclusion, { method: 'POST', route: listRoute, status: 201 });
+    const conclusionId = track((conclusion.body as { id: string }).id);
+    const evidence = await send('post', '/nodes', {
+      expectedRevision: 2,
+      type: 'observation',
+      text: track(`SENTINEL-conclusion-evidence-${randomUUID()}`),
+      observationKind: 'textual_observation',
+    });
+    const evidenceId = track((evidence.body as { id: string }).id);
+    const edge = await send('post', '/edges', {
+      expectedRevision: 3,
+      sourceNodeId: evidenceId,
+      targetNodeId: conclusionId,
+      type: 'supports',
+    });
+    track((edge.body as { id: string }).id);
+
+    const supported = await send('patch', `/nodes/${conclusionId}`, {
+      expectedRevision: 1,
+      status: 'supported',
+      changeReason: track(`SENTINEL-conclusion-reason-${randomUUID()}`),
+    });
+    await expectLogged(supported, { method: 'PATCH', route: itemRoute, status: 200 });
+    const stale = await send('patch', `/nodes/${conclusionId}`, {
+      expectedRevision: 1,
+      status: 'challenged',
+      changeReason: secret('conclusion-stale-reason'),
+    });
+    await expectLogged(
+      stale,
+      { method: 'PATCH', route: itemRoute, status: 409 },
+      {
+        errorType: 'RevisionConflictError',
+        body: envelope({
+          code: 'REVISION_CONFLICT',
+          message: 'Revision conflict',
+          currentRevision: 2,
+        }),
+      },
+    );
+    const noReason = await send('patch', `/nodes/${conclusionId}`, {
+      expectedRevision: 2,
+      text: secret('conclusion-unexplained-text'),
+    });
+    await expectLogged(
+      noReason,
+      { method: 'PATCH', route: itemRoute, status: 400 },
+      {
+        errorType: 'ValidationError',
+        body: envelope({
+          code: 'VALIDATION',
+          message: 'Invalid request',
+          fieldErrors: { changeReason: ['Say why you are making this change'] },
+        }),
+      },
+    );
+    const revised = await send('patch', `/nodes/${conclusionId}`, {
+      expectedRevision: 2,
+      text: track(`SENTINEL-conclusion-new-statement-${randomUUID()}`),
+      changeReason: track(`SENTINEL-conclusion-reason-${randomUUID()}`),
+    });
+    await expectLogged(revised, { method: 'PATCH', route: itemRoute, status: 200 });
+    const tentative = await send('patch', `/nodes/${conclusionId}`, {
+      expectedRevision: 3,
+      status: 'tentative',
+      changeReason: track(`SENTINEL-conclusion-tentative-reason-${randomUUID()}`),
+    });
+    await expectLogged(tentative, { method: 'PATCH', route: itemRoute, status: 200 });
+    const again = await send('patch', `/nodes/${conclusionId}`, {
+      expectedRevision: 4,
+      status: 'tentative',
+      changeReason: secret('conclusion-again-reason'),
+    });
+    await expectLogged(
+      again,
+      { method: 'PATCH', route: itemRoute, status: 422 },
+      {
+        errorType: 'NodeRuleError',
+        body: envelope({ code: 'NODE_UNCHANGED', message: 'The node already has these values' }),
+      },
+    );
+    const lonely = await send('post', '/nodes', {
+      expectedRevision: 4,
+      type: 'conclusion',
+      text: track(`SENTINEL-conclusion-lonely-${randomUUID()}`),
+    });
+    const lonelyId = track((lonely.body as { id: string }).id);
+    const needsEvidence = await send('patch', `/nodes/${lonelyId}`, {
+      expectedRevision: 1,
+      status: 'supported',
+      changeReason: secret('conclusion-evidence-reason'),
+    });
+    await expectLogged(
+      needsEvidence,
+      { method: 'PATCH', route: itemRoute, status: 422 },
+      {
+        errorType: 'NodeRuleError',
+        body: envelope({
+          code: 'CONCLUSION_EVIDENCE_REQUIRED',
+          message:
+            'Connect supporting evidence first: a relationship that supports this conclusion, or one this conclusion is inferred from.',
+        }),
+      },
+    );
+    await expectLogged(await send('get', `/nodes/${conclusionId}/versions`), {
+      method: 'GET',
+      route: versionsRoute,
+      status: 200,
+    });
+    await expectLogged(
+      await send('get', `/nodes/${track(randomUUID())}/versions`),
+      { method: 'GET', route: versionsRoute, status: 404 },
+      { errorType: 'NotFoundError', body: NOT_FOUND },
+    );
+  });
+
   it('logs typed relationships (BIB-27) without edge notes, ids, or keys, on success and on refusals', async () => {
     const created = await withPrivateChannels(http().post('/v1/studies'), cookie)
       .send({ blank: true })

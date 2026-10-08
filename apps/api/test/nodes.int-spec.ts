@@ -36,6 +36,9 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const anyId: unknown = expect.stringMatching(UUID);
 const anyTime: unknown = expect.stringMatching(ISO);
 
+/** The conclusion-version fields every node mutation response carries (BIB-30). */
+const NO_VERSION = { versionId: null, previousVersionId: null, warnings: [] };
+
 const STUDIES = '/v1/studies';
 const nodesPath = (studyId: string): string => `/v1/studies/${studyId}/nodes`;
 const nodePath = (studyId: string, nodeId: string): string =>
@@ -289,6 +292,9 @@ describe('typed graph nodes (BIB-25)', () => {
             lastEventSequence: String(index + 2),
             outcome: 'created',
             canonicalNodeId: null,
+            versionId: body.type === 'conclusion' ? anyId : null,
+            previousVersionId: null,
+            warnings: [],
           },
         ]);
         created.push(res.body as CreateNodeResponse);
@@ -318,6 +324,8 @@ describe('typed graph nodes (BIB-25)', () => {
               observationKind: null,
               referenceId: romans.id,
               canonicalNodeId: null,
+              established: false,
+              evidenceIncomplete: false,
               revision: 1,
               ...timesOf(0),
             },
@@ -330,6 +338,8 @@ describe('typed graph nodes (BIB-25)', () => {
               observationKind: null,
               referenceId: null,
               canonicalNodeId: null,
+              established: false,
+              evidenceIncomplete: false,
               revision: 1,
               ...timesOf(1),
             },
@@ -342,6 +352,8 @@ describe('typed graph nodes (BIB-25)', () => {
               observationKind: 'textual_observation',
               referenceId: null,
               canonicalNodeId: null,
+              established: false,
+              evidenceIncomplete: false,
               revision: 1,
               ...timesOf(2),
             },
@@ -354,6 +366,8 @@ describe('typed graph nodes (BIB-25)', () => {
               observationKind: null,
               referenceId: null,
               canonicalNodeId: null,
+              established: false,
+              evidenceIncomplete: false,
               revision: 1,
               ...timesOf(3),
             },
@@ -366,6 +380,8 @@ describe('typed graph nodes (BIB-25)', () => {
               observationKind: null,
               referenceId: null,
               canonicalNodeId: null,
+              established: false,
+              evidenceIncomplete: false,
               revision: 1,
               ...timesOf(4),
             },
@@ -378,6 +394,8 @@ describe('typed graph nodes (BIB-25)', () => {
               observationKind: null,
               referenceId: null,
               canonicalNodeId: null,
+              established: false,
+              evidenceIncomplete: false,
               revision: 1,
               ...timesOf(5),
             },
@@ -422,6 +440,10 @@ describe('typed graph nodes (BIB-25)', () => {
             ...common(4, 'user'),
             text: 'Conscience bears witness with the Spirit.',
             status: 'tentative',
+            establishedAt: null,
+            evidenceIncomplete: false,
+            liveEvidenceCount: 0,
+            version: { id: anyId, number: 1 },
           },
         ],
         [
@@ -493,7 +515,11 @@ describe('typed graph nodes (BIB-25)', () => {
             payload: { nodeId: observation.id, observationKind: 'interpretation' },
           },
           { sequence: '5', eventType: 'thought_created', payload: { nodeId: thought.id } },
-          { sequence: '6', eventType: 'conclusion_created', payload: { nodeId: conclusion.id } },
+          {
+            sequence: '6',
+            eventType: 'conclusion_created',
+            payload: { nodeId: conclusion.id, versionId: anyId },
+          },
           {
             sequence: '7',
             eventType: 'source_created',
@@ -705,6 +731,7 @@ describe('typed graph nodes (BIB-25)', () => {
           lastEventSequence: '2',
           outcome: 'created',
           canonicalNodeId: null,
+          ...NO_VERSION,
         },
       ]);
       const node = created.body as CreateNodeResponse;
@@ -730,6 +757,7 @@ describe('typed graph nodes (BIB-25)', () => {
           lastEventSequence: sequence,
           outcome: 'focused_existing',
           canonicalNodeId: null,
+          ...NO_VERSION,
         },
       ];
       const after = await counters(study.studyId);
@@ -793,6 +821,7 @@ describe('typed graph nodes (BIB-25)', () => {
           lastEventSequence: '3',
           outcome: 'explicit_duplicate',
           canonicalNodeId: canonical.id,
+          ...NO_VERSION,
         },
       ]);
       const copy = duplicate.body as CreateNodeResponse;
@@ -1058,6 +1087,7 @@ describe('typed graph nodes (BIB-25)', () => {
         createdAt: node.createdAt,
         updatedAt: anyTime,
         lastEventSequence: String(sequence),
+        ...NO_VERSION,
       });
       expect({
         saved: saved.map((res): unknown[] => [res.status, res.body]),
@@ -1153,7 +1183,7 @@ describe('typed graph nodes (BIB-25)', () => {
         await patch(thought.id, { type: 'observation', text: 'T2' }),
         await patch(thought.id, { origin: 'ai', text: 'T2' }),
         await patch(question, { text: 'Rewritten question' }),
-        await patch(conclusion.id, { text: 'Rewritten conclusion' }),
+        await patch(conclusion.id, { observationKind: 'interpretation' }),
         await patch(scripture, { text: 'Romans 9:2' }),
         await patch(thought.id, { observationKind: 'interpretation' }),
         await patch(observation.id, { source: { title: 'S', kind: 'web', locator: 'p' } }),

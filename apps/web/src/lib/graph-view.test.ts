@@ -31,6 +31,8 @@ function node(
     observationKind: null,
     referenceId: null,
     canonicalNodeId: null,
+    established: false,
+    evidenceIncomplete: false,
     revision: 1,
     createdAt: `2026-10-02T10:00:${String(n % 60).padStart(2, '0')}.000Z`,
     updatedAt: '2026-10-02T10:00:00.000Z',

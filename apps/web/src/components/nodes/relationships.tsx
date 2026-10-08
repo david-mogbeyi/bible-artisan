@@ -22,6 +22,7 @@ import {
   CONNECT_COPY,
   ConnectDialog,
   type ConnectOutcome,
+  type ConnectPrefill,
 } from '@/components/graph/connect-dialog';
 import {
   deleteEdge,
@@ -33,7 +34,7 @@ import {
   thisNode,
   updateEdge,
 } from '@/lib/edges';
-import { nodeOptionText } from '@/lib/nodes';
+import { invalidateNodeChange, nodeOptionText } from '@/lib/nodes';
 import { TextAreaField } from './node-fields';
 import {
   codeOf,
@@ -60,6 +61,7 @@ export const RELATIONSHIPS_COPY = {
   unknownRemove: "Couldn't confirm the relationship was removed. Retry won't remove it twice.",
   failedRemove: "Couldn't remove the relationship.",
   alreadyRemoved: 'This relationship was already removed.',
+  markerCleared: 'A conclusion it supported is no longer marked Established by me.',
 } as const;
 
 const LOAD_COPY: ProblemCopy = {
@@ -86,6 +88,8 @@ export function Relationships({
   editable,
   onLocked,
   onShowNode,
+  evidenceConnect = null,
+  onEvidenceConnectClosed,
 }: {
   studyId: string;
   node: { id: string; type: StudyNodeType };
@@ -95,6 +99,12 @@ export function Relationships({
   editable: boolean;
   onLocked: () => void;
   onShowNode: (nodeId: string) => void;
+  /**
+   * A conclusion's "Connect evidence" (BIB-30) asks for the Connect dialog prefilled with the
+   * conclusion as the target; the node detail owns the request, this section hosts the dialog.
+   */
+  evidenceConnect?: ConnectPrefill | null;
+  onEvidenceConnectClosed?: (outcome: ConnectOutcome) => void;
 }) {
   const headingId = useId();
   const noOtherId = useId();
@@ -131,8 +141,17 @@ export function Relationships({
       ? edgeSentence(labelOf(otherId), type, self)
       : edgeSentence(self, type, labelOf(otherId));
 
-  const refresh = (edge: Pick<Edge, 'sourceNodeId' | 'targetNodeId'>) =>
-    invalidateEdgeChange(queryClient, studyId, edge);
+  const refresh = (edge: Pick<Edge, 'sourceNodeId' | 'targetNodeId'>, cleared: string[] = []) =>
+    Promise.all([
+      invalidateEdgeChange(queryClient, studyId, edge),
+      // A conclusion whose last supporting evidence this change took away lost its marker
+      // (BIB-30): its detail, history and the lists are read again.
+      ...cleared.map((nodeId) => invalidateNodeChange(queryClient, studyId, nodeId)),
+    ]);
+
+  /** The message for a change, with the marker notice when the change cleared one. */
+  const said = (message: string, cleared: string[]) =>
+    cleared.length > 0 ? `${message} ${RELATIONSHIPS_COPY.markerCleared}` : message;
 
   function connectClosed(outcome: ConnectOutcome) {
     setConnecting(false);
@@ -179,14 +198,14 @@ export function Relationships({
               otherLabel={labelOf(otherEnd(edge, node.id))}
               editable={editable}
               onShow={() => onShowNode(otherEnd(edge, node.id))}
-              onSaved={() => {
-                void refresh(edge);
-                setAnnouncement(RELATIONSHIPS_COPY.saved);
+              onSaved={(cleared) => {
+                void refresh(edge, cleared);
+                setAnnouncement(said(RELATIONSHIPS_COPY.saved, cleared));
               }}
-              onRemoved={() => {
+              onRemoved={(cleared) => {
                 focusAt.current = index;
-                void refresh(edge);
-                setAnnouncement(RELATIONSHIPS_COPY.removed);
+                void refresh(edge, cleared);
+                setAnnouncement(said(RELATIONSHIPS_COPY.removed, cleared));
               }}
               onLocked={onLocked}
               refetch={() => edges.refetch()}
@@ -226,6 +245,19 @@ export function Relationships({
           onClose={connectClosed}
         />
       ) : null}
+      {editable && evidenceConnect ? (
+        <ConnectDialog
+          studyId={studyId}
+          studyRevision={studyRevision}
+          nodes={nodes}
+          prefill={evidenceConnect}
+          onClose={(outcome) => {
+            if (outcome === 'locked') onLocked();
+            if (outcome === 'created') setAnnouncement(CONNECT_COPY.added);
+            onEvidenceConnectClosed?.(outcome);
+          }}
+        />
+      ) : null}
     </section>
   );
 }
@@ -262,8 +294,8 @@ function RelationshipItem({
   otherLabel: string;
   editable: boolean;
   onShow: () => void;
-  onSaved: () => void;
-  onRemoved: () => void;
+  onSaved: (clearedNodeIds: string[]) => void;
+  onRemoved: (clearedNodeIds: string[]) => void;
   onLocked: () => void;
   refetch: () => Promise<unknown>;
 }) {
@@ -329,9 +361,9 @@ function RelationshipItem({
           otherId={otherId}
           reversed={reversed}
           sentence={sentence}
-          onSaved={() => {
+          onSaved={(cleared) => {
             close('edit');
-            onSaved();
+            onSaved(cleared);
           }}
           onCancel={() => close('edit')}
           onLocked={onLocked}
@@ -368,7 +400,7 @@ function EditRelationship({
   otherId: string;
   reversed: boolean;
   sentence: (type: EdgeType, otherId: string, reversed: boolean) => string;
-  onSaved: () => void;
+  onSaved: (clearedNodeIds: string[]) => void;
   onCancel: () => void;
   onLocked: () => void;
   refetch: () => Promise<unknown>;
@@ -396,13 +428,13 @@ function EditRelationship({
     setTypeError(undefined);
     const result = await attempt;
     if (result.ok) {
-      onSaved();
+      onSaved(result.value.establishmentClearedNodeIds);
       return;
     }
     const { error } = result;
     if (result.unknown) setProblem({ text: RELATIONSHIPS_COPY.unknownSave, retry: true });
     else if (isLifecycle(error)) onLocked();
-    else if (codeOf(error) === EDGE_UNCHANGED) onSaved();
+    else if (codeOf(error) === EDGE_UNCHANGED) onSaved([]);
     else if (statusOf(error) === 409)
       setProblem({ text: RELATIONSHIPS_COPY.editConflict, reload: true });
     else if (statusOf(error) === 404) {
@@ -497,7 +529,7 @@ function RemoveRelationship({
 }: {
   studyId: string;
   edge: Edge;
-  onRemoved: () => void;
+  onRemoved: (clearedNodeIds: string[]) => void;
   onCancel: () => void;
   onLocked: () => void;
   refetch: () => Promise<unknown>;
@@ -518,7 +550,7 @@ function RemoveRelationship({
     setProblem(null);
     const result = await attempt;
     if (result.ok) {
-      onRemoved();
+      onRemoved(result.value.establishmentClearedNodeIds);
       return;
     }
     const { error } = result;

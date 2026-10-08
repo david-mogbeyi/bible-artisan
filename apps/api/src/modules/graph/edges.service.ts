@@ -34,6 +34,7 @@ import { StudyNode } from '../../database/models/study-node.model';
 import type { AppendedEvent } from '../thread/thread.service';
 import { StudyAccessService } from '../study/study-access.service';
 import { StudyRevisionService } from '../study/study-revision.service';
+import { releaseLostEvidence } from './conclusions';
 
 /**
  * Edge events (BIB-27), one per changing request, ids and enums only: never the note, node text
@@ -152,7 +153,9 @@ export async function connectNodes(
   return { outcome: 'created', edge, event };
 }
 
-function edgeFields(edge: StudyEdge): Omit<EdgeMutationResponse, 'lastEventSequence'> {
+function edgeFields(
+  edge: StudyEdge,
+): Omit<EdgeMutationResponse, 'lastEventSequence' | 'establishmentClearedNodeIds'> {
   return {
     id: edge.id,
     studyId: edge.studyId,
@@ -166,8 +169,12 @@ function edgeFields(edge: StudyEdge): Omit<EdgeMutationResponse, 'lastEventSeque
   };
 }
 
-function mutationBody(edge: StudyEdge, lastEventSequence: string): EdgeMutationResponse {
-  return { ...edgeFields(edge), lastEventSequence };
+function mutationBody(
+  edge: StudyEdge,
+  lastEventSequence: string,
+  establishmentClearedNodeIds: string[],
+): EdgeMutationResponse {
+  return { ...edgeFields(edge), lastEventSequence, establishmentClearedNodeIds };
 }
 
 /**
@@ -219,7 +226,8 @@ export class EdgesService {
           return { status: 200, body: response };
         }
         const response: CreateEdgeResponse = {
-          ...mutationBody(result.edge, result.event.sequence),
+          ...edgeFields(result.edge),
+          lastEventSequence: result.event.sequence,
           studyRevision,
           outcome: 'created',
         };
@@ -304,7 +312,18 @@ export class EdgesService {
             noteChanged: note !== current.note,
           },
         });
-        return { status: 200, body: mutationBody(updated, event.sequence) };
+        // A retype can end the edge's life as supporting evidence (BIB-30); a note-only edit
+        // cannot lose any.
+        const lost =
+          type === current.type ? null : await releaseLostEvidence(m, edgeBefore(current));
+        return {
+          status: 200,
+          body: mutationBody(
+            updated,
+            lost?.lastEventSequence ?? event.sequence,
+            lost?.clearedNodeIds ?? [],
+          ),
+        };
       },
     });
   }
@@ -326,6 +345,7 @@ export class EdgesService {
       bumpsContentRevision: true,
       work: async (m) => {
         const current = await lockedEdge(m, edgeId, expectedRevision);
+        const before = edgeBefore(current);
         const removed = await m.updateWithExpectedRevision(StudyEdge, {
           id: current.id,
           expectedRevision,
@@ -341,10 +361,28 @@ export class EdgesService {
             edgeType: removed.type,
           },
         });
-        return { status: 200, body: mutationBody(removed, event.sequence) };
+        const lost = await releaseLostEvidence(m, before);
+        return {
+          status: 200,
+          body: mutationBody(
+            removed,
+            lost.lastEventSequence ?? event.sequence,
+            lost.clearedNodeIds,
+          ),
+        };
       },
     });
   }
+}
+
+/** The edge's id, type and endpoints, copied before a change (`current` is the pre-change row). */
+function edgeBefore(edge: StudyEdge) {
+  return {
+    id: edge.id,
+    type: edge.type,
+    sourceNodeId: edge.sourceNodeId,
+    targetNodeId: edge.targetNodeId,
+  };
 }
 
 /** The rules a type change must pass (PATCH), after the revision check. */
