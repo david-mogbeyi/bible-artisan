@@ -314,9 +314,16 @@ export class EdgesService {
         });
         // A retype can end the edge's life as supporting evidence (BIB-30); a note-only edit
         // cannot lose any.
-        const cleared =
-          type === current.type ? [] : await releaseLostEvidence(m, edgeBefore(current));
-        return { status: 200, body: mutationBody(updated, event.sequence, cleared) };
+        const lost =
+          type === current.type ? null : await releaseLostEvidence(m, edgeBefore(current));
+        return {
+          status: 200,
+          body: mutationBody(
+            updated,
+            lost?.lastEventSequence ?? event.sequence,
+            lost?.clearedNodeIds ?? [],
+          ),
+        };
       },
     });
   }
@@ -354,8 +361,15 @@ export class EdgesService {
             edgeType: removed.type,
           },
         });
-        const cleared = await releaseLostEvidence(m, before);
-        return { status: 200, body: mutationBody(removed, event.sequence, cleared) };
+        const lost = await releaseLostEvidence(m, before);
+        return {
+          status: 200,
+          body: mutationBody(
+            removed,
+            lost.lastEventSequence ?? event.sequence,
+            lost.clearedNodeIds,
+          ),
+        };
       },
     });
   }

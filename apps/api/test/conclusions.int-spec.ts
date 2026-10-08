@@ -704,6 +704,19 @@ describe('conclusion versions and explicit status actions (BIB-30)', () => {
           .map((v) => [v.action, v.status, v.established, v.evidence.length]);
       const cleared = (res: Response) =>
         (res.body as { establishmentClearedNodeIds: string[] }).establishmentClearedNodeIds;
+      // The response names the last event of the transaction: the cleared one, after edge_removed.
+      const clearedEvents = (await events(studyId)).filter(
+        (e) => e.eventType === 'conclusion_establishment_cleared',
+      );
+      expect((removed.body as { lastEventSequence: string }).lastEventSequence).toBe(
+        String(
+          Math.max(
+            ...clearedEvents
+              .filter((e) => (e.payload as { edgeId?: string }).edgeId === removedCase.edge.id)
+              .map((e) => Number(e.sequence)),
+          ),
+        ),
+      );
       expect({
         removed: [removed.status, cleared(removed)],
         retyped: [retyped.status, cleared(retyped)],

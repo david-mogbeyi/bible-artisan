@@ -330,13 +330,19 @@ export interface EdgeBefore {
  * transaction, with the edge as it was before. When that edge counted as supporting evidence for a
  * conclusion that is established and now has none, this clears `established_at` (a revisioned
  * update, so a stale client edit gets 409), writes an `evidence_removed` version and appends
- * `conclusion_establishment_cleared`. The status is kept. Returns the cleared conclusion ids.
+ * `conclusion_establishment_cleared`. The status is kept. Returns the cleared conclusion ids and the
+ * sequence of the event it appended (null when it appended none), so the edge response can name the
+ * last event of its transaction.
  */
-export async function releaseLostEvidence(m: StudyMutation, before: EdgeBefore): Promise<string[]> {
+export async function releaseLostEvidence(
+  m: StudyMutation,
+  before: EdgeBefore,
+): Promise<{ clearedNodeIds: string[]; lastEventSequence: string | null }> {
+  const none = { clearedNodeIds: [], lastEventSequence: null };
   let conclusionId: string;
   if (before.type === 'supports') conclusionId = before.targetNodeId;
   else if (before.type === 'inference_from') conclusionId = before.sourceNodeId;
-  else return [];
+  else return none;
   const conclusion = await StudyNode.findOne({
     where: {
       id: conclusionId,
@@ -347,11 +353,11 @@ export async function releaseLostEvidence(m: StudyMutation, before: EdgeBefore):
       establishedAt: { [Op.ne]: null },
     },
   });
-  if (!conclusion) return [];
+  if (!conclusion) return none;
   const remaining = (await liveEvidence(scopeOf(m), [conclusion.id])).filter(
     (row) => row.role === 'supporting',
   );
-  if (remaining.length > 0) return [];
+  if (remaining.length > 0) return none;
   const cleared = await m.updateWithExpectedRevision(StudyNode, {
     id: conclusion.id,
     expectedRevision: conclusion.revision,
@@ -359,7 +365,7 @@ export async function releaseLostEvidence(m: StudyMutation, before: EdgeBefore):
     where: { deletedAt: null },
   });
   const version = await writeConclusionVersion(m, cleared, 'evidence_removed', null);
-  await m.appendEvent({
+  const event = await m.appendEvent({
     eventType: CONCLUSION_EVENTS.establishmentCleared,
     payload: {
       nodeId: cleared.id,
@@ -368,7 +374,7 @@ export async function releaseLostEvidence(m: StudyMutation, before: EdgeBefore):
       edgeId: before.id,
     },
   });
-  return [cleared.id];
+  return { clearedNodeIds: [cleared.id], lastEventSequence: event.sequence };
 }
 
 /** `established_at` for a request: the database clock when it becomes established. */

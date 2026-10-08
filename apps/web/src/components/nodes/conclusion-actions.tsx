@@ -93,6 +93,11 @@ async function refreshAfter(
   ]);
 }
 
+/** Focuses the first control of a form that has just replaced its opener button. */
+function focusFirstControl(form: HTMLFormElement | null) {
+  form?.querySelector<HTMLElement>('input:not([disabled]), textarea')?.focus();
+}
+
 /** A radio group of statuses with their text names. */
 function StatusRadios<S extends string>({
   legend,
@@ -183,6 +188,7 @@ export function QuestionStatusForm({
   const queryClient = useQueryClient();
   const name = useId();
   const opener = useRef<HTMLButtonElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const returnFocus = useRef(false);
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<QuestionStatus>(node.status);
@@ -197,7 +203,12 @@ export function QuestionStatusForm({
   }, [unsaved, onUnsavedChange]);
   useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
   useEffect(() => {
-    if (open || !returnFocus.current) return;
+    if (open) {
+      // The opener is replaced by the form: move focus to its first control.
+      focusFirstControl(formRef.current);
+      return;
+    }
+    if (!returnFocus.current) return;
     returnFocus.current = false;
     opener.current?.focus();
   }, [open]);
@@ -259,6 +270,7 @@ export function QuestionStatusForm({
   }
   return (
     <form
+      ref={formRef}
       noValidate
       aria-label="Change question status"
       className="flex flex-col gap-3"
@@ -333,6 +345,8 @@ export function ConclusionActions({
   const statusButton = useRef<HTMLButtonElement>(null);
   const markerButton = useRef<HTMLButtonElement>(null);
   const connectButton = useRef<HTMLButtonElement>(null);
+  const reviseForm = useRef<HTMLFormElement>(null);
+  const statusForm = useRef<HTMLFormElement>(null);
   const returnTo = useRef<'revise' | 'status' | null>(null);
   const wasConnecting = useRef(false);
   const [mode, setMode] = useState<Mode>('idle');
@@ -366,6 +380,8 @@ export function ConclusionActions({
   useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
 
   useEffect(() => {
+    if (mode === 'revise') focusFirstControl(reviseForm.current);
+    if (mode === 'status') focusFirstControl(statusForm.current);
     if (mode !== 'idle' || !returnTo.current) return;
     (returnTo.current === 'revise' ? reviseButton : statusButton).current?.focus();
     returnTo.current = null;
@@ -580,6 +596,7 @@ export function ConclusionActions({
 
       {editable && mode === 'revise' ? (
         <form
+          ref={reviseForm}
           noValidate
           aria-label="Revise conclusion"
           className="flex flex-col gap-3"
@@ -624,6 +641,7 @@ export function ConclusionActions({
 
       {editable && mode === 'status' ? (
         <form
+          ref={statusForm}
           noValidate
           aria-label="Change conclusion status"
           className="flex flex-col gap-3"
