@@ -74,6 +74,7 @@ describe('GET /v1/openapi.json when the contracts barrel was loaded before AppMo
       'NodeMutationResponse',
       'NodeListResponse',
       'NodeResponse',
+      'NodeVersionListResponse',
       'CreateEdgeRequest',
       'CreateEdgeResponse',
       'UpdateEdgeRequest',

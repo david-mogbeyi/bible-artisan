@@ -286,6 +286,15 @@ const ROUTES: Record<string, Access> = {
       test: 'PATCH /v1/studies/:studyId/nodes/:nodeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  // Conclusion versions (BIB-30): Bob's calls on Alice's conclusion's history, absent and malformed
+  // ids, Alice's node under his own study, and under another of her studies.
+  'GET /v1/studies/:studyId/nodes/:nodeId/versions': {
+    access: 'private',
+    crossUserTest: {
+      file: 'conclusions.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/nodes/:nodeId/versions gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
   // Typed relationships (BIB-27): Bob's calls on Alice's study, edges and nodes, absent and
   // malformed ids, Alice's edge or nodes under his own study, and her edge under another of her
   // studies.

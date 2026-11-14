@@ -27,7 +27,14 @@ import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert
 import { invalidateGraph } from '@/lib/graph';
 import { ApiError } from '@/lib/api-client';
 import { bibleHref, fetchTranslations, TRANSLATIONS_QUERY_KEY } from '@/lib/bible';
-import { fetchNode, formatNodeTime, nodeQueryKey, nodesQueryKey, updateNode } from '@/lib/nodes';
+import {
+  fetchNode,
+  formatNodeTime,
+  invalidateNodeChange,
+  nodeQueryKey,
+  nodesQueryKey,
+  updateNode,
+} from '@/lib/nodes';
 import { invalidateLibrary } from '@/lib/studies';
 import {
   type FieldErrors,
@@ -39,6 +46,7 @@ import {
   TextAreaField,
 } from './node-fields';
 import { Branches } from './branches';
+import { ConclusionActions, QuestionStatusForm } from './conclusion-actions';
 import { Relationships } from './relationships';
 
 export const NODE_DETAIL_COPY = {
@@ -119,6 +127,9 @@ export function NodeDetail({
 }) {
   const headingId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
+  const queryClient = useQueryClient();
+  /** The Connect dialog opened from a conclusion's "Connect evidence" (hosted by Relationships). */
+  const [connectingEvidence, setConnectingEvidence] = useState(false);
   const node = useQuery({
     queryKey: nodeQueryKey(studyId, nodeId),
     queryFn: () => fetchNode(studyId, nodeId),
@@ -171,6 +182,32 @@ export function NodeDetail({
         <Row label="Created">{formatNodeTime(data.createdAt)}</Row>
         <Row label="Updated">{formatNodeTime(data.updatedAt)}</Row>
       </dl>
+      {data.type === 'question' ? (
+        <QuestionStatusForm
+          key={`${data.id}-status`}
+          studyId={studyId}
+          node={data}
+          editable={editable}
+          onSaved={onSaved}
+          onLocked={onLocked}
+          refetch={() => node.refetch()}
+          onUnsavedChange={onUnsavedChange}
+        />
+      ) : null}
+      {data.type === 'conclusion' ? (
+        <ConclusionActions
+          key={`${data.id}-actions`}
+          studyId={studyId}
+          node={data}
+          editable={editable}
+          onSaved={onSaved}
+          onLocked={onLocked}
+          refetch={() => node.refetch()}
+          onUnsavedChange={onUnsavedChange}
+          onConnectEvidence={() => setConnectingEvidence(true)}
+          connecting={connectingEvidence}
+        />
+      ) : null}
       {editable && isEditable(data) ? (
         <EditNode
           key={data.id}
@@ -190,6 +227,14 @@ export function NodeDetail({
         editable={editable}
         onLocked={onLocked}
         onShowNode={onShowNode}
+        evidenceConnect={
+          connectingEvidence && data.type === 'conclusion' ? { fromId: null, toId: data.id } : null
+        }
+        onEvidenceConnectClosed={(outcome) => {
+          setConnectingEvidence(false);
+          // A new relationship may be the evidence the conclusion was missing.
+          if (outcome === 'created') void invalidateNodeChange(queryClient, studyId, nodeId);
+        }}
       />
       <Branches
         studyId={studyId}

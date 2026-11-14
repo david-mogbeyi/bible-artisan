@@ -18,6 +18,8 @@ import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { BibleSuperscription } from '../src/database/models/bible-superscription.model';
 import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
+import { NodeVersionEvidence } from '../src/database/models/node-version-evidence.model';
+import { NodeVersion } from '../src/database/models/node-version.model';
 import { NoteVersion } from '../src/database/models/note-version.model';
 import { Note } from '../src/database/models/note.model';
 import { ScriptureReference } from '../src/database/models/scripture-reference.model';
@@ -348,6 +350,7 @@ describe('Sequelize models against the real schema', () => {
       scriptureReferenceId: null,
       payloadJson: null,
       canonicalNodeId: null,
+      establishedAt: null,
     };
     for (const row of rows) {
       const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, ...row });
@@ -834,6 +837,103 @@ describe('Sequelize models against the real schema', () => {
     }
     await Study.destroy({ where: { id: study.id } });
     expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('creates a NodeVersion and its NodeVersionEvidence and a StudyNode.establishedAt through the models and reads them back with DB defaults; they cannot cross studies, break their CHECKs or be updated; a study delete cascades (BIB-30)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const conclusion = await StudyNode.create({
+      ...scope,
+      type: 'conclusion',
+      origin: 'user',
+      title: 'C',
+      conclusionStatus: 'supported',
+      establishedAt: new Date('2026-10-08T10:00:00.000Z'),
+    });
+    const evidenceNode = await StudyNode.create({ ...scope, ...THOUGHT });
+    const edge = await StudyEdge.create({
+      ...scope,
+      sourceNodeId: evidenceNode.id,
+      targetNodeId: conclusion.id,
+      type: 'supports',
+      origin: 'user',
+    });
+    expect(
+      (await StudyNode.findByPk(conclusion.id, { rejectOnEmpty: true })).establishedAt,
+    ).toStrictEqual(new Date('2026-10-08T10:00:00.000Z'));
+    const versionValues = {
+      ...scope,
+      nodeId: conclusion.id,
+      versionNumber: 1,
+      action: 'established',
+      statement: 'C',
+      conclusionStatus: 'supported' as const,
+      established: true,
+    };
+    const version = await NodeVersion.create(versionValues);
+    expect(
+      (await NodeVersion.findByPk(version.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      ...versionValues,
+      changeReason: null,
+      createdAt: expect.any(Date),
+    });
+    const evidenceValues = {
+      ...scope,
+      versionId: version.id,
+      edgeId: edge.id,
+      edgeType: 'supports' as const,
+      role: 'supporting' as const,
+      nodeId: evidenceNode.id,
+      nodeRevision: 1,
+    };
+    await NodeVersionEvidence.create(evidenceValues);
+    expect(
+      (
+        await NodeVersionEvidence.findOne({
+          where: { versionId: version.id },
+          rejectOnEmpty: true,
+        })
+      ).get({ plain: true }),
+    ).toStrictEqual({ ...evidenceValues, nodeVersionId: null });
+
+    const elsewhere = await StudyNode.create({ studyId: other.id, ownerId: owner.id, ...THOUGHT });
+    for (const bad of [
+      // A node of another study, a non-conclusion node, a duplicate number.
+      { nodeId: elsewhere.id, versionNumber: 2 },
+      { nodeId: evidenceNode.id, versionNumber: 2 },
+      // CHECKs: marker only while supported, a reason for revised and abandoned, bounds.
+      { versionNumber: 2, conclusionStatus: 'challenged' as const },
+      { versionNumber: 2, action: 'revised', established: false },
+      { versionNumber: 2, action: 'abandoned', established: false, changeReason: '' },
+      { versionNumber: 2, action: 'merged' },
+      { versionNumber: 2, statement: '' },
+      { versionNumber: 0 },
+    ]) {
+      await expect(NodeVersion.create({ ...versionValues, ...bad })).rejects.toBeInstanceOf(
+        DatabaseError,
+      );
+    }
+    await expect(NodeVersion.create(versionValues)).rejects.toBeInstanceOf(UniqueConstraintError);
+    await expect(
+      NodeVersionEvidence.create({ ...evidenceValues, edgeId: randomUUID() }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(
+      NodeVersion.update({ statement: 'Rewritten' }, { where: { id: version.id } }),
+    ).rejects.toBeInstanceOf(DatabaseError);
+    await expect(
+      NodeVersionEvidence.update({ nodeRevision: 2 }, { where: { versionId: version.id } }),
+    ).rejects.toBeInstanceOf(DatabaseError);
+    await expect(
+      StudyNode.update({ conclusionStatus: 'challenged' }, { where: { id: conclusion.id } }),
+    ).rejects.toBeInstanceOf(DatabaseError);
+
+    await Study.destroy({ where: { id: study.id } });
+    expect(await NodeVersion.count({ where: { studyId: study.id } })).toBe(0);
+    expect(await NodeVersionEvidence.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it("creates a StudyViewState and StudyNodePositions through the models and reads them back with DB defaults; a position cannot name another study's node or break its bounds (BIB-28)", async () => {

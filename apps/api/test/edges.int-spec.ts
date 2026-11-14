@@ -648,6 +648,7 @@ describe('typed relationships (BIB-27)', () => {
         createdAt: edge.createdAt,
         updatedAt: anyTime,
         lastEventSequence: sequence,
+        establishmentClearedNodeIds: [],
       });
       const seq = Number(edge.lastEventSequence);
       expect({
@@ -785,6 +786,7 @@ describe('typed relationships (BIB-27)', () => {
             createdAt: edge.createdAt,
             updatedAt: anyTime,
             lastEventSequence: String(Number(edge.lastEventSequence) + 1),
+            establishmentClearedNodeIds: [],
           },
         ],
         removedEvent: {

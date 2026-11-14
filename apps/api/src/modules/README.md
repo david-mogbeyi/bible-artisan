@@ -161,6 +161,18 @@ return this.mutations.execute(ownerId, mutation, {
   by a save; a content edit with a revision held from before the save succeeds; two concurrent
   first saves give one 200 and one 409; a snapshot read interleaved with a save is consistent.
 
+### Judgments the user owns (BIB-30): statuses, the marker and conclusion versions
+
+Only the owner's `PATCH /studies/:id/nodes/:nodeId` changes a question's status, a conclusion's
+status or sets "Established by me" (`study_node.established_at`). `modules/graph/conclusions.ts`
+holds the rules (`planConclusionChange`, pure), the one definition of live evidence
+(`liveEvidence`), the version write (`writeConclusionVersion`) and the evidence-loss rule
+(`releaseLostEvidence`). **No other module, route or AI code path may call them.** The evidence-loss
+rule is called by the edge removal and retype (and BIB-31's node delete), in their transaction, and
+can only _clear_ the marker: it never changes a status. A rule refusal (400/422) rolls back with no
+version, event or receipt. A reason (`changeReason`) and every statement live only in
+`node_version`; events, responses and receipts carry ids, enums, booleans and integers.
+
 ### Creating a study (BIB-19): `MutationService.create`
 
 A new study has no row to lock and no revision a client could have seen, so creation has its own

@@ -7,6 +7,8 @@ import { BibleEdition } from './models/bible-edition.model';
 import { BibleSuperscription } from './models/bible-superscription.model';
 import { BibleVerse } from './models/bible-verse.model';
 import { MutationReceipt } from './models/mutation-receipt.model';
+import { NodeVersion } from './models/node-version.model';
+import { NodeVersionEvidence } from './models/node-version-evidence.model';
 import { NoteVersion } from './models/note-version.model';
 import { Note } from './models/note.model';
 import { ScriptureReference } from './models/scripture-reference.model';
@@ -91,6 +93,8 @@ export function createDatabase(
       StudyViewState,
       StudyNodePosition,
       StudyBranchMember,
+      NodeVersion,
+      NodeVersionEvidence,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

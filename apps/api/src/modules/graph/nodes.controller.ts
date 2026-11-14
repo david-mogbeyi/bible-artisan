@@ -1,5 +1,9 @@
 import { Controller, Get, Header, Param, Patch, Post } from '@nestjs/common';
-import type { NodeListResponse, NodeResponse } from '@bible-artisan/contracts';
+import type {
+  NodeListResponse,
+  NodeResponse,
+  NodeVersionListResponse,
+} from '@bible-artisan/contracts';
 import { MutationRequest, type MutationRequestInfo } from '../../common/mutation/mutation-request';
 import { MutationResult } from '../../common/mutation/mutation.service';
 import { ParseResourceIdPipe } from '../../common/validation/resource-id';
@@ -42,6 +46,16 @@ export class NodesController {
     @Param('nodeId', ParseResourceIdPipe) nodeId: string,
   ): Promise<NodeResponse> {
     return this.nodes.get(ownerId, studyId, nodeId);
+  }
+
+  @Get(':nodeId/versions')
+  @Header('Cache-Control', 'no-store')
+  versions(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('nodeId', ParseResourceIdPipe) nodeId: string,
+  ): Promise<NodeVersionListResponse> {
+    return this.nodes.versions(ownerId, studyId, nodeId);
   }
 
   @Patch(':nodeId')

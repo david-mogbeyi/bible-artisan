@@ -157,6 +157,9 @@ describe('Scripture duplicate policy (BIB-26)', () => {
       createdAt: '2026-10-02T00:00:00.000Z',
       updatedAt: '2026-10-02T00:00:00.000Z',
       lastEventSequence: '3',
+      versionId: null,
+      previousVersionId: null,
+      warnings: [],
       studyRevision: 3,
     };
     expect(
@@ -289,5 +292,62 @@ describe('nodeLabel', () => {
       nodeLabel(node({ title: '  What is   conscience? ' }), references),
       nodeLabel(node({ body: 'A\nthought' }), references),
     ]).toStrictEqual(['What is conscience?', 'A thought']);
+  });
+});
+
+describe('conclusion and question actions on PATCH (BIB-30)', () => {
+  const base = { expectedRevision: 1 };
+  const parse = (body: object) => updateNodeRequestSchema.safeParse({ ...base, ...body });
+
+  it.each([
+    { status: 'answered' },
+    { status: 'supported' },
+    { status: 'challenged', changeReason: 'Counter-evidence' },
+    { status: 'abandoned', changeReason: 'Superseded' },
+    { text: 'A new statement', changeReason: 'Why' },
+    { text: 'A new statement', status: 'revised', changeReason: 'Why' },
+    { establishment: 'set' },
+    { establishment: 'set', status: 'supported' },
+    { establishment: 'clear' },
+  ])('accepts %j', (body) => {
+    expect(parse(body).success).toBe(true);
+  });
+
+  it('refuses a revised status without a new statement, a new statement with another status, and a marker set with a new statement or another status', () => {
+    expect([
+      failures(parse({ status: 'revised' })),
+      failures(parse({ text: 'x', status: 'challenged' })),
+      failures(parse({ text: 'x', establishment: 'set' })),
+      failures(parse({ status: 'challenged', establishment: 'set' })),
+    ]).toStrictEqual([['text'], ['status'], ['establishment'], ['establishment']]);
+  });
+
+  it('requires a reason to abandon, trims it, bounds it at 2,000 and treats an empty one as absent', () => {
+    expect(failures(parse({ status: 'abandoned' }))).toStrictEqual(['changeReason']);
+    expect(failures(parse({ status: 'abandoned', changeReason: '   ' }))).toStrictEqual([
+      'changeReason',
+    ]);
+    expect(parse({ status: 'challenged', changeReason: '  Because  ' })).toMatchObject({
+      success: true,
+      data: { changeReason: 'Because' },
+    });
+    expect(parse({ status: 'challenged', changeReason: ' ' })).toMatchObject({
+      success: true,
+      data: { changeReason: undefined },
+    });
+    expect(failures(parse({ status: 'challenged', changeReason: 'x'.repeat(2001) }))).toStrictEqual(
+      ['changeReason'],
+    );
+    expect(parse({ status: 'challenged', changeReason: 'x'.repeat(2000) }).success).toBe(true);
+  });
+
+  it('needs a real field (a reason alone changes nothing) and stays strict: no origin, version number or evidence ids', () => {
+    expect(parse({ changeReason: 'only a reason' }).error?.issues[0]?.message).toBe(
+      NODE_EDIT_EMPTY,
+    );
+    for (const extra of [{ origin: 'ai' }, { versionNumber: 3 }, { evidenceEdgeIds: [] }]) {
+      expect(parse({ status: 'challenged', ...extra }).success).toBe(false);
+    }
+    expect(failures(parse({ status: 'archived' }))).toStrictEqual(['status']);
   });
 });

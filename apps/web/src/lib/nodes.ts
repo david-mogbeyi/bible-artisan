@@ -12,10 +12,14 @@ import {
   type NodeResponse,
   nodeResponseSchema,
   type NodeSummary,
+  type NodeVersionListResponse,
+  nodeVersionListResponseSchema,
   OBSERVATION_KIND_NAMES,
   type UpdateNodeRequest,
 } from '@bible-artisan/contracts';
+import type { QueryClient } from '@tanstack/react-query';
 import { apiFetch } from './api-client';
+import { invalidateGraph } from './graph';
 import { studyHref } from './studies';
 
 /**
@@ -38,12 +42,43 @@ export function nodeQueryKey(studyId: string, nodeId: string) {
   return ['studies', studyId, 'nodes', 'detail', nodeId] as const;
 }
 
+/** A conclusion's version history (BIB-30), under the study's key like every node query. */
+export function nodeVersionsQueryKey(studyId: string, nodeId: string) {
+  return ['studies', studyId, 'nodes', 'versions', nodeId] as const;
+}
+
 export function listNodes(studyId: string): Promise<NodeListResponse> {
   return apiFetch(nodesPath(studyId), nodeListResponseSchema);
 }
 
 export function fetchNode(studyId: string, nodeId: string): Promise<NodeResponse> {
   return apiFetch(nodePath(studyId, nodeId), nodeResponseSchema);
+}
+
+/** `GET /studies/:id/nodes/:nodeId/versions`: a conclusion's immutable versions, newest first. */
+export function fetchNodeVersions(
+  studyId: string,
+  nodeId: string,
+): Promise<NodeVersionListResponse> {
+  return apiFetch(`${nodePath(studyId, nodeId)}/versions`, nodeVersionListResponseSchema);
+}
+
+/**
+ * After a conclusion or question action, or an edge change that cleared a conclusion's marker:
+ * the node's detail, its history, the Nodes list (markers and warnings are drawn there), and the
+ * graph snapshot that reuses the same summaries.
+ */
+export async function invalidateNodeChange(
+  queryClient: QueryClient,
+  studyId: string,
+  nodeId: string,
+): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: nodeQueryKey(studyId, nodeId) }),
+    queryClient.invalidateQueries({ queryKey: nodeVersionsQueryKey(studyId, nodeId) }),
+    queryClient.invalidateQueries({ queryKey: nodesQueryKey(studyId) }),
+    invalidateGraph(queryClient, studyId),
+  ]);
 }
 
 /** `POST /studies/:id/nodes`. `expectedRevision` is the study's. */
@@ -73,11 +108,25 @@ export function updateNode(
   });
 }
 
-/** The status or kind a node shows next to its type: text, never color alone. */
+export const ESTABLISHED_TEXT = 'Established by me';
+export const EVIDENCE_INCOMPLETE_TEXT = 'Evidence incomplete';
+
+/**
+ * The status or kind a node shows next to its type, with a conclusion's marker and warning
+ * (BIB-30): text, never color alone.
+ */
 export function nodeStateText(
-  node: Pick<NodeSummary, 'status' | 'observationKind'>,
+  node: Pick<NodeSummary, 'status' | 'observationKind' | 'established' | 'evidenceIncomplete'>,
 ): string | null {
-  if (node.status) return NODE_STATUS_NAMES[node.status];
+  if (node.status) {
+    return [
+      NODE_STATUS_NAMES[node.status],
+      node.established ? ESTABLISHED_TEXT : null,
+      node.evidenceIncomplete ? EVIDENCE_INCOMPLETE_TEXT : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
   if (node.observationKind) return OBSERVATION_KIND_NAMES[node.observationKind];
   return null;
 }

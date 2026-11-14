@@ -23,8 +23,9 @@ import { NodesService } from './nodes.service';
  * `study_node_position`. Branches (BIB-60, `/studies/:id/branches`): Study creates a study's
  * initial branch (`StudyGraphService.ensureInitialBranch`) and lists branches for the snapshot;
  * Graph starts every other branch, owns `study_branch_member` and changes membership
- * (`changeBranchMembers` composes into other mutations, BIB-33). NodeVersion arrives with Graph's
- * later tickets.
+ * (`changeBranchMembers` composes into other mutations, BIB-33). Conclusion versions, their
+ * evidence snapshots and "Established by me" (BIB-30, `conclusions.ts`): `node_version` and
+ * `node_version_evidence`; only the owner's node PATCH changes a status or sets the marker.
  */
 @Module({
   imports: [MutationModule, StudyModule, BibleContentModule],

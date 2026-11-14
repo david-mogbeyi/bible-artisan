@@ -38,6 +38,10 @@ const LAYOUT_REFUSED = 'graph layout drop refused: study data exists (set ALLOW_
 const MEMBERSHIP_MIGRATION = '20261002165744_add_branch_membership.ts';
 const MEMBERSHIP_REFUSED =
   'branch membership drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-30's conclusion versions migration. */
+const VERSIONS_MIGRATION = '20261008162848_add_conclusion_versions.ts';
+const VERSIONS_REFUSED =
+  'conclusion versions drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'annotation',
@@ -48,6 +52,8 @@ const DOMAIN_TABLES = [
   'bible_superscription',
   'bible_verse',
   'mutation_receipt',
+  'node_version',
+  'node_version_evidence',
   'note',
   'note_version',
   'scripture_reference',
@@ -246,12 +252,12 @@ describe('migration reversibility', () => {
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
 
-      // No opt-in at all: the newest migration (BIB-60's branch membership) is the first `down`
+      // No opt-in at all: the newest migration (BIB-30's conclusion versions) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: MEMBERSHIP_REFUSED,
+        message: VERSIONS_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -368,6 +374,8 @@ describe('migration reversibility', () => {
           WHERE b.owner_id = $1`,
         { bind: [userId], type: QueryTypes.INSERT },
       );
+      // Past BIB-30's step (which refuses first, from latest), the membership's own guard refuses.
+      await withStudyDataDropAllowed(() => migrator.down({ to: VERSIONS_MIGRATION }));
       const schemaBefore = await membershipSchema();
       expect(schemaBefore.map((row) => row.name)).toStrictEqual([
         'study_branch_member_branch_fk',
@@ -409,6 +417,78 @@ describe('migration reversibility', () => {
       await migrator.up();
       expect(await membershipSchema()).toStrictEqual(schemaBefore);
       expect(await branches()).toStrictEqual(branchesBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies conclusion versions (BIB-30) only with the study-data opt-in; up backfills version 1 for an existing conclusion, and the tables, keys, edge key and marker column come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const versionSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid IN ('node_version'::regclass, 'node_version_evidence'::regclass,
+                             'study_edge'::regclass)
+            AND (conname LIKE '%\\_key' OR conname LIKE 'node\\_version%')
+          UNION ALL
+         SELECT indexname FROM pg_indexes WHERE tablename LIKE 'node\\_version%'
+          UNION ALL
+         SELECT tgname FROM pg_trigger WHERE tgname LIKE 'node\\_version%'
+          UNION ALL
+         SELECT 'study_node.' || column_name FROM information_schema.columns
+          WHERE table_name = 'study_node' AND column_name = 'established_at'
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      const schemaBefore = await versionSchema();
+      expect(schemaBefore.map((row) => row.name)).toContain('node_version_evidence_edge_fk');
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(VERSIONS_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: VERSIONS_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, ['node_version', 'node_version_evidence'])).toStrictEqual([
+        'node_version',
+        'node_version_evidence',
+      ]);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['node_version', 'node_version_evidence'])).toStrictEqual([]);
+      expect(await columns(['study_node'])).not.toContain('study_node.established_at');
+      // A conclusion written before versions existed (always tentative and unedited).
+      await db.query(
+        `INSERT INTO study_node (study_id, owner_id, type, origin, title, conclusion_status)
+         SELECT id, owner_id, 'conclusion', 'user', 'Old conclusion', 'tentative'
+           FROM study WHERE owner_id = $1`,
+        { bind: [userId] },
+      );
+      await migrator.up();
+      expect(
+        await db.query(
+          `SELECT v.version_number, v.action, v.statement, v.conclusion_status, v.established,
+                  v.change_reason, v.created_at = n.created_at AS at_creation
+             FROM node_version v JOIN study_node n ON n.id = v.node_id
+            WHERE n.owner_id = $1`,
+          { bind: [userId], type: QueryTypes.SELECT },
+        ),
+      ).toStrictEqual([
+        {
+          version_number: 1,
+          action: 'created',
+          statement: 'Old conclusion',
+          conclusion_status: 'tentative',
+          established: false,
+          change_reason: null,
+          at_creation: true,
+        },
+      ]);
+      expect(await versionSchema()).toStrictEqual(schemaBefore);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();
@@ -512,6 +592,8 @@ describe('migration reversibility', () => {
         'study_edge_no_self_check',
         'study_edge_note_check',
         'study_edge_origin_check',
+        'study_edge_owner_id_study_id_id_key',
+        'study_edge_owner_id_study_id_id_key',
         'study_edge_pkey',
         'study_edge_pkey',
         'study_edge_revision_check',
@@ -689,6 +771,7 @@ describe('migration reversibility', () => {
         'study_node_body_check',
         'study_node_canonical_check',
         'study_node_conclusion_check',
+        'study_node_established_check',
         'study_node_identity_immutable',
         'study_node_observation_check',
         'study_node_origin_check',
@@ -857,7 +940,7 @@ describe('migration reversibility', () => {
         'note_version_note_id_version_number_key',
       ]);
       const before = await recordedMigrations(db);
-      // Past BIB-60's, BIB-28's, BIB-27's, BIB-26's, BIB-25's and BIB-24's steps (which refuse
+      // Past BIB-30's, BIB-60's, BIB-28's, BIB-27's, BIB-26's, BIB-25's and BIB-24's steps (which refuse
       // first, from latest), note's own guard refuses too.
       await withStudyDataDropAllowed(() => migrator.down({ to: ANNOTATION_MIGRATION }));
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -873,7 +956,8 @@ describe('migration reversibility', () => {
             name !== CANONICAL_MIGRATION &&
             name !== EDGE_MIGRATION &&
             name !== LAYOUT_MIGRATION &&
-            name !== MEMBERSHIP_MIGRATION,
+            name !== MEMBERSHIP_MIGRATION &&
+            name !== VERSIONS_MIGRATION,
         ),
       );
       expect(

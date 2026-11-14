@@ -114,6 +114,8 @@ describe('graphResponseSchema', () => {
         observationKind: null,
         referenceId: null,
         canonicalNodeId: null,
+        established: false,
+        evidenceIncomplete: false,
         revision: 1,
         createdAt: T,
         updatedAt: T,

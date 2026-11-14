@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { scriptureReferenceSchema } from './bible';
 import { eventSequenceSchema, expectedRevisionSchema } from './mutation';
+import { EDGE_TYPES } from './edge';
 import { MAX_QUESTION_LENGTH, QUESTION_STATUSES, STUDY_NODE_TYPES } from './study';
 import { httpUrlSchema } from './url';
 import { userTextSchema } from './user-text';
@@ -21,7 +22,7 @@ export type NodeOrigin = (typeof NODE_ORIGINS)[number];
 export const OBSERVATION_KINDS = ['textual_observation', 'interpretation'] as const;
 export type ObservationKind = (typeof OBSERVATION_KINDS)[number];
 
-/** PRD section 12. Conclusions start `tentative`; the transitions are BIB-30's. */
+/** PRD section 12. Conclusions start `tentative`; the owner's PATCH moves them (BIB-30). */
 export const CONCLUSION_STATUSES = [
   'tentative',
   'supported',
@@ -68,7 +69,18 @@ export const NODE_NOT_EDITABLE = 'NODE_NOT_EDITABLE';
 /** 422: the edit changes nothing. */
 export const NODE_UNCHANGED = 'NODE_UNCHANGED';
 
-export const NODE_ERROR_CODES = [NODE_LIMIT_EXCEEDED, NODE_NOT_EDITABLE, NODE_UNCHANGED] as const;
+/** 422: marking a conclusion supported or established needs live supporting evidence. */
+export const CONCLUSION_EVIDENCE_REQUIRED = 'CONCLUSION_EVIDENCE_REQUIRED';
+/** 422: only a supported conclusion can be marked established. */
+export const CONCLUSION_NOT_SUPPORTED = 'CONCLUSION_NOT_SUPPORTED';
+
+export const NODE_ERROR_CODES = [
+  NODE_LIMIT_EXCEEDED,
+  NODE_NOT_EDITABLE,
+  NODE_UNCHANGED,
+  CONCLUSION_EVIDENCE_REQUIRED,
+  CONCLUSION_NOT_SUPPORTED,
+] as const;
 export type NodeErrorCode = (typeof NODE_ERROR_CODES)[number];
 
 /** Fixed messages: never a node's text, a label or a reference. */
@@ -76,7 +88,41 @@ export const NODE_ERROR_MESSAGES: Record<NodeErrorCode, string> = {
   [NODE_LIMIT_EXCEEDED]: `A study can hold at most ${MAX_NODES_PER_STUDY.toLocaleString('en-US')} nodes`,
   [NODE_NOT_EDITABLE]: 'This node cannot be edited this way',
   [NODE_UNCHANGED]: 'The node already has these values',
+  [CONCLUSION_EVIDENCE_REQUIRED]:
+    'Connect supporting evidence first: a relationship that supports this conclusion, or one this conclusion is inferred from.',
+  [CONCLUSION_NOT_SUPPORTED]: 'Only a supported conclusion can be marked established',
 };
+
+/** The most characters of a conclusion's reason for a change (an assumption: the PRD sets none). */
+export const MAX_CHANGE_REASON_LENGTH = 2000;
+
+/** What a conclusion version records as the reason it exists (PRD section 23). */
+export const CONCLUSION_ACTIONS = [
+  'created',
+  'revised',
+  'challenged',
+  'abandoned',
+  'established',
+  'updated',
+  'evidence_removed',
+] as const;
+export type ConclusionAction = (typeof CONCLUSION_ACTIONS)[number];
+
+/** Set or clear "Established by me" (PRD sections 8, 12): only the owner's explicit action. */
+export const ESTABLISHMENT_ACTIONS = ['set', 'clear'] as const;
+export type EstablishmentAction = (typeof ESTABLISHMENT_ACTIONS)[number];
+
+/** `warnings` of a node mutation: this change cleared "Established by me". */
+export const NODE_WARNINGS = ['establishment_cleared'] as const;
+export type NodeWarning = (typeof NODE_WARNINGS)[number];
+
+/** Field-error copy (400) for the conclusion actions. */
+export const CHANGE_REASON_REQUIRED = 'Say why you are making this change';
+export const CONCLUSION_REVISED_NEEDS_TEXT = 'A revised conclusion needs its new statement';
+export const CONCLUSION_TEXT_NEEDS_REVISED = 'A new statement makes the conclusion Revised';
+export const ESTABLISHMENT_NEEDS_SUPPORTED = 'Only a supported conclusion can be established';
+export const STATUS_NOT_FOR_NODE_TYPE = 'This status does not belong to this kind of node';
+export const CONCLUSION_TEXT_TOO_LONG = `Use at most ${MAX_QUESTION_LENGTH.toLocaleString('en-US')} characters`;
 
 /**
  * Adding a Scripture reference the study already holds as a live canonical node (BIB-26; PRD
@@ -303,11 +349,24 @@ export const createNodeRequestSchema = z.discriminatedUnion('type', [
 
 export type CreateNodeRequest = z.input<typeof createNodeRequestSchema>;
 
+/** Every status a PATCH can name: a Question's four, or a Conclusion's five. */
+export const NODE_STATUS_VALUES = [...QUESTION_STATUSES, ...CONCLUSION_STATUSES] as const;
+
+/** A reason for a change: trimmed, 1-2,000 characters; empty is absent. */
+const changeReasonSchema = userTextSchema({ min: 0, max: MAX_CHANGE_REASON_LENGTH })
+  .transform((text) => (text === '' ? undefined : text))
+  .optional();
+
 /**
- * `PATCH /v1/studies/:studyId/nodes/:nodeId`: the node's revision and new content for an
- * Observation (`text`, `observationKind`), a Thought (`text`) or a Source (`source`, replaced
- * whole). No `type`: a node's type never changes. A field that does not belong to the node's
- * type, or any edit of a Question, Conclusion or Scripture node, is 422 `NODE_NOT_EDITABLE`.
+ * `PATCH /v1/studies/:studyId/nodes/:nodeId`: the node's revision and new content or an explicit
+ * action. Observation (`text`, `observationKind`), Thought (`text`), Source (`source`, replaced
+ * whole); Question (`status`, BIB-30); Conclusion (`text` revises the statement, `status`,
+ * `establishment`, with `changeReason`, BIB-30). No `type`, `origin`, version number or evidence
+ * ids: a node's type never changes and the server computes the rest. A field that does not belong
+ * to the node's type, or any edit of a Scripture node, is 422 `NODE_NOT_EDITABLE`.
+ *
+ * The refinements below hold whatever the node's type; the ones that need it (a reason for a new
+ * statement, the conclusion statement length, which statuses fit) are the server's, as 400s.
  */
 export const updateNodeRequestSchema = z
   .strictObject({
@@ -315,17 +374,45 @@ export const updateNodeRequestSchema = z
     text: nodeTextSchema.optional(),
     observationKind: z.enum(OBSERVATION_KINDS).optional(),
     source: sourceSchema.optional(),
+    status: z.enum(NODE_STATUS_VALUES).optional(),
+    establishment: z.enum(ESTABLISHMENT_ACTIONS).optional(),
+    changeReason: changeReasonSchema,
   })
-  .refine(
-    (body) =>
-      body.text !== undefined || body.observationKind !== undefined || body.source !== undefined,
-    { message: NODE_EDIT_EMPTY },
-  );
+  .superRefine((body, ctx) => {
+    if (
+      body.text === undefined &&
+      body.observationKind === undefined &&
+      body.source === undefined &&
+      body.status === undefined &&
+      body.establishment === undefined
+    ) {
+      ctx.addIssue({ code: 'custom', message: NODE_EDIT_EMPTY });
+    }
+    if (body.status === 'revised' && body.text === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['text'], message: CONCLUSION_REVISED_NEEDS_TEXT });
+    }
+    if (body.text !== undefined && body.status !== undefined && body.status !== 'revised') {
+      ctx.addIssue({ code: 'custom', path: ['status'], message: CONCLUSION_TEXT_NEEDS_REVISED });
+    }
+    if (
+      body.establishment === 'set' &&
+      (body.text !== undefined || (body.status !== undefined && body.status !== 'supported'))
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['establishment'],
+        message: ESTABLISHMENT_NEEDS_SUPPORTED,
+      });
+    }
+    if (body.status === 'abandoned' && body.changeReason === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['changeReason'], message: CHANGE_REASON_REQUIRED });
+    }
+  });
 
 export type UpdateNodeRequest = z.input<typeof updateNodeRequestSchema>;
 
 /**
- * 200 from `PATCH`: the node's new state without its text. Every mutation response is stored on
+ * 200 from `PATCH`: the node's new state without its text or any reason. Every mutation response is stored on
  * its Idempotency-Key receipt, so private text never reaches `mutation_receipt`; the client
  * refetches the node.
  */
@@ -340,6 +427,12 @@ export const nodeMutationResponseSchema = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   lastEventSequence: eventSequenceSchema,
+  /** The conclusion version this change wrote (BIB-30), else null. */
+  versionId: z.uuid().nullable(),
+  /** The conclusion version before it, else null (also null for version 1). */
+  previousVersionId: z.uuid().nullable(),
+  /** `establishment_cleared` when this change cleared "Established by me". */
+  warnings: z.array(z.enum(NODE_WARNINGS)),
 });
 
 export type NodeMutationResponse = z.infer<typeof nodeMutationResponseSchema>;
@@ -368,6 +461,10 @@ export const nodeSummarySchema = z.object({
   referenceId: z.uuid().nullable(),
   /** A duplicate Scripture node's canonical node (BIB-26), else null. */
   canonicalNodeId: z.uuid().nullable(),
+  /** "Established by me" (a conclusion the owner established; false for every other node). */
+  established: z.boolean(),
+  /** A supported conclusion with no live supporting evidence (BIB-30). */
+  evidenceIncomplete: z.boolean(),
   revision: z.number().int().positive(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
@@ -420,8 +517,57 @@ export const nodeResponseSchema = z.discriminatedUnion('type', [
     ...nodeCommon,
     text: z.string(),
     status: z.enum(CONCLUSION_STATUSES),
+    establishedAt: z.iso.datetime().nullable(),
+    evidenceIncomplete: z.boolean(),
+    liveEvidenceCount: z.number().int().nonnegative(),
+    version: z.object({ id: z.uuid(), number: z.number().int().positive() }),
   }),
   z.object({ type: z.literal('source'), ...nodeCommon, source: sourceResponseSchema }),
 ]);
 
 export type NodeResponse = z.infer<typeof nodeResponseSchema>;
+
+/** Whether a live edge counts for or against a conclusion at a version. */
+export const EVIDENCE_ROLES = ['supporting', 'challenging'] as const;
+export type EvidenceRole = (typeof EVIDENCE_ROLES)[number];
+
+/** One edge of a version's evidence snapshot, with its liveness now. */
+export const nodeVersionEvidenceSchema = z.object({
+  edgeId: z.uuid(),
+  edgeType: z.enum(EDGE_TYPES),
+  role: z.enum(EVIDENCE_ROLES),
+  nodeId: z.uuid(),
+  nodeType: z.enum(STUDY_NODE_TYPES),
+  /** The other node's current label, deleted nodes included. */
+  label: z.string(),
+  /** The other node's revision when the version was written. */
+  nodeRevision: z.number().int().positive(),
+  /** The other node's newest version then, when it is a conclusion. */
+  nodeVersionId: z.uuid().nullable(),
+  edgeLive: z.boolean(),
+  nodeLive: z.boolean(),
+  /** The other node's current revision differs from `nodeRevision`. */
+  nodeChangedSince: z.boolean(),
+});
+
+export type NodeVersionEvidence = z.infer<typeof nodeVersionEvidenceSchema>;
+
+/** One immutable conclusion version (PRD section 23), with its evidence snapshot. */
+export const nodeVersionSchema = z.object({
+  id: z.uuid(),
+  versionNumber: z.number().int().positive(),
+  action: z.enum(CONCLUSION_ACTIONS),
+  statement: z.string(),
+  status: z.enum(CONCLUSION_STATUSES),
+  established: z.boolean(),
+  changeReason: z.string().nullable(),
+  createdAt: z.iso.datetime(),
+  evidence: z.array(nodeVersionEvidenceSchema),
+});
+
+export type NodeVersion = z.infer<typeof nodeVersionSchema>;
+
+/** `GET /v1/studies/:studyId/nodes/:nodeId/versions`: newest first; empty for a non-conclusion. */
+export const nodeVersionListResponseSchema = z.object({ items: z.array(nodeVersionSchema) });
+
+export type NodeVersionListResponse = z.infer<typeof nodeVersionListResponseSchema>;

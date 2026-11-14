@@ -64,7 +64,7 @@ export class StudyNode extends Model {
   @Column({ field: 'observation_kind', type: DataType.TEXT, allowNull: true })
   declare observationKind: ObservationKind | null;
 
-  /** On, and only on, Conclusion nodes (`tentative` at creation; transitions are BIB-30's). */
+  /** On, and only on, Conclusion nodes (`tentative` at creation; the owner's PATCH changes it, BIB-30). */
   @Column({ field: 'conclusion_status', type: DataType.TEXT, allowNull: true })
   declare conclusionStatus: ConclusionStatus | null;
 
@@ -91,6 +91,14 @@ export class StudyNode extends Model {
    */
   @Column({ field: 'canonical_node_id', type: DataType.UUID, allowNull: true })
   declare canonicalNodeId: string | null;
+
+  /**
+   * When the owner marked this conclusion "Established by me" (BIB-30; database clock), else NULL.
+   * CHECK `study_node_established_check`: only a supported conclusion carries it. Only the owner's
+   * PATCH sets it; the evidence-loss rule only clears it.
+   */
+  @Column({ field: 'established_at', type: DataType.DATE, allowNull: true })
+  declare establishedAt: Date | null;
 
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 1 })
   declare revision: number;

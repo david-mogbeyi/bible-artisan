@@ -23,6 +23,8 @@ const node = (id: string, type: NodeSummary['type'], label: string): NodeSummary
   observationKind: null,
   referenceId: null,
   canonicalNodeId: null,
+  established: false,
+  evidenceIncomplete: false,
   revision: 1,
   createdAt: T,
   updatedAt: T,
@@ -67,6 +69,7 @@ const mutationBody = (e: Edge, extra: Record<string, unknown> = {}) => ({
   createdAt: T,
   updatedAt: T,
   lastEventSequence: '9',
+  establishmentClearedNodeIds: [],
   ...extra,
 });
 const envelope = (code: string, extra: Record<string, unknown> = {}) => ({
@@ -442,6 +445,34 @@ describe('Relationships', () => {
     ]);
     expect(screen.queryByRole('form', { name: 'Edit relationship' })).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Edit/ }));
+  });
+
+  it('says a conclusion it supported lost "Established by me" after a remove or a type change cleared it (BIB-30)', async () => {
+    server[OBS] = [edge(E1, OBS, CON, 'supports')];
+    renderFor(OBS);
+    await waitFor(() => expect(sentences()).toHaveLength(1));
+    const [item] = screen.getAllByRole('listitem');
+    fireEvent.click(within(item!).getByRole('button', { name: /^Remove/ }));
+    reply(
+      `DELETE ${EDGES}/${E1}`,
+      jsonResponse(
+        200,
+        mutationBody(edge(E1, OBS, CON, 'supports', null, 2), {
+          establishmentClearedNodeIds: [CON],
+        }),
+      ),
+    );
+    server[OBS] = [];
+    fireEvent.click(
+      within(within(item!).getByRole('group', { name: 'Remove relationship' })).getByRole(
+        'button',
+        {
+          name: 'Remove',
+        },
+      ),
+    );
+    await screen.findByText(RELATIONSHIPS_COPY.empty);
+    expect(status()).toBe(`${RELATIONSHIPS_COPY.removed} ${RELATIONSHIPS_COPY.markerCleared}`);
   });
 
   it('removes after an inline confirm, says so, and moves focus to the next relationship (or Connect)', async () => {
