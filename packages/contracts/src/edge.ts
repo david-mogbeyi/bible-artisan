@@ -274,13 +274,20 @@ export const createEdgeResponseSchema = edgeMutationBase.extend({
 
 export type CreateEdgeResponse = z.infer<typeof createEdgeResponseSchema>;
 
-/** One live edge as read, with its note. */
+/**
+ * One live edge as read, with its note. An accepted AI proposal (BIB-42) keeps `origin: 'ai'`,
+ * the `suggestionId` it came from and who adopted it (`acceptedBy`, the owner) for good, even
+ * after the user edits its type or note (FR-GRAPH-011, FR-AI-013): AI origin and user adoption
+ * stay distinct.
+ */
 export const edgeSchema = z.object({
   id: z.uuid(),
   sourceNodeId: z.uuid(),
   targetNodeId: z.uuid(),
   type: z.enum(EDGE_TYPES),
   origin: z.enum(EDGE_ORIGINS),
+  suggestionId: z.uuid().nullable(),
+  acceptedBy: z.uuid().nullable(),
   note: z.string().nullable(),
   revision: z.number().int().positive(),
   createdAt: z.iso.datetime(),

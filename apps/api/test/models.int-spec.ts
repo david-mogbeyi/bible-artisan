@@ -13,6 +13,7 @@ import { createDatabase, type Database } from '../src/database/database';
 import { AccountDeletion } from '../src/database/models/account-deletion.model';
 import { AiJob } from '../src/database/models/ai-job.model';
 import { AiResult } from '../src/database/models/ai-result.model';
+import { AiSuggestion } from '../src/database/models/ai-suggestion.model';
 import { Annotation } from '../src/database/models/annotation.model';
 import { ContextManifest } from '../src/database/models/context-manifest.model';
 import { ExportFile } from '../src/database/models/export-file.model';
@@ -1001,6 +1002,8 @@ describe('Sequelize models against the real schema', () => {
       type: 'supports',
       note: null,
       origin: 'user',
+      suggestionId: null,
+      acceptedBy: null,
       revision: 1,
       deletedAt: null,
       deletedWithNodeId: null,
@@ -1932,6 +1935,118 @@ describe('Sequelize models against the real schema', () => {
     expect(await AiJob.count({ where: { studyId: study.id } })).toBe(0);
     expect(await AiResult.count({ where: { studyId: study.id } })).toBe(0);
     expect(await StudyAiSetting.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('creates an AiSuggestion through the model with DB defaults and an AI-origin StudyEdge from it; neither can cross owners or break its CHECKs; edge provenance is immutable (BIB-42)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const scope = { ownerId: owner.id, studyId: study.id };
+    const a = await StudyNode.create({ ...scope, ...THOUGHT });
+    const b = await StudyNode.create({ ...scope, ...THOUGHT });
+    const job = await AiJob.create({
+      ...scope,
+      capability: 'relationships',
+      requestKey: `test:${randomUUID()}`,
+      basisRevision: 1,
+      consentVersion: 'v1',
+      input: { sourceNodeId: a.id, targetNodeId: b.id },
+    });
+    expect((await AiJob.findByPk(job.id, { rejectOnEmpty: true })).input).toStrictEqual({
+      sourceNodeId: a.id,
+      targetNodeId: b.id,
+    });
+    const values = {
+      ...scope,
+      jobId: job.id,
+      capability: 'relationships' as const,
+      sourceNodeId: a.id,
+      targetNodeId: b.id,
+      edgeType: 'supports' as const,
+      proposalJson: { rationale: 'May support.', evidence: [{ id: a.id, quote: null }] },
+      signature: 'sig',
+      basisContentRevision: 1,
+      dependencyVersions: { [a.id]: 1, [b.id]: 1 },
+      modelId: 'fake-model-1',
+      promptVersion: 'p',
+    };
+    const suggestion = await AiSuggestion.create(values);
+    const stored = await AiSuggestion.findByPk(suggestion.id, { rejectOnEmpty: true });
+    expect([
+      stored.status,
+      stored.revision,
+      stored.decidedAt,
+      stored.decidedBy,
+      stored.acceptedEdgeId,
+      stored.proposalJson,
+    ]).toStrictEqual(['proposed', 1, null, null, null, values.proposalJson]);
+    for (const bad of [
+      { status: 'accepted' },
+      { status: 'rejected' },
+      { edgeType: 'implies' },
+      { targetNodeId: a.id },
+      { decidedBy: randomUUID() },
+    ]) {
+      await expect(AiSuggestion.create({ ...values, ...bad } as never)).rejects.toBeInstanceOf(
+        DatabaseError,
+      );
+    }
+    const other = await createUser();
+    await expect(AiSuggestion.create({ ...values, ownerId: other.id })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+
+    const edge = await StudyEdge.create({
+      ...scope,
+      sourceNodeId: a.id,
+      targetNodeId: b.id,
+      type: 'supports',
+      origin: 'ai',
+      suggestionId: suggestion.id,
+      acceptedBy: owner.id,
+    });
+    expect([edge.origin, edge.suggestionId, edge.acceptedBy]).toStrictEqual([
+      'ai',
+      suggestion.id,
+      owner.id,
+    ]);
+    const edgeBase = {
+      ...scope,
+      sourceNodeId: b.id,
+      targetNodeId: a.id,
+      type: 'supports' as const,
+    };
+    for (const bad of [
+      { origin: 'ai' },
+      { origin: 'user', suggestionId: suggestion.id, acceptedBy: owner.id },
+      { origin: 'ai', suggestionId: suggestion.id, acceptedBy: other.id },
+    ]) {
+      await expect(StudyEdge.create({ ...edgeBase, ...bad } as never)).rejects.toBeInstanceOf(
+        DatabaseError,
+      );
+    }
+    // One edge per suggestion.
+    await expect(
+      StudyEdge.create({
+        ...edgeBase,
+        origin: 'ai',
+        suggestionId: suggestion.id,
+        acceptedBy: owner.id,
+      }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+    // Provenance never changes; type and note still do.
+    await expect(
+      StudyEdge.update(
+        { origin: 'user', suggestionId: null, acceptedBy: null },
+        {
+          where: { id: edge.id },
+        },
+      ),
+    ).rejects.toThrow(/immutable/);
+    await StudyEdge.update({ type: 'qualifies' }, { where: { id: edge.id } });
+
+    await Study.destroy({ where: { id: study.id } });
+    expect(await AiSuggestion.count({ where: { studyId: study.id } })).toBe(0);
+    expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('refuses to truncate scripture_reference', async () => {

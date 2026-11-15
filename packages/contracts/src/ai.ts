@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { expectedRevisionSchema } from './mutation';
+import { EDGE_TYPES, edgeNoteSchema } from './edge';
+import { eventSequenceSchema, expectedRevisionSchema } from './mutation';
 
 /**
  * AI consent, settings and jobs (BIB-39, BIB-40; PRD sections 16, 22, 24, 25, 29, 38).
@@ -29,8 +30,8 @@ export const AI_CONSENT_COPY = {
     'You can turn AI off at any time, for your account or for one study. Turning it off cancels waiting requests and discards results that have not arrived yet. Content already sent to the provider cannot be recalled; it is handled under the provider terms above.',
 } as const;
 
-/** The AI capabilities that exist so far. Later tickets add relationships, tensions, … */
-export const AI_CAPABILITIES = ['summary'] as const;
+/** The AI capabilities that exist so far. Later tickets add tensions, passages, … */
+export const AI_CAPABILITIES = ['summary', 'relationships'] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
 export const AI_JOB_STATES = ['queued', 'running', 'succeeded', 'failed', 'cancelled'] as const;
@@ -72,10 +73,18 @@ export const AI_CONSENT_VERSION_MISMATCH = 'AI_CONSENT_VERSION_MISMATCH';
 export const AI_UNAVAILABLE = 'AI_UNAVAILABLE';
 export const AI_QUOTA_EXCEEDED = 'AI_QUOTA_EXCEEDED';
 export const AI_SPEND_CAP_REACHED = 'AI_SPEND_CAP_REACHED';
+/** BIB-42: the suggestion was already rejected (or replaced by a newer request). */
+export const AI_SUGGESTION_NOT_PROPOSED = 'AI_SUGGESTION_NOT_PROPOSED';
+/** BIB-42: a node the suggestion connects changed or was removed since it was proposed. */
+export const AI_SUGGESTION_EXPIRED = 'AI_SUGGESTION_EXPIRED';
 
 /** 422 codes: the request cannot run in the account's or study's current AI state. */
 export type AiRuleErrorCode =
-  typeof AI_CONSENT_REQUIRED | typeof AI_DISABLED_FOR_STUDY | typeof AI_CONSENT_VERSION_MISMATCH;
+  | typeof AI_CONSENT_REQUIRED
+  | typeof AI_DISABLED_FOR_STUDY
+  | typeof AI_CONSENT_VERSION_MISMATCH
+  | typeof AI_SUGGESTION_NOT_PROPOSED
+  | typeof AI_SUGGESTION_EXPIRED;
 
 export const AI_ERROR_MESSAGES: Record<
   AiRuleErrorCode | typeof AI_UNAVAILABLE | typeof AI_QUOTA_EXCEEDED | typeof AI_SPEND_CAP_REACHED,
@@ -87,6 +96,9 @@ export const AI_ERROR_MESSAGES: Record<
   AI_UNAVAILABLE: 'AI features are not available right now',
   AI_QUOTA_EXCEEDED: 'You have reached the AI request limit. Try again later',
   AI_SPEND_CAP_REACHED: 'AI features are paused for now. Your study is unaffected',
+  AI_SUGGESTION_NOT_PROPOSED: 'This suggestion is no longer open',
+  AI_SUGGESTION_EXPIRED:
+    'An item this suggestion connects changed since it was suggested. Ask for a new suggestion',
 };
 
 /** PRD section 25 limits. */
@@ -202,6 +214,145 @@ export const summaryOutputV0Schema = z.strictObject({
 });
 export type SummaryOutputV0 = z.infer<typeof summaryOutputV0Schema>;
 
+/**
+ * Relationship detection (BIB-42; PRD section 16 "Relationship detection"). The model's raw
+ * answer: zero to three proposed edges between the two requested nodes, each with a rationale and
+ * evidence that cites context ids (and optionally quotes their stored text exactly). Strict: an
+ * extra key (a status, an "established" flag, a tool call) fails validation (BIB-41).
+ */
+export const MAX_RELATIONSHIP_PROPOSALS = 3;
+export const MAX_PROPOSAL_RATIONALE_LENGTH = 600;
+export const MAX_EVIDENCE_QUOTE_LENGTH = 300;
+
+export const relationshipEvidenceSchema = z.strictObject({
+  /** A context id: one of the two nodes, or another node or note in the context. */
+  id: z.uuid(),
+  /** Words copied exactly from that item's stored text (Scripture: the corpus text). */
+  quote: z.string().min(1).max(MAX_EVIDENCE_QUOTE_LENGTH).optional(),
+});
+export type RelationshipEvidence = z.infer<typeof relationshipEvidenceSchema>;
+
+export const relationshipProposalSchema = z.strictObject({
+  sourceNodeId: z.uuid(),
+  targetNodeId: z.uuid(),
+  type: z.enum(EDGE_TYPES),
+  rationale: z.string().min(1).max(MAX_PROPOSAL_RATIONALE_LENGTH),
+  evidence: z.array(relationshipEvidenceSchema).min(1).max(4),
+});
+export type RelationshipProposal = z.infer<typeof relationshipProposalSchema>;
+
+export const relationshipsOutputSchema = z.strictObject({
+  proposals: z.array(relationshipProposalSchema).max(MAX_RELATIONSHIP_PROPOSALS),
+});
+export type RelationshipsOutput = z.infer<typeof relationshipsOutputSchema>;
+
+/**
+ * What a finished relationships job reports: the suggestions it stored, and how many valid
+ * proposals were suppressed (rejected before, or already an edge) or dropped by validation.
+ */
+export const relationshipsJobOutputSchema = z.strictObject({
+  suggestionIds: z.array(z.uuid()),
+  suppressedCount: z.number().int().nonnegative(),
+  droppedCount: z.number().int().nonnegative(),
+});
+export type RelationshipsJobOutput = z.infer<typeof relationshipsJobOutputSchema>;
+
+/**
+ * `POST /v1/studies/:studyId/ai/relationships` → 202 (an AI job, like the summary). Two different
+ * live nodes of the study. `regenerate: true` asks again including proposals rejected before
+ * (FR-AI-004 "until explicit regeneration").
+ */
+export const requestRelationshipsSchema = z
+  .strictObject({
+    sourceNodeId: z.uuid().transform((id) => id.toLowerCase()),
+    targetNodeId: z.uuid().transform((id) => id.toLowerCase()),
+    regenerate: z.boolean().optional(),
+  })
+  .refine((body) => body.sourceNodeId !== body.targetNodeId, {
+    path: ['targetNodeId'],
+    message: 'Choose two different nodes',
+  });
+export type RequestRelationships = z.input<typeof requestRelationshipsSchema>;
+
+export const AI_SUGGESTION_STATUSES = ['proposed', 'accepted', 'rejected', 'expired'] as const;
+export type AiSuggestionStatus = (typeof AI_SUGGESTION_STATUSES)[number];
+
+/** One AI relationship proposal as the client reads it (`GET /ai/suggestions`). */
+export const aiSuggestionSchema = z.object({
+  id: z.uuid(),
+  studyId: z.uuid(),
+  capability: z.literal('relationships'),
+  /** `expired`: a connected node changed or was removed since; it can no longer be accepted. */
+  status: z.enum(AI_SUGGESTION_STATUSES),
+  sourceNodeId: z.uuid(),
+  targetNodeId: z.uuid(),
+  type: z.enum(EDGE_TYPES),
+  rationale: z.string(),
+  evidence: z.array(z.object({ id: z.uuid(), quote: z.string().nullable() })),
+  /** Revision of the suggestion, for accept/reject `expectedRevision`. */
+  revision: z.number().int().positive(),
+  basisRevision: z.number().int().positive(),
+  modelId: z.string(),
+  createdAt: z.iso.datetime(),
+  decidedAt: z.iso.datetime().nullable(),
+  /** The edge created (or found) when accepted. */
+  acceptedEdgeId: z.uuid().nullable(),
+});
+export type AiSuggestion = z.infer<typeof aiSuggestionSchema>;
+
+/** `GET /v1/studies/:studyId/ai/suggestions?nodeId=`: open suggestions touching that node. */
+export const listAiSuggestionsQuerySchema = z.strictObject({ nodeId: z.string().max(64) });
+export const aiSuggestionListResponseSchema = z.object({ items: z.array(aiSuggestionSchema) });
+export type AiSuggestionListResponse = z.infer<typeof aiSuggestionListResponseSchema>;
+
+/**
+ * `POST /v1/studies/:studyId/ai/suggestions/:id/accept`. `expectedRevision` is the suggestion's.
+ * `type` and `note` edit the proposal before accepting (PRD section 16 "edit before accepting");
+ * the endpoints and direction stay the proposal's.
+ */
+export const acceptAiSuggestionRequestSchema = z.strictObject({
+  expectedRevision: expectedRevisionSchema,
+  type: z.enum(EDGE_TYPES).optional(),
+  note: edgeNoteSchema.optional(),
+});
+export type AcceptAiSuggestionRequest = z.input<typeof acceptAiSuggestionRequestSchema>;
+
+/** `POST /v1/studies/:studyId/ai/suggestions/:id/reject`. */
+export const rejectAiSuggestionRequestSchema = z.strictObject({
+  expectedRevision: expectedRevisionSchema,
+});
+export type RejectAiSuggestionRequest = z.input<typeof rejectAiSuggestionRequestSchema>;
+
+/**
+ * 200 from accept. `created`: a new AI-origin edge; `existing`: the same live edge already
+ * existed (made by you, or this suggestion was already accepted): no second edge.
+ */
+export const acceptAiSuggestionResponseSchema = z.object({
+  suggestionId: z.uuid(),
+  status: z.literal('accepted'),
+  revision: z.number().int().positive(),
+  outcome: z.enum(['created', 'existing']),
+  edge: z.object({
+    id: z.uuid(),
+    sourceNodeId: z.uuid(),
+    targetNodeId: z.uuid(),
+    type: z.enum(EDGE_TYPES),
+    origin: z.enum(['user', 'ai']),
+    suggestionId: z.uuid().nullable(),
+    revision: z.number().int().positive(),
+  }),
+  lastEventSequence: eventSequenceSchema.nullable(),
+});
+export type AcceptAiSuggestionResponse = z.infer<typeof acceptAiSuggestionResponseSchema>;
+
+export const rejectAiSuggestionResponseSchema = z.object({
+  suggestionId: z.uuid(),
+  status: z.literal('rejected'),
+  revision: z.number().int().positive(),
+  lastEventSequence: eventSequenceSchema,
+});
+export type RejectAiSuggestionResponse = z.infer<typeof rejectAiSuggestionResponseSchema>;
+
 /** `GET /v1/studies/:studyId/ai/jobs/:jobId`. */
 export const aiJobResponseSchema = z.object({
   jobId: z.uuid(),
@@ -225,7 +376,7 @@ export const aiJobResponseSchema = z.object({
       id: z.uuid(),
       modelId: z.string(),
       promptVersion: z.string(),
-      output: summaryOutputV0Schema,
+      output: z.union([summaryOutputV0Schema, relationshipsJobOutputSchema]),
       createdAt: z.iso.datetime(),
     })
     .nullable(),

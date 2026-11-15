@@ -217,6 +217,8 @@ describe('typed relationships (BIB-27)', () => {
     targetNodeId: edge.targetNodeId,
     type: edge.type,
     origin: 'user',
+    suggestionId: null,
+    acceptedBy: null,
     note,
     revision,
     createdAt: edge.createdAt,

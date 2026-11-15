@@ -26,6 +26,10 @@ export class AiJob extends Model {
   @Column({ type: DataType.TEXT, allowNull: false, defaultValue: 'user' })
   declare trigger: 'user' | 'automatic';
 
+  /** The request's parameters (BIB-42: a relationships job's two node ids): ids and flags only. */
+  @Column({ type: DataType.JSONB, allowNull: false, defaultValue: {} })
+  declare input: Record<string, unknown>;
+
   @Column({ field: 'request_key', type: DataType.TEXT, allowNull: false })
   declare requestKey: string;
 

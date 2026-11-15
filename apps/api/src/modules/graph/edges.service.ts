@@ -54,6 +54,11 @@ export interface ConnectInput {
   targetNodeId: string;
   type: EdgeType;
   note?: string | null;
+  /**
+   * BIB-42: the accepted AI suggestion this edge comes from, and its adopter (the owner). The edge
+   * is then `origin: 'ai'` and keeps both for good; `node_connected` names the suggestion.
+   */
+  fromSuggestion?: { suggestionId: string; acceptedBy: string };
 }
 
 export type ConnectResult =
@@ -84,7 +89,8 @@ export interface ConnectOptions {
  *    declares `m.unchanged()`). The note sent with a duplicate is not applied.
  * 4. `beforeCreate`, then `answers` / `raises_question` need a Question target (422), and the
  *    study holds fewer than `MAX_EDGES_PER_STUDY` live edges (422).
- * 5. Insert (`origin: 'user'`), content revision +1, one `node_connected` event.
+ * 5. Insert (`origin: 'user'`, or `ai` with its suggestion and adopter for an accepted AI
+ *    proposal), content revision +1, one `node_connected` event.
  *
  * A malformed id is 404 before any query. A self-edge is the caller's 400 (the request schema);
  * the CHECK is the backstop. The partial
@@ -147,12 +153,20 @@ export async function connectNodes(
     targetNodeId,
     type,
     note: input.note ?? null,
-    origin: 'user',
+    origin: input.fromSuggestion ? 'ai' : 'user',
+    suggestionId: input.fromSuggestion?.suggestionId ?? null,
+    acceptedBy: input.fromSuggestion?.acceptedBy ?? null,
   });
   m.bumpContentRevision();
   const event = await m.appendEvent({
     eventType: EDGE_EVENTS.connected,
-    payload: { edgeId: edge.id, sourceNodeId, targetNodeId, edgeType: type },
+    payload: {
+      edgeId: edge.id,
+      sourceNodeId,
+      targetNodeId,
+      edgeType: type,
+      ...(input.fromSuggestion ? { suggestionId: input.fromSuggestion.suggestionId } : {}),
+    },
   });
   return { outcome: 'created', edge, event };
 }
@@ -267,12 +281,77 @@ export class EdgesService {
         targetNodeId: edge.targetNodeId,
         type: edge.type,
         origin: edge.origin,
+        suggestionId: edge.suggestionId,
+        acceptedBy: edge.acceptedBy,
         note: edge.note,
         revision: edge.revision,
         createdAt: edge.createdAt.toISOString(),
         updatedAt: edge.updatedAt.toISOString(),
       })),
     };
+  }
+
+  /**
+   * The types of the live edges joining two nodes of a study, in either stored direction (BIB-42:
+   * a relationship proposal that already exists as an edge is not shown again). Owner-scoped.
+   */
+  async liveEdgeKeys(
+    ownerId: string,
+    studyId: string,
+    nodeIds: readonly [string, string],
+  ): Promise<Set<string>> {
+    const [a, b] = nodeIds;
+    const edges = await StudyEdge.findAll({
+      where: {
+        studyId,
+        ownerId,
+        deletedAt: null,
+        [Op.or]: [
+          { sourceNodeId: a, targetNodeId: b },
+          { sourceNodeId: b, targetNodeId: a },
+        ],
+      },
+      attributes: ['sourceNodeId', 'targetNodeId', 'type'],
+    });
+    return new Set(edges.map((e) => `${e.sourceNodeId}:${e.targetNodeId}:${e.type}`));
+  }
+
+  /** One edge of the study, live or removed, ids and enums only (BIB-42's accept replay). */
+  async findEdge(ownerId: string, studyId: string, edgeId: string): Promise<StudyEdge | null> {
+    if (!isResourceId(edgeId)) return null;
+    return StudyEdge.findOne({ where: { id: edgeId, studyId, ownerId } });
+  }
+
+  /**
+   * The live edges touching any of `nodeIds` (BIB-42's relationship context: adjacent accepted
+   * edges), ids and types only, oldest first, at most `limit`.
+   */
+  async adjacentEdges(
+    ownerId: string,
+    studyId: string,
+    nodeIds: readonly string[],
+    limit: number,
+  ): Promise<{ id: string; sourceNodeId: string; targetNodeId: string; type: EdgeType }[]> {
+    const edges = await StudyEdge.findAll({
+      where: {
+        studyId,
+        ownerId,
+        deletedAt: null,
+        [Op.or]: [{ sourceNodeId: [...nodeIds] }, { targetNodeId: [...nodeIds] }],
+      },
+      attributes: ['id', 'sourceNodeId', 'targetNodeId', 'type'],
+      order: [
+        ['createdAt', 'ASC'],
+        ['id', 'ASC'],
+      ],
+      limit,
+    });
+    return edges.map((e) => ({
+      id: e.id,
+      sourceNodeId: e.sourceNodeId,
+      targetNodeId: e.targetNodeId,
+      type: e.type,
+    }));
   }
 
   /**

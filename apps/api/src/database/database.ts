@@ -1,6 +1,7 @@
 import { Sequelize } from 'sequelize-typescript';
 import { AccountDeletion } from './models/account-deletion.model';
 import { AiJob } from './models/ai-job.model';
+import { AiSuggestion } from './models/ai-suggestion.model';
 import { AiResult } from './models/ai-result.model';
 import { Annotation } from './models/annotation.model';
 import { ContextManifest } from './models/context-manifest.model';
@@ -109,6 +110,7 @@ export function createDatabase(
       StudySession,
       ExportFile,
       AccountDeletion,
+      AiSuggestion,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

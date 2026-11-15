@@ -45,6 +45,6 @@ import { ThreadModule } from '../thread/thread.module';
     ResumeController,
   ],
   providers: [NodesService, EdgesService, GraphService, BranchesService, ResumeService],
-  exports: [NodesService],
+  exports: [NodesService, EdgesService],
 })
 export class GraphModule {}

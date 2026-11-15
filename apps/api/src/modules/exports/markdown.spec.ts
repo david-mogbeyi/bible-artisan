@@ -66,6 +66,54 @@ describe('renderStudyMarkdown (BIB-47)', () => {
     expect(markdown).toContain('- Starting passage: Romans 9:1 (XYZ)');
   });
 
+  it('keeps an accepted AI relationship labelled with its AI origin and the adoption (BIB-42)', () => {
+    const thought = (id: string, title: string) => ({
+      id,
+      type: 'thought',
+      origin: 'user',
+      title,
+      body: null,
+      observationKind: null,
+      questionStatus: null,
+      conclusionStatus: null,
+      establishedAt: null,
+      scriptureReferenceId: null,
+      canonicalNodeId: null,
+      derivedFromNoteId: null,
+      source: null,
+      revision: 1,
+      createdAt: T,
+      updatedAt: T,
+      deletedAt: null,
+    });
+    const A = '00000000-0000-4000-8000-00000000000a';
+    const B = '00000000-0000-4000-8000-00000000000b';
+    const markdown = renderStudyMarkdown(
+      {
+        ...base,
+        nodes: [thought(A, 'First'), thought(B, 'Second')],
+        edges: [
+          {
+            id: '00000000-0000-4000-8000-00000000000c',
+            sourceNodeId: A,
+            targetNodeId: B,
+            type: 'related_to',
+            origin: 'ai',
+            suggestionId: '00000000-0000-4000-8000-00000000000d',
+            acceptedBy: '00000000-0000-4000-8000-00000000000e',
+            note: null,
+            revision: 1,
+            createdAt: T,
+            updatedAt: T,
+            deletedAt: null,
+          },
+        ],
+      },
+      T,
+    );
+    expect(markdown).toContain('(origin: AI suggestion; adopted by me)');
+  });
+
   it('quotes multi-line user text so it can never become Markdown structure', () => {
     const markdown = renderStudyMarkdown(
       { ...base, study: { ...base.study, description: 'line one\n# not a heading' } },

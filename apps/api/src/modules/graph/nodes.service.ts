@@ -75,6 +75,16 @@ type UpdateNodeBody = z.output<typeof updateNodeRequestSchema>;
 type ScriptureBody = Extract<CreateNodeBody, { type: 'scripture' }>;
 type NodeValues = NewNodeValues;
 
+/** One node's content for an AI context (BIB-42). `text` values are stored text, verbatim. */
+export interface NodeContextContent {
+  id: string;
+  type: NodeSummary['type'];
+  status: NodeSummary['status'];
+  established: boolean;
+  revision: number;
+  text: Record<string, string | null>;
+}
+
 /**
  * Node events (BIB-25), one per mutation, ids and enums only: never text, titles, citations,
  * excerpts, URLs or labels (PRD section 23, NFR-PRIV-001). Intended visibility, for BIB-55's
@@ -807,6 +817,70 @@ export class NodesService {
         deletedAt: required(deleted[index]?.deletedAt ?? null).toISOString(),
       })),
     };
+  }
+
+  /** The revisions of some live nodes of a study (BIB-42: is a suggestion still current?). */
+  async liveRevisions(
+    ownerId: string,
+    studyId: string,
+    nodeIds: readonly string[],
+  ): Promise<Map<string, number>> {
+    const ids = nodeIds.filter(isResourceId);
+    if (ids.length === 0) return new Map();
+    const nodes = await StudyNode.findAll({
+      where: { id: ids, studyId, ownerId, deletedAt: null },
+      attributes: ['id', 'revision'],
+    });
+    return new Map(nodes.map((node) => [node.id, node.revision]));
+  }
+
+  /**
+   * The stored content of some live nodes of a study, for an AI context (BIB-42): each node's
+   * type, state, revision and full text: a statement or body as stored, a Source's title, locator
+   * and excerpt, a Scripture node's verse text from the corpus (verbatim, at most
+   * `scriptureChars`). Absent, deleted, another study's or another owner's ids are simply missing.
+   * Private text: never logged.
+   */
+  async contextContent(
+    ownerId: string,
+    studyId: string,
+    nodeIds: readonly string[],
+    scriptureChars: number,
+  ): Promise<Map<string, NodeContextContent>> {
+    const found = new Map<string, NodeContextContent>();
+    const ids = nodeIds.filter(isResourceId);
+    if (ids.length === 0) return found;
+    const nodes = await StudyNode.findAll({
+      where: { id: ids, studyId, ownerId, deletedAt: null },
+    });
+    for (const node of nodes) {
+      let text: Record<string, string | null>;
+      if (node.scriptureReferenceId !== null) {
+        const passage = await this.references.passageText(
+          node.scriptureReferenceId,
+          scriptureChars,
+        );
+        text = { reference: passage?.label ?? null, text: passage?.text ?? null };
+      } else if (node.type === 'source') {
+        text = {
+          title: node.title,
+          locator: node.payloadJson?.locator ?? node.payloadJson?.url ?? null,
+          excerpt: node.payloadJson?.excerpt ?? null,
+          excerptKind: node.payloadJson?.excerptKind ?? null,
+        };
+      } else {
+        text = { text: node.title ?? node.body };
+      }
+      found.set(node.id, {
+        id: node.id,
+        type: node.type,
+        status: node.questionStatus ?? node.conclusionStatus,
+        established: node.establishedAt !== null,
+        revision: node.revision,
+        text,
+      });
+    }
+    return found;
   }
 
   /**

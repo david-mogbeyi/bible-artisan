@@ -10,10 +10,12 @@ import {
   type AiJobResponse,
   RETRYABLE_AI_JOB_ERRORS,
   STUDY_TRASHED,
+  type RelationshipsJobOutput,
   type SummaryOutputV0,
 } from '@bible-artisan/contracts';
 import { fn, QueryTypes, type Transaction } from 'sequelize';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   AiQuotaError,
   IdempotencyKeyReusedError,
@@ -61,6 +63,8 @@ export class AiJobsService {
     studyId: string,
     capability: AiCapability,
     idempotencyKey: string | null,
+    /** The capability's parameters (ids and flags only); part of what makes jobs equivalent. */
+    input: Record<string, unknown> = {},
   ): Promise<AiJobAcceptedResponse> {
     const study = await this.studies.requireOwnedStudy(ownerId, studyId);
     if (study.lifecycle === 'trashed') throw new StudyLifecycleError(STUDY_TRASHED);
@@ -78,17 +82,23 @@ export class AiJobsService {
           transaction,
         });
         if (keyed) {
-          if (keyed.studyId !== studyId || keyed.capability !== capability) {
+          if (
+            keyed.studyId !== studyId ||
+            keyed.capability !== capability ||
+            !isDeepStrictEqual(keyed.input, input)
+          ) {
             throw new IdempotencyKeyReusedError();
           }
           return accepted(keyed, 'existing');
         }
       }
-      const active = await AiJob.findOne({
-        where: { ownerId, studyId, capability, state: [...ACTIVE_STATES] },
-        order: [['createdAt', 'ASC']],
-        transaction,
-      });
+      const active = (
+        await AiJob.findAll({
+          where: { ownerId, studyId, capability, state: [...ACTIVE_STATES] },
+          order: [['createdAt', 'ASC']],
+          transaction,
+        })
+      ).find((job) => isDeepStrictEqual(job.input, input));
       if (active) return accepted(active, 'existing');
 
       await this.checkLimits(ownerId, transaction);
@@ -99,6 +109,7 @@ export class AiJobsService {
           capability,
           trigger: 'user',
           requestKey: idempotencyKey !== null ? `key:${idempotencyKey}` : `auto:${randomUUID()}`,
+          input,
           basisRevision: study.contentRevision,
           consentVersion: AI_CONSENT_VERSION,
         },
@@ -154,7 +165,7 @@ export class AiJobsService {
             id: result.id,
             modelId: result.modelId,
             promptVersion: result.promptVersion,
-            output: result.outputJson as SummaryOutputV0,
+            output: result.outputJson as SummaryOutputV0 | RelationshipsJobOutput,
             createdAt: result.createdAt.toISOString(),
           }
         : null,

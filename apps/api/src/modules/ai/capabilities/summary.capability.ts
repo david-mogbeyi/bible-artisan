@@ -1,4 +1,5 @@
 import { type SummaryOutputV0, summaryOutputV0Schema } from '@bible-artisan/contracts';
+import { assertInManifest, parseStructured } from './output-validation';
 
 /**
  * The `summary` capability's prompt and output contract, version 0 (BIB-39). It exists to carry
@@ -29,31 +30,16 @@ export function summaryPrompt(blocks: readonly string[]): string {
   return `${blocks.join('\n')}\n\nSummarize this study as JSON.`;
 }
 
-export class OutputValidationError extends Error {
-  constructor(readonly reason: 'not_json' | 'schema' | 'unknown_id') {
-    super(`AI output failed validation: ${reason}`);
-    this.name = 'OutputValidationError';
-  }
-}
-
 /**
  * Validates model text against the output schema and the manifest (PRD section 25: "all IDs in
- * the manifest"). Never repairs: an invalid output is rejected and no result is published.
+ * the manifest", BIB-41's shared rules). An invalid output is rejected and no result is
+ * published.
  */
 export function validateSummaryOutput(
   text: string,
   manifestIds: ReadonlySet<string>,
 ): SummaryOutputV0 {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.trim());
-  } catch {
-    throw new OutputValidationError('not_json');
-  }
-  const result = summaryOutputV0Schema.safeParse(parsed);
-  if (!result.success) throw new OutputValidationError('schema');
-  if (result.data.citedIds.some((id) => !manifestIds.has(id.toLowerCase()))) {
-    throw new OutputValidationError('unknown_id');
-  }
-  return result.data;
+  const output = parseStructured(text, summaryOutputV0Schema);
+  assertInManifest(output.citedIds, manifestIds);
+  return output;
 }

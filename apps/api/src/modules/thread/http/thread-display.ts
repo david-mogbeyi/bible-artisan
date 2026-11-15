@@ -101,6 +101,10 @@ const SIMPLE: Record<string, (input: DisplayInput) => string> = {
     return `Connected ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}${type}`;
   },
   edge_updated: () => 'Changed a relationship',
+  ai_suggestion_accepted: (i) =>
+    `Accepted an AI-suggested relationship from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`,
+  ai_suggestion_rejected: (i) =>
+    `Dismissed an AI-suggested relationship between ${name(i.origin, 'a node')} and ${name(i.target, 'a node')}`,
   edge_removed: (i) =>
     `Removed the relationship from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`,
   branch_created: (i) => `Started a branch at ${name(i.target, 'a node')}`,
