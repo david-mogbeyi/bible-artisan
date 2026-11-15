@@ -74,11 +74,12 @@ export interface StudyMutationSpec {
    */
   navigation?: boolean;
   /**
-   * Removals only (BIB-52): deleting a node or relationship, trashing a note, removing a
-   * highlight. They stay available at a safety cap (PRD section 28: "At safety cap permit
-   * review/export/delete while blocking additions"). Every other mutation, except a lifecycle
-   * transition (archive, trash, restore), is refused at the study's event cap (422
-   * STUDY_EVENT_LIMIT_REACHED) and at the account's storage cap (422 STORAGE_LIMIT_REACHED).
+   * Removals (BIB-52): deleting a node or relationship, trashing a note, removing a highlight;
+   * and turning AI off for the study, a privacy control. They stay available at a safety cap
+   * (PRD section 28: "At safety cap permit review/export/delete while blocking additions"). Every
+   * other mutation, except a lifecycle transition (archive, trash, restore), is refused at the
+   * study's event cap (422 STUDY_EVENT_LIMIT_REACHED) and at the account's storage cap (422
+   * STORAGE_LIMIT_REACHED).
    */
   allowedAtCap?: boolean;
   /**

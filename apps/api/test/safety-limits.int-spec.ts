@@ -30,6 +30,7 @@ const limitsPath = (studyId: string): string => `/v1/studies/${studyId}/limits`;
 const nodesPath = (studyId: string): string => `/v1/studies/${studyId}/nodes`;
 const nodePath = (studyId: string, nodeId: string): string =>
   `/v1/studies/${studyId}/nodes/${nodeId}`;
+const aiSettingsPath = (studyId: string): string => `/v1/studies/${studyId}/ai/settings`;
 
 const EVENT_LIMIT = envelope({
   code: 'STUDY_EVENT_LIMIT_REACHED',
@@ -63,7 +64,7 @@ describe('safety caps (BIB-52)', () => {
 
   function send(
     owner: Owner | null,
-    method: 'get' | 'post' | 'delete',
+    method: 'get' | 'post' | 'put' | 'delete',
     path: string,
     body?: unknown,
     key?: string,
@@ -253,6 +254,51 @@ describe('safety caps (BIB-52)', () => {
     limits.maxAccountStorageBytes = DEFAULT_SAFETY_LIMITS.maxAccountStorageBytes;
     expect((await send(bob, 'post', STUDIES, { blank: true })).status).toBe(201);
   });
+
+  it.each([
+    [
+      'event',
+      async (studyId: string) => {
+        limits.maxEventsPerStudy = await events(studyId);
+      },
+      EVENT_LIMIT,
+    ],
+    [
+      'storage',
+      (): Promise<void> => {
+        limits.maxAccountStorageBytes = 1;
+        return Promise.resolve();
+      },
+      STORAGE_LIMIT,
+    ],
+  ] as const)(
+    'at the %s cap still lets the owner turn AI off for the study, but not back on',
+    async (_cap, reachCap, refusal) => {
+      const studyId = await createStudy(alice);
+      await reachCap(studyId);
+
+      const off = await send(alice, 'put', aiSettingsPath(studyId), {
+        expectedRevision: 1,
+        aiEnabled: false,
+      });
+      expect([off.status, off.body]).toStrictEqual([
+        200,
+        {
+          aiEnabled: false,
+          revision: 2,
+          cancelledJobCount: 0,
+          lastEventSequence: expect.any(String),
+        },
+      ]);
+      const on = await send(alice, 'put', aiSettingsPath(studyId), {
+        expectedRevision: 2,
+        aiEnabled: true,
+      });
+      expect([on.status, on.body]).toStrictEqual([422, refusal]);
+      const after = await send(alice, 'get', aiSettingsPath(studyId));
+      expect([after.status, after.body]).toStrictEqual([200, { aiEnabled: false, revision: 2 }]);
+    },
+  );
 
   it('does not count studies in the trash toward account storage', async () => {
     const owner = await signedInUser();

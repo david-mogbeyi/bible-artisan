@@ -122,6 +122,10 @@ export class AiSettingsService {
     return this.mutations.execute(ownerId, mutation, {
       studyId,
       bumpsContentRevision: false,
+      // Turning AI off is a privacy control (PRD section 16: AI "can be disabled account-wide or
+      // per study"), so it stays available at a safety cap (BIB-52). Turning it on is refused
+      // there like any other change that adds to the study.
+      allowedAtCap: !body.aiEnabled,
       work: async (m) => {
         const existing = await StudyAiSetting.findOne({
           where: { studyId: m.studyId, ownerId: m.ownerId },
