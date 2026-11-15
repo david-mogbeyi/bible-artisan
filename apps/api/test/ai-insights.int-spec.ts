@@ -243,7 +243,9 @@ describe('AI study insights (BIB-43, BIB-44, BIB-45)', () => {
           establishedFindings: [
             item(
               'A finding you marked as established.',
-              'user_statement',
+              // The fake labels this `user_statement`, but the text is not the user's stored
+              // words, so the server shows it as AI synthesis (section 17).
+              'ai_synthesis',
               [{ type: 'node_version', nodeId: observation, revision: 2, quote: null }],
               [{ nodeId: observation, revision: 2 }],
             ),
