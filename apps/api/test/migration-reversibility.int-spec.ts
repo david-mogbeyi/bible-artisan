@@ -46,8 +46,13 @@ const VERSIONS_REFUSED =
 const THREAD_MIGRATION = '20261115001324_add_study_event_thread_columns.ts';
 const THREAD_REFUSED =
   'study event thread columns drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-39/40's AI migration. */
+const AI_MIGRATION = '20261115020000_add_ai_jobs_and_consent.ts';
+const AI_REFUSED = 'AI data drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
+  'ai_job',
+  'ai_result',
   'annotation',
   'auth_challenge',
   'auth_session',
@@ -55,6 +60,7 @@ const DOMAIN_TABLES = [
   'bible_edition',
   'bible_superscription',
   'bible_verse',
+  'context_manifest',
   'mutation_receipt',
   'node_version',
   'node_version_evidence',
@@ -62,6 +68,7 @@ const DOMAIN_TABLES = [
   'note_version',
   'scripture_reference',
   'study',
+  'study_ai_setting',
   'study_branch',
   'study_branch_member',
   'study_edge',
@@ -262,12 +269,12 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
 
-      // No opt-in at all: the newest migration (BIB-55's thread columns) is the first `down`
+      // No opt-in at all: the newest migration (BIB-39/40's AI tables) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: THREAD_REFUSED,
+        message: AI_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -276,6 +283,49 @@ describe('migration reversibility', () => {
         await columns(['study', 'study_node', 'study_branch', 'tag', 'study_tag']),
       ).toStrictEqual(columnsBefore);
       expect(await studyData()).toStrictEqual(dataBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies the AI tables and consent columns (BIB-39/40) only with the study-data opt-in', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const aiTables = ['ai_job', 'ai_result', 'context_manifest', 'study_ai_setting'];
+    const aiUserColumns = async () =>
+      (await columns(['user'])).filter((column) => column.startsWith('user.ai_'));
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(AI_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: AI_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, aiTables)).toStrictEqual([]);
+      expect(await aiUserColumns()).toStrictEqual([]);
+      // The next step down (BIB-55's thread columns) keeps its own guard.
+      await db.query(
+        `INSERT INTO study_event (study_id, owner_id, sequence, event_type)
+         SELECT id, owner_id, 1, 'seeded' FROM study WHERE owner_id = $1`,
+        { bind: [userId] },
+      );
+      const threadRefused = await migrator.down().catch((e: unknown) => e);
+      expect((threadRefused as { cause?: unknown }).cause).toMatchObject({
+        message: THREAD_REFUSED,
+      });
+      await migrator.up();
+      expect(await publicTables(db, aiTables)).toStrictEqual(aiTables);
+      expect(await aiUserColumns()).toStrictEqual([
+        'user.ai_consent_version',
+        'user.ai_consented_at',
+        'user.ai_enabled',
+        'user.ai_settings_revision',
+      ]);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();
@@ -453,6 +503,8 @@ describe('migration reversibility', () => {
         { type: QueryTypes.SELECT },
       );
     try {
+      // Past the AI step (newer, and refusing first from latest) with the opt-in.
+      await withStudyDataDropAllowed(() => migrator.down({ to: AI_MIGRATION }));
       const schemaBefore = await versionSchema();
       expect(schemaBefore.map((row) => row.name)).toContain('node_version_evidence_edge_fk');
       // Later migrations (BIB-55's) step down first.
@@ -970,7 +1022,8 @@ describe('migration reversibility', () => {
             name !== LAYOUT_MIGRATION &&
             name !== MEMBERSHIP_MIGRATION &&
             name !== VERSIONS_MIGRATION &&
-            name !== THREAD_MIGRATION,
+            name !== THREAD_MIGRATION &&
+            name !== AI_MIGRATION,
         ),
       );
       expect(

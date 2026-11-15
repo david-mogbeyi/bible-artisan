@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ThreadReadService } from './thread-read.service';
 import { ThreadService } from './thread.service';
 
 /**
@@ -8,7 +9,7 @@ import { ThreadService } from './thread.service';
  * module, so routes that run mutations live in a module that imports MutationModule instead.
  */
 @Module({
-  providers: [ThreadService],
-  exports: [ThreadService],
+  providers: [ThreadService, ThreadReadService],
+  exports: [ThreadService, ThreadReadService],
 })
 export class ThreadModule {}

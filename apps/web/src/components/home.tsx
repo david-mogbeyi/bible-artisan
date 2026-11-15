@@ -54,6 +54,9 @@ export function Home() {
             <Link href="/bible" className="text-accent underline">
               Read the Bible
             </Link>
+            <Link href="/settings" className="text-accent underline">
+              Settings
+            </Link>
           </nav>
           <RecentStudies />
           {logout.isError ? (

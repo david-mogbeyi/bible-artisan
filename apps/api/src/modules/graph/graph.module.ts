@@ -31,5 +31,6 @@ import { NodesService } from './nodes.service';
   imports: [MutationModule, StudyModule, BibleContentModule],
   controllers: [NodesController, EdgesController, GraphController, BranchesController],
   providers: [NodesService, EdgesService, GraphService, BranchesService],
+  exports: [NodesService],
 })
 export class GraphModule {}

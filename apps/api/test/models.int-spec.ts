@@ -10,7 +10,11 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
+import { AiJob } from '../src/database/models/ai-job.model';
+import { AiResult } from '../src/database/models/ai-result.model';
 import { Annotation } from '../src/database/models/annotation.model';
+import { ContextManifest } from '../src/database/models/context-manifest.model';
+import { StudyAiSetting } from '../src/database/models/study-ai-setting.model';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
 import { BibleBook } from '../src/database/models/bible-book.model';
@@ -97,6 +101,10 @@ describe('Sequelize models against the real schema', () => {
       authSubject: null,
       displayName: null,
       timezone: 'UTC',
+      aiEnabled: false,
+      aiConsentVersion: null,
+      aiConsentedAt: null,
+      aiSettingsRevision: 1,
       createdAt: expect.any(Date),
     });
     expect(found.id).toBe(user.id);
@@ -1617,6 +1625,85 @@ describe('Sequelize models against the real schema', () => {
       code: '23000',
       message: 'scripture_reference is immutable: DELETE is not allowed',
     });
+  });
+
+  it("creates AI consent, a StudyAiSetting, an AiJob, its ContextManifest and AiResult through the models with DB defaults; a job cannot name another owner's study (BIB-39/40)", async () => {
+    const owner = await createUser();
+    expect([owner.aiEnabled, owner.aiConsentVersion, owner.aiSettingsRevision]).toStrictEqual([
+      false,
+      null,
+      1,
+    ]);
+    // AI on needs a recorded consent (CHECK).
+    await expect(User.update({ aiEnabled: true }, { where: { id: owner.id } })).rejects.toThrow(
+      /user_ai_enabled_needs_consent_check/,
+    );
+    const study = await createStudy(owner.id);
+    const scope = { ownerId: owner.id, studyId: study.id };
+
+    const setting = await StudyAiSetting.create(scope);
+    expect([setting.aiEnabled, setting.revision]).toStrictEqual([true, 1]);
+
+    const job = await AiJob.create({
+      ...scope,
+      capability: 'summary',
+      requestKey: `test:${randomUUID()}`,
+      basisRevision: 1,
+      consentVersion: 'v1',
+    });
+    const stored = await AiJob.findByPk(job.id, { rejectOnEmpty: true });
+    expect([
+      stored.state,
+      stored.trigger,
+      stored.attemptCount,
+      stored.costMicros,
+      stored.leaseUntil,
+      stored.finishedAt,
+    ]).toStrictEqual(['queued', 'user', 0, '0', null, null]);
+
+    const manifest = await ContextManifest.create({
+      ...scope,
+      jobId: job.id,
+      retrievalRulesVersion: 'context-v1',
+      tokenBudget: 100,
+      tokenCount: 10,
+      entries: [{ kind: 'study', id: study.id, version: '1', priority: 'required', tokens: 10 }],
+    });
+    expect(
+      (await ContextManifest.findByPk(manifest.id, { rejectOnEmpty: true })).omissions,
+    ).toStrictEqual([]);
+    const result = await AiResult.create({
+      ...scope,
+      jobId: job.id,
+      capability: 'summary',
+      basisRevision: 1,
+      modelId: 'fake-model-1',
+      promptVersion: 'p',
+      schemaVersion: 's',
+      outputJson: { overview: 'x', citedIds: [] },
+    });
+    expect((await AiResult.findByPk(result.id, { rejectOnEmpty: true })).outputJson).toStrictEqual({
+      overview: 'x',
+      citedIds: [],
+    });
+
+    const other = await createUser();
+    await expect(
+      AiJob.create({
+        ownerId: other.id,
+        studyId: study.id,
+        capability: 'summary',
+        requestKey: `test:${randomUUID()}`,
+        basisRevision: 1,
+        consentVersion: 'v1',
+      }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+
+    // A study purge cascades to every AI row.
+    await Study.destroy({ where: { id: study.id } });
+    expect(await AiJob.count({ where: { studyId: study.id } })).toBe(0);
+    expect(await AiResult.count({ where: { studyId: study.id } })).toBe(0);
+    expect(await StudyAiSetting.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('refuses to truncate scripture_reference', async () => {

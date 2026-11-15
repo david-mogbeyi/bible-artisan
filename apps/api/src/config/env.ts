@@ -80,8 +80,37 @@ const envSchema = z
       .regex(SECRET_32_BYTES, { message: 'must be 32 bytes, base64 (openssl rand -base64 32)' })
       .transform((value) => Buffer.from(value, 'base64'))
       .optional(),
+    /**
+     * AI provider adapter (BIB-39/40, PRD section 38): `disabled` (default: no AI at all), `fake`
+     * (deterministic, never leaves the process; development and tests only) or `anthropic`.
+     */
+    AI_PROVIDER: z.enum(['disabled', 'fake', 'anthropic']).default('disabled'),
+    /**
+     * The launch gate (PRD sections 29, 38): a real provider is used only once its retention,
+     * training and region terms are verified and recorded. Until then `anthropic` behaves as
+     * `disabled`: AI stays off and no private text leaves the system.
+     */
+    AI_PROVIDER_TERMS_APPROVED: booleanFlag.default(false),
+    ANTHROPIC_API_KEY: z.string().min(1).optional(),
+    AI_MODEL_ID: z.string().min(1).default('claude-sonnet-5-5'),
+    /** Monthly AI spend cap across all users, in US dollars. At the cap AI pauses (section 25). */
+    AI_MONTHLY_SPEND_CAP_USD: z.coerce.number().nonnegative().default(50),
   })
   .superRefine((env, ctx) => {
+    if (env.NODE_ENV === 'production' && env.AI_PROVIDER === 'fake') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['AI_PROVIDER'],
+        message: 'the fake AI provider cannot run in production',
+      });
+    }
+    if (env.AI_PROVIDER === 'anthropic' && !env.ANTHROPIC_API_KEY) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ANTHROPIC_API_KEY'],
+        message: 'ANTHROPIC_API_KEY is required when AI_PROVIDER=anthropic',
+      });
+    }
     if (env.NODE_ENV === 'production' && env.OTP_PROVIDER === 'dev') {
       ctx.addIssue({
         code: 'custom',

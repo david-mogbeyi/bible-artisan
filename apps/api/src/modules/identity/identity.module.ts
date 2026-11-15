@@ -10,6 +10,7 @@ import { OTP_PROVIDER, type OtpProvider } from './otp/otp-provider';
 import { StytchOtpProvider } from './otp/stytch-otp.provider';
 import { SessionGuard } from './session.guard';
 import { SessionService } from './session.service';
+import { UserAiConsentService } from './user-ai-consent.service';
 
 /**
  * Identity bounded context (PRD §26). Owns `user`, `auth_challenge`, and `auth_session`: email
@@ -21,6 +22,7 @@ import { SessionService } from './session.service';
   providers: [
     AuthService,
     SessionService,
+    UserAiConsentService,
     { provide: APP_GUARD, useClass: SessionGuard },
     {
       provide: OTP_PROVIDER,
@@ -41,6 +43,6 @@ import { SessionService } from './session.service';
       },
     },
   ],
-  exports: [SessionService],
+  exports: [SessionService, UserAiConsentService],
 })
 export class IdentityModule {}

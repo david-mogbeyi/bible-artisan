@@ -75,8 +75,26 @@ describe('schema (composite-key owner isolation)', () => {
 
     expect(fks).toStrictEqual([
       {
+        name: 'ai_job_study_owner_fk',
+        table: 'ai_job',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
+        name: 'ai_result_study_owner_fk',
+        table: 'ai_result',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'annotation_study_owner_fk',
         table: 'annotation',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
+        name: 'context_manifest_study_owner_fk',
+        table: 'context_manifest',
         columns: ['owner_id', 'study_id'],
         refs: ['owner_id', 'id'],
       },
@@ -89,6 +107,12 @@ describe('schema (composite-key owner isolation)', () => {
       {
         name: 'note_study_owner_fk',
         table: 'note',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
+        name: 'study_ai_setting_study_owner_fk',
+        table: 'study_ai_setting',
         columns: ['owner_id', 'study_id'],
         refs: ['owner_id', 'id'],
       },
