@@ -1,6 +1,7 @@
 import type { AiSuggestion, NodeSummary } from '@bible-artisan/contracts';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { threadQueryKey } from '@/lib/thread';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { RelationshipSuggestions, SUGGESTIONS_COPY } from './relationship-suggestions';
 
@@ -91,10 +92,13 @@ const AI = `/studies/${STUDY_ID}/ai`;
 const LIST = `${AI}/suggestions?nodeId=${SCR}`;
 
 function open() {
-  renderWithQuery(<RelationshipSuggestions studyId={STUDY_ID} node={{ id: SCR }} nodes={NODES} />);
+  const view = renderWithQuery(
+    <RelationshipSuggestions studyId={STUDY_ID} node={{ id: SCR }} nodes={NODES} />,
+  );
   // Collapsed: nothing is read or requested until opened.
   expect(requests).toStrictEqual([]);
   fireEvent.click(screen.getByRole('button', { name: SUGGESTIONS_COPY.open }));
+  return view;
 }
 
 describe('RelationshipSuggestions (BIB-42)', () => {
@@ -138,6 +142,32 @@ describe('RelationshipSuggestions (BIB-42)', () => {
     expect(requests.filter((r) => r.method === 'POST')).toStrictEqual([
       { method: 'POST', path: `${AI}/suggestions/${SUG}/accept`, body: { expectedRevision: 1 } },
     ]);
+  });
+
+  it('dismisses a proposal explicitly and marks the Study Thread stale, so it shows the dismissal', async () => {
+    reply(
+      `GET ${LIST}`,
+      jsonResponse(200, { items: [suggestion] }),
+      jsonResponse(200, { items: [] }),
+    );
+    reply(
+      `POST ${AI}/suggestions/${SUG}/reject`,
+      jsonResponse(200, {
+        suggestionId: SUG,
+        status: 'rejected',
+        revision: 2,
+        lastEventSequence: '9',
+      }),
+    );
+    const { queryClient } = open();
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    const card = (await screen.findByText(SUGGESTIONS_COPY.badge)).closest('li') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: /^Dismiss/ }));
+    await waitFor(() => expect(screen.getByText(SUGGESTIONS_COPY.rejected)).toBeTruthy());
+    expect(requests.filter((r) => r.method === 'POST')).toStrictEqual([
+      { method: 'POST', path: `${AI}/suggestions/${SUG}/reject`, body: { expectedRevision: 1 } },
+    ]);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: threadQueryKey(STUDY_ID) });
   });
 
   it('edits the type before accepting', async () => {

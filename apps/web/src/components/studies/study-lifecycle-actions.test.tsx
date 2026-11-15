@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { formatPurgeDate } from '@/lib/studies';
+import { threadQueryKey } from '@/lib/thread';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { ARCHIVED_ELSEWHERE } from './study-editor';
 import {
@@ -228,6 +229,8 @@ describe('study lifecycle actions (BIB-22)', () => {
     await waitFor(() => expect(document.activeElement).toBe(unarchive));
     expect(status().textContent).toBe('Study archived. It is read-only until you unarchive it.');
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['studies', 'library'] });
+    // The archive recorded "Archived the study": an open Study Thread refetches to show it.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: threadQueryKey(STUDY_ID) });
   });
 
   it('shows a trashed study read-only with its deletion date, and restores it to its prior state', async () => {

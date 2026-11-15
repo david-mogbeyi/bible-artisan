@@ -22,6 +22,7 @@ import {
 import { ApiError } from '@/lib/api-client';
 import { edgeSentence, invalidateEdgeChange } from '@/lib/edges';
 import { nodeOptionText } from '@/lib/nodes';
+import { invalidateThread } from '@/lib/thread';
 
 export const SUGGESTIONS_COPY = {
   open: 'Suggest relationships with AI',
@@ -312,7 +313,8 @@ function SuggestionItem({
     },
     onSuccess: async () => {
       onDecided(SUGGESTIONS_COPY.rejected);
-      await refreshSuggestions();
+      // The rejection recorded a Study Thread event.
+      await Promise.all([refreshSuggestions(), invalidateThread(queryClient, studyId)]);
     },
     onError,
   });
