@@ -50,6 +50,7 @@ import {
 } from './node-fields';
 import { Branches } from './branches';
 import { ConclusionActions, QuestionStatusForm } from './conclusion-actions';
+import { ReasoningPath } from './reasoning-path';
 import {
   DeleteNodeButton,
   DuplicateButton,
@@ -293,6 +294,8 @@ export function NodeDetail({
           connecting={connectingEvidence}
         />
       ) : null}
+      {/* BIB-45: the recorded path, without AI. */}
+      {data.type === 'conclusion' ? <ReasoningPath studyId={studyId} nodeId={data.id} /> : null}
       {editable && isEditable(data) ? (
         <EditNode
           key={data.id}

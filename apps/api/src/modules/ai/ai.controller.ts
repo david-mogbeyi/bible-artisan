@@ -3,9 +3,12 @@ import {
   type AiConsentResponse,
   type AiJobAcceptedResponse,
   type AiJobResponse,
+  type AiProposalListResponse,
   type AiSuggestionListResponse,
+  requestAiInsightSchema,
   requestRelationshipsSchema,
   type StudyAiSettingsResponse,
+  type StudySummaryResponse,
 } from '@bible-artisan/contracts';
 import { parseBody } from '../../common/validation/parse-body';
 import { StudyAccessService } from '../study/study-access.service';
@@ -16,6 +19,22 @@ import { ParseResourceIdPipe } from '../../common/validation/resource-id';
 import { CurrentUserId } from '../identity/current-user.decorator';
 import { AiJobsService } from './ai-jobs.service';
 import { AiSettingsService } from './ai-settings.service';
+import { AiSummaryService } from './ai-summary.service';
+
+/** `GET /v1/studies/:studyId/summary` (BIB-43): the living summary and its freshness. */
+@Controller('studies/:studyId/summary')
+export class StudySummaryController {
+  constructor(private readonly summaries: AiSummaryService) {}
+
+  @Get()
+  @Header('Cache-Control', 'no-store')
+  get(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+  ): Promise<StudySummaryResponse> {
+    return this.summaries.get(ownerId, studyId);
+  }
+}
 
 /**
  * `/v1/me/ai-consent` (BIB-40): the account's AI consent. The owner is the session's; the PUT
@@ -103,6 +122,84 @@ export class StudyAiController {
       targetNodeId: body.targetNodeId,
       regenerate: body.regenerate === true,
     });
+  }
+
+  /** BIB-44: proposed tensions between claims (202). Never changes a status. */
+  @Post('tensions')
+  @HttpCode(202)
+  @Header('Cache-Control', 'no-store')
+  requestTensions(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<AiJobAcceptedResponse> {
+    return this.requestInsight(ownerId, studyId, 'tensions', mutation);
+  }
+
+  /** BIB-44: existing open questions plus proposed new ones (202). */
+  @Post('questions')
+  @HttpCode(202)
+  @Header('Cache-Control', 'no-store')
+  requestQuestions(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<AiJobAcceptedResponse> {
+    return this.requestInsight(ownerId, studyId, 'questions', mutation);
+  }
+
+  /** BIB-45: verified next passages (202). */
+  @Post('passages')
+  @HttpCode(202)
+  @Header('Cache-Control', 'no-store')
+  requestPassages(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<AiJobAcceptedResponse> {
+    return this.requestInsight(ownerId, studyId, 'passages', mutation);
+  }
+
+  private requestInsight(
+    ownerId: string,
+    studyId: string,
+    capability: 'tensions' | 'questions' | 'passages',
+    mutation: MutationRequestInfo,
+  ): Promise<AiJobAcceptedResponse> {
+    const body = parseBody(requestAiInsightSchema, mutation.body ?? {});
+    return this.jobs.request(ownerId, studyId, capability, mutation.idempotencyKey, {
+      regenerate: body.regenerate === true,
+    });
+  }
+
+  @Get('proposals')
+  @Header('Cache-Control', 'no-store')
+  listProposals(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Query() query: unknown,
+  ): Promise<AiProposalListResponse> {
+    return this.suggestions.listProposals(ownerId, studyId, query);
+  }
+
+  @Post('proposals/:proposalId/accept')
+  acceptProposal(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('proposalId', ParseResourceIdPipe) proposalId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.suggestions.acceptProposal(ownerId, studyId, proposalId, mutation);
+  }
+
+  @Post('proposals/:proposalId/reject')
+  rejectProposal(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('proposalId', ParseResourceIdPipe) proposalId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.suggestions.reject(ownerId, studyId, proposalId, mutation, 'proposals');
   }
 
   @Get('suggestions')

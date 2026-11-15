@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { StudyInsights } from '@/components/ai/study-insights';
+import { StudySummaryPanel } from '@/components/ai/study-summary';
 import { ExportControls } from '@/components/exports/export-controls';
 import { GraphSection } from '@/components/graph/graph-section';
 import { UndoControls } from '@/components/graph/undo-controls';
@@ -45,7 +47,8 @@ const LOAD_COPY: ProblemCopy = {
  * reloaded. It archives, unarchives, trashes and restores the study; an archived or trashed study
  * stays readable but has no editor. Its graph canvas (BIB-28), typed nodes (BIB-25) and notes
  * (BIB-23) follow the editor; the canvas and the Nodes list share one selection. The Study Thread
- * (BIB-32) follows the notes; the summary arrives with a later ticket. A missing or another user's study, or one past its trash window, shows the same
+ * (BIB-32) follows the notes, then the living summary (BIB-43) and the study-wide AI suggestions
+ * (BIB-44/45, collapsed). A missing or another user's study, or one past its trash window, shows the same
  * neutral unavailable state.
  */
 export function StudyPage() {
@@ -201,7 +204,9 @@ function StudyDetails({
       <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
       {/* BIB-32: what happened in this study, newest first. */}
       <ThreadPanel study={study} />
-      <p className="text-muted">The study is saved. Its summary arrives in a later release.</p>
+      {/* BIB-43: the living summary; BIB-44/45: study-wide AI suggestions (collapsed). */}
+      <StudySummaryPanel studyId={study.id} active={study.lifecycle !== 'trashed'} />
+      <StudyInsights studyId={study.id} active={study.lifecycle === 'active'} />
       <nav aria-label="Study" className="flex flex-wrap gap-4">
         {/* BIB-24: the reader with this study's highlights (opaque ids only in the URL). */}
         <Link

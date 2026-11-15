@@ -394,6 +394,48 @@ export class NodesService {
   }
 
   /**
+   * A node from an accepted AI proposal (BIB-44 questions, BIB-45 passages), inside the AI
+   * module's accept mutation (whose revision check is the proposal's). A question becomes an open
+   * Question node with an AI origin (PRD section 16: adopted AI text keeps its AI-origin badge),
+   * through the same insert step as `create`. A passage becomes the study's canonical Scripture
+   * node for the corpus-verified reference, or focuses the live one it already has (no write).
+   * The node cap applies. Never changes any existing node.
+   */
+  async addFromAiProposal(
+    m: StudyMutation,
+    input: { type: 'question'; text: string } | { type: 'scripture'; referenceId: string },
+  ): Promise<{ nodeId: string; outcome: 'created' | 'existing' }> {
+    if (input.type === 'question') {
+      const { node } = await this.insertNode(m, {
+        type: 'question',
+        origin: 'ai',
+        title: input.text,
+        questionStatus: 'open',
+      });
+      return { nodeId: node.id, outcome: 'created' };
+    }
+    const canonical = await StudyNode.findOne({
+      where: {
+        studyId: m.studyId,
+        ownerId: m.ownerId,
+        type: 'scripture',
+        scriptureReferenceId: input.referenceId,
+        canonicalNodeId: null,
+        deletedAt: null,
+      },
+    });
+    if (canonical) return { nodeId: canonical.id, outcome: 'existing' };
+    const node = await this.graph.addNode(m, {
+      type: 'scripture',
+      origin: 'scripture',
+      scriptureReferenceId: input.referenceId,
+    });
+    m.bumpContentRevision();
+    await m.appendEvent(createdEvent(node, null));
+    return { nodeId: node.id, outcome: 'created' };
+  }
+
+  /**
    * `POST /studies/:studyId/nodes/:nodeId/duplicate` (BIB-61; PRD section 12): a new node of the
    * source's type with its current content and origin (`duplicateValues`), through the same insert
    * step as `create`. `expectedRevision` is the study's. Under the study lock, in order: the source

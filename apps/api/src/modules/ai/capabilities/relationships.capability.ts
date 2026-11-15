@@ -51,7 +51,7 @@ export function relationshipsPrompt(
   sourceNodeId: string,
   targetNodeId: string,
 ): string {
-  return `${blocks.join('\n')}\n\nPropose relationships between node "${sourceNodeId}" and node "${targetNodeId}" as JSON.`;
+  return `${blocks.join('\n')}\n\nTask: relationships. Propose relationships between node "${sourceNodeId}" and node "${targetNodeId}" as JSON.`;
 }
 
 /** The two requested nodes (lower-case ids), their types and revisions at gather time. */
@@ -158,10 +158,12 @@ export function validateRelationshipsOutput(
 export function proposalSignature(
   proposal: Pick<ValidProposal, 'sourceNodeId' | 'targetNodeId' | 'type'>,
   revisions: ReadonlyMap<string, number>,
+  /** BIB-44: tensions sign the same way under their own capability. */
+  capability: 'relationships' | 'tensions' = 'relationships',
 ): string {
   const { sourceNodeId, targetNodeId, type } = proposal;
   const parts = [
-    'relationships',
+    capability,
     sourceNodeId,
     targetNodeId,
     type,

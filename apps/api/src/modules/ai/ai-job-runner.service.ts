@@ -6,8 +6,29 @@ import type { Database } from '../../database/database';
 import { AiJob } from '../../database/models/ai-job.model';
 import { AiResult } from '../../database/models/ai-result.model';
 import { ContextManifest } from '../../database/models/context-manifest.model';
+import { ReferenceService } from '../bible-content/reference/reference.service';
 import { AiAccessService } from './ai-access.service';
 import { AiSuggestionsService } from './ai-suggestions.service';
+import { AiSummaryService } from './ai-summary.service';
+import {
+  INSIGHT_INPUT_BUDGET,
+  INSIGHT_OUTPUT_TOKENS,
+  INSIGHT_SAFETY_RESERVE,
+  insightPrompt,
+  parsePassagesOutput,
+  PASSAGES_PROMPT_VERSION,
+  PASSAGES_SCHEMA_VERSION,
+  PASSAGES_SYSTEM_PROMPT,
+  QUESTIONS_PROMPT_VERSION,
+  QUESTIONS_SCHEMA_VERSION,
+  QUESTIONS_SYSTEM_PROMPT,
+  resolvePassages,
+  TENSIONS_PROMPT_VERSION,
+  TENSIONS_SCHEMA_VERSION,
+  TENSIONS_SYSTEM_PROMPT,
+  validateQuestionsOutput,
+  validateTensionsOutput,
+} from './capabilities/insights.capability';
 import { OutputValidationError, REPAIR_INSTRUCTION } from './capabilities/output-validation';
 import {
   RELATIONSHIPS_INPUT_BUDGET,
@@ -30,6 +51,7 @@ import {
   summaryPrompt,
   validateSummaryOutput,
 } from './capabilities/summary.capability';
+import { studyIndex } from './capabilities/study-index';
 import {
   type AssembledContext,
   assembleContext,
@@ -37,7 +59,7 @@ import {
   ContextBudgetExceededError,
   RETRIEVAL_RULES_VERSION,
 } from './context/assemble-context';
-import { ContextCandidatesService } from './context/context-candidates.service';
+import { ContextCandidatesService, type StudyContext } from './context/context-candidates.service';
 import {
   AI_PROVIDER,
   AI_RUNTIME,
@@ -99,6 +121,8 @@ export class AiJobRunnerService {
     private readonly access: AiAccessService,
     private readonly candidates: ContextCandidatesService,
     private readonly suggestions: AiSuggestionsService,
+    private readonly summaries: AiSummaryService,
+    private readonly references: ReferenceService,
   ) {}
 
   /** Starts polling (the worker). Returns a function that stops it. */
@@ -106,6 +130,7 @@ export class AiJobRunnerService {
     this.stopped = false;
     const tick = async (): Promise<void> => {
       try {
+        await this.summaries.scheduleAutomatic();
         while (!this.stopped && (await this.runOnce()) !== null) {
           // Drain the queue, then wait for the next poll.
         }
@@ -317,7 +342,7 @@ export class AiJobRunnerService {
         }
         usage = addUsage(usage, response);
         try {
-          validated = plan.validate(response.text, context);
+          validated = await plan.validate(response.text, context);
           break;
         } catch (error) {
           if (!(error instanceof OutputValidationError)) throw error;
@@ -377,22 +402,112 @@ export class AiJobRunnerService {
       };
     }
     const gathered = await this.candidates.gather(job.ownerId, job.studyId);
-    return {
-      system: SUMMARY_SYSTEM_PROMPT,
-      inputBudget: SUMMARY_INPUT_BUDGET,
-      outputTokens: SUMMARY_OUTPUT_TOKENS,
-      safetyReserve: SUMMARY_SAFETY_RESERVE,
-      promptVersion: SUMMARY_PROMPT_VERSION,
-      schemaVersion: SUMMARY_SCHEMA_VERSION,
+    const regenerate = job.input.regenerate === true;
+    const common = {
       contentRevision: gathered.contentRevision,
       candidates: gathered.candidates,
       capped: gathered.capped,
-      prompt: summaryPrompt,
-      validate: (text, context) =>
-        validateSummaryOutput(text, new Set(context.entries.map((entry) => entry.id))),
-      store: (_transaction, _scope, validated) =>
-        Promise.resolve(validated as Record<string, unknown>),
     };
+    const insight = {
+      ...common,
+      inputBudget: INSIGHT_INPUT_BUDGET,
+      outputTokens: INSIGHT_OUTPUT_TOKENS,
+      safetyReserve: INSIGHT_SAFETY_RESERVE,
+    };
+    switch (job.capability) {
+      case 'tensions':
+        return {
+          ...insight,
+          system: TENSIONS_SYSTEM_PROMPT,
+          promptVersion: TENSIONS_PROMPT_VERSION,
+          schemaVersion: TENSIONS_SCHEMA_VERSION,
+          prompt: (blocks) => insightPrompt('tensions', blocks),
+          validate: (text, context) => validateTensionsOutput(text, studyIndex(gathered, context)),
+          store: (transaction, scope, validated) =>
+            this.suggestions.storeTensions(transaction, scope, {
+              ...(validated as ReturnType<typeof validateTensionsOutput>),
+              regenerate,
+            }),
+        };
+      case 'questions':
+        return {
+          ...insight,
+          system: QUESTIONS_SYSTEM_PROMPT,
+          promptVersion: QUESTIONS_PROMPT_VERSION,
+          schemaVersion: QUESTIONS_SCHEMA_VERSION,
+          prompt: (blocks) => insightPrompt('questions', blocks),
+          validate: (text, context) => validateQuestionsOutput(text, studyIndex(gathered, context)),
+          store: (transaction, scope, validated) =>
+            this.suggestions.storeQuestions(transaction, scope, {
+              ...(validated as ReturnType<typeof validateQuestionsOutput>),
+              regenerate,
+            }),
+        };
+      case 'passages':
+        return {
+          ...insight,
+          system: PASSAGES_SYSTEM_PROMPT,
+          promptVersion: PASSAGES_PROMPT_VERSION,
+          schemaVersion: PASSAGES_SCHEMA_VERSION,
+          prompt: (blocks) => insightPrompt('passages', blocks),
+          validate: (text) => this.validatePassages(text, gathered),
+          store: (transaction, scope, validated) =>
+            this.suggestions.storePassages(transaction, scope, {
+              ...(validated as Awaited<ReturnType<AiJobRunnerService['validatePassages']>>),
+              regenerate,
+            }),
+        };
+      default:
+        return {
+          ...common,
+          system: SUMMARY_SYSTEM_PROMPT,
+          inputBudget: SUMMARY_INPUT_BUDGET,
+          outputTokens: SUMMARY_OUTPUT_TOKENS,
+          safetyReserve: SUMMARY_SAFETY_RESERVE,
+          promptVersion: SUMMARY_PROMPT_VERSION,
+          schemaVersion: SUMMARY_SCHEMA_VERSION,
+          prompt: summaryPrompt,
+          validate: (text, context) => ({
+            valid: validateSummaryOutput(text, studyIndex(gathered, context)),
+            coverageWarnings: context.coverageWarnings,
+          }),
+          store: (transaction, scope, validated) =>
+            this.summaries.store(transaction, scope, {
+              ...(validated as {
+                valid: ReturnType<typeof validateSummaryOutput>;
+                coverageWarnings: string[];
+              }),
+              gathered,
+            }),
+        };
+    }
+  }
+
+  /**
+   * BIB-45: passages a user may see. Every model reference is resolved against the local corpus
+   * of the study's edition (its starting passage's, else a Scripture node's, else the first active
+   * edition); anything that does not resolve to exactly one range, or that the study already
+   * holds, is excluded before display.
+   */
+  private async validatePassages(text: string, gathered: StudyContext) {
+    const parsed = parsePassagesOutput(text);
+    const startingEdition = gathered.startingReferenceId
+      ? gathered.references.get(gathered.startingReferenceId)?.editionId
+      : undefined;
+    const nodeEdition = gathered.nodes
+      .map((node) => (node.referenceId ? gathered.references.get(node.referenceId) : undefined))
+      .find((ref) => ref !== undefined)?.editionId;
+    const editionId = startingEdition ?? nodeEdition ?? (await this.references.defaultEditionId());
+    const held = new Set(
+      gathered.nodes.flatMap((node) => (node.referenceId ? [node.referenceId] : [])),
+    );
+    const resolved = await resolvePassages(
+      parsed.candidates,
+      (reference) =>
+        editionId ? this.references.resolveExact(editionId, reference) : Promise.resolve(null),
+      held,
+    );
+    return { proposals: resolved.proposals, dropped: parsed.dropped + resolved.dropped };
   }
 
   private measure(
@@ -643,7 +758,7 @@ interface CapabilityPlan {
   candidates: ContextCandidate[];
   capped: ContextCandidate[];
   prompt: (blocks: readonly string[]) => string;
-  /** Throws `OutputValidationError`; returns what `store` publishes. */
+  /** Throws `OutputValidationError`; returns (or resolves to) what `store` publishes. */
   validate: (text: string, context: AssembledContext) => unknown;
   /** Writes capability rows (suggestions) and returns the AiResult output. */
   store: (

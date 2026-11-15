@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { NodeSummary } from '@bible-artisan/contracts';
+import { ReferenceService } from '../../bible-content/reference/reference.service';
 import { EdgesService } from '../../graph/edges.service';
 import { type NodeContextContent, NodesService } from '../../graph/nodes.service';
 import { NotesService } from '../../notes/notes.service';
@@ -25,6 +26,24 @@ export interface StudyContextCandidates {
 }
 
 /**
+ * What the study-wide capabilities (summary, tensions, questions, passages; BIB-43..45) need
+ * besides the blocks: the items behind them, to type evidence references, check eligibility and
+ * check quotes. Private text: never logged.
+ */
+export interface StudyContext extends StudyContextCandidates {
+  studyId: string;
+  title: string;
+  mainQuestionNodeId: string | null;
+  originalQuestionNodeId: string | null;
+  startingReferenceId: string | null;
+  nodes: NodeSummary[];
+  notes: { id: string; revision: number; preview: string }[];
+  events: { id: string; sequence: string }[];
+  /** Scripture reference id → its edition and label. */
+  references: Map<string, { editionId: string; label: string }>;
+}
+
+/**
  * Gathers one study's context candidates for the AI, owner-scoped, through the owning modules'
  * exported read services (Study, Graph, Notes, Thread) rather than their tables. Order is the
  * priority order of PRD section 25: objective and questions, established conclusions, then other
@@ -41,6 +60,7 @@ export class ContextCandidatesService {
     private readonly notes: NotesService,
     private readonly thread: ThreadReadService,
     private readonly edges: EdgesService,
+    private readonly references: ReferenceService,
   ) {}
 
   /**
@@ -167,7 +187,7 @@ export class ContextCandidatesService {
     };
   }
 
-  async gather(ownerId: string, studyId: string): Promise<StudyContextCandidates> {
+  async gather(ownerId: string, studyId: string): Promise<StudyContext> {
     const study = await this.access.requireOwnedStudy(ownerId, studyId);
     const nodes = await this.nodes.liveSummaries(ownerId, studyId);
     const notes = (await this.notes.list(ownerId, studyId, { state: 'active' })).items;
@@ -278,6 +298,26 @@ export class ContextCandidatesService {
       });
     });
 
-    return { contentRevision: study.contentRevision, candidates, capped };
+    const stored = await this.references.storedReferences(
+      [study.startingReferenceId, ...nodes.map((node) => node.referenceId)].filter(
+        (id): id is string => id !== null,
+      ),
+    );
+    return {
+      contentRevision: study.contentRevision,
+      candidates,
+      capped,
+      studyId: study.id,
+      title: study.title,
+      mainQuestionNodeId: study.mainQuestionNodeId,
+      originalQuestionNodeId: study.originalQuestionNodeId,
+      startingReferenceId: study.startingReferenceId,
+      nodes,
+      notes: notes.map((note) => ({ id: note.id, revision: note.revision, preview: note.preview })),
+      events: events.map((event) => ({ id: event.id, sequence: event.sequence })),
+      references: new Map(
+        [...stored.values()].map((ref) => [ref.id, { editionId: ref.editionId, label: ref.label }]),
+      ),
+    };
   }
 }

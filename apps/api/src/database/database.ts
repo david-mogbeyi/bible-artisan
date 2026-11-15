@@ -26,6 +26,8 @@ import { StudyBranch } from './models/study-branch.model';
 import { StudyBranchMember } from './models/study-branch-member.model';
 import { StudyEvent } from './models/study-event.model';
 import { StudySession } from './models/study-session.model';
+import { StudySummary } from './models/study-summary.model';
+import { StudySummarySchedule } from './models/study-summary-schedule.model';
 import { StudyNode } from './models/study-node.model';
 import { StudyTag } from './models/study-tag.model';
 import { Study } from './models/study.model';
@@ -111,6 +113,8 @@ export function createDatabase(
       ExportFile,
       AccountDeletion,
       AiSuggestion,
+      StudySummary,
+      StudySummarySchedule,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

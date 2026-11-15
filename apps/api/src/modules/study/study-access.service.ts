@@ -95,6 +95,31 @@ export class StudyAccessService {
   }
 
   /**
+   * The content revision and lifecycle of these (owner, study) pairs, in one query (BIB-43: the
+   * worker's automatic-summary debounce watches content revisions without reading study tables).
+   * A pair whose study is absent, another owner's or past its recovery window is simply missing.
+   */
+  async contentRevisions(
+    keys: readonly { ownerId: string; studyId: string }[],
+  ): Promise<Map<string, { contentRevision: number; lifecycle: Study['lifecycle'] }>> {
+    const valid = keys.filter((key) => isResourceId(key.studyId) && isResourceId(key.ownerId));
+    if (valid.length === 0) return new Map();
+    const studies = await Study.findAll({
+      where: {
+        [Op.or]: valid.map((key) => ({ id: key.studyId, ownerId: key.ownerId })),
+        ...withinRecoveryWindow(),
+      },
+      attributes: ['id', 'contentRevision', 'lifecycle'],
+    });
+    return new Map(
+      studies.map((study) => [
+        study.id,
+        { contentRevision: study.contentRevision, lifecycle: study.lifecycle },
+      ]),
+    );
+  }
+
+  /**
    * Nodes of the owner's study `studyId` with these ids, soft-deleted ones included (BIB-23: a
    * note keeps its target after the node is deleted, for orphaned-note review). Callers resolve
    * the study first (`requireOwnedStudy`, or the mutation's lock); the query is still scoped by

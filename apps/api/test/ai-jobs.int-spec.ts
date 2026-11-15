@@ -444,11 +444,9 @@ describe('AI consent and jobs (BIB-39, BIB-40)', () => {
           result: {
             id: anyId,
             modelId: 'fake-model-1',
-            promptVersion: 'summary-prompt-v0',
-            output: {
-              overview: `Summary of ${ids.length} study items.`,
-              citedIds: ids.slice(0, 3),
-            },
+            promptVersion: 'summary-prompt-v1',
+            // BIB-43: the StudySummary revision it stored, current because nothing changed since.
+            output: { summaryId: anyId, current: true, droppedCount: 0 },
             createdAt: anyTime,
           },
         },
@@ -545,6 +543,11 @@ describe('AI consent and jobs (BIB-39, BIB-40)', () => {
         (await job(crashed.jobId)).attemptCount,
       ]).toStrictEqual(['succeeded', 2]);
 
+      // BIB-43: a manual regenerate is allowed once per ten seconds.
+      await AiJob.update(
+        { createdAt: new Date(Date.now() - 11_000) },
+        { where: { id: crashed.jobId } },
+      );
       const exhausted = await requested(owner, studyId);
       await AiJob.update({ ...expired, attemptCount: 3 }, { where: { id: exhausted.jobId } });
       expect(await runner.runOnce()).toBeNull();

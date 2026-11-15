@@ -1,16 +1,25 @@
 import type { AiSuggestionStatus, EdgeType } from '@bible-artisan/contracts';
 import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript';
 
-/** The rationale and evidence of one proposal (ids and exact quotes of stored text). */
+/**
+ * The rationale and evidence of one proposal (ids and exact quotes of stored text). BIB-44: a
+ * tension adds its `caveat`; a question proposal its `text`. BIB-45: a passage proposal carries
+ * the corpus-verified `reference` and the `rationale` is its relevance reason.
+ */
 export interface SuggestionProposal {
   rationale: string;
   evidence: { id: string; quote: string | null }[];
+  caveat?: string;
+  text?: string;
+  reference?: { referenceId: string; editionId: string; label: string };
 }
+
+export type AiSuggestionCapability = 'relationships' | 'tensions' | 'questions' | 'passages';
 
 /**
  * Hand-written model class for `ai_suggestion` (BIB-42, PRD section 23 AISuggestion): one
  * validated AI relationship proposal, a suggestion outside the canonical graph until the user
- * accepts it. Mirrors the migration: composite FKs into study and ai_job (cascading) and into both
+ * accepts it. BIB-44/45 add tension, open-question and passage proposals. Mirrors the migrations: composite FKs into study and ai_job (cascading) and into both
  * endpoint nodes; UNIQUE (owner_id, study_id, id) for `study_edge.suggestion_id`; CHECKs on
  * capability, status, edge type, no self-proposal, decision columns set together (decider = the
  * owner), `accepted_edge_id` exactly when accepted. `proposal_json` is private study-derived text:
@@ -32,19 +41,20 @@ export class AiSuggestion extends Model {
   declare jobId: string;
 
   @Column({ type: DataType.TEXT, allowNull: false })
-  declare capability: 'relationships';
+  declare capability: AiSuggestionCapability;
 
   @Column({ type: DataType.TEXT, allowNull: false, defaultValue: 'proposed' })
   declare status: AiSuggestionStatus;
 
-  @Column({ field: 'source_node_id', type: DataType.UUID, allowNull: false })
-  declare sourceNodeId: string;
+  /** Set exactly for the edge-shaped capabilities (`relationships`, `tensions`; BIB-44 CHECK). */
+  @Column({ field: 'source_node_id', type: DataType.UUID, allowNull: true })
+  declare sourceNodeId: string | null;
 
-  @Column({ field: 'target_node_id', type: DataType.UUID, allowNull: false })
-  declare targetNodeId: string;
+  @Column({ field: 'target_node_id', type: DataType.UUID, allowNull: true })
+  declare targetNodeId: string | null;
 
-  @Column({ field: 'edge_type', type: DataType.TEXT, allowNull: false })
-  declare edgeType: EdgeType;
+  @Column({ field: 'edge_type', type: DataType.TEXT, allowNull: true })
+  declare edgeType: EdgeType | null;
 
   @Column({ field: 'proposal_json', type: DataType.JSONB, allowNull: false })
   declare proposalJson: SuggestionProposal;
@@ -84,4 +94,8 @@ export class AiSuggestion extends Model {
 
   @Column({ field: 'accepted_edge_id', type: DataType.UUID, allowNull: true })
   declare acceptedEdgeId: string | null;
+
+  /** BIB-44/45: the node an accepted question or passage proposal became (composite FK). */
+  @Column({ field: 'accepted_node_id', type: DataType.UUID, allowNull: true })
+  declare acceptedNodeId: string | null;
 }

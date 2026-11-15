@@ -543,6 +543,64 @@ const ROUTES: Record<string, Access> = {
       test: "gives another user the same 404 on a study's relationship requests and suggestions, writing nothing",
     },
   },
+  // BIB-43/44/45: the living summary, tension/question/passage requests, proposals and the
+  // deterministic reasoning path: Bob's calls on Alice's study.
+  'GET /v1/studies/:studyId/summary': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/tensions': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/questions': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/passages': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
+  'GET /v1/studies/:studyId/ai/proposals': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/proposals/:proposalId/accept': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/proposals/:proposalId/reject': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
+  'GET /v1/studies/:studyId/nodes/:nodeId/reasoning': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-insights.int-spec.ts',
+      test: "gives another user the same 404 on a study's summary, insight requests, proposals and reasoning, writing nothing",
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

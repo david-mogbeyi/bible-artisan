@@ -101,10 +101,30 @@ const SIMPLE: Record<string, (input: DisplayInput) => string> = {
     return `Connected ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}${type}`;
   },
   edge_updated: () => 'Changed a relationship',
-  ai_suggestion_accepted: (i) =>
-    `Accepted an AI-suggested relationship from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`,
-  ai_suggestion_rejected: (i) =>
-    `Dismissed an AI-suggested relationship between ${name(i.origin, 'a node')} and ${name(i.target, 'a node')}`,
+  ai_suggestion_accepted: (i) => {
+    switch (i.payload.capability) {
+      case 'tensions':
+        return `Accepted an AI-suggested tension from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`;
+      case 'questions':
+        return `Added the AI-suggested question ${name(i.target, 'a question')}`;
+      case 'passages':
+        return `Added the AI-suggested passage ${name(i.target, 'a passage')}`;
+      default:
+        return `Accepted an AI-suggested relationship from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`;
+    }
+  },
+  ai_suggestion_rejected: (i) => {
+    switch (i.payload.capability) {
+      case 'tensions':
+        return `Dismissed an AI-suggested tension between ${name(i.origin, 'a node')} and ${name(i.target, 'a node')}`;
+      case 'questions':
+        return 'Dismissed an AI-suggested question';
+      case 'passages':
+        return 'Dismissed an AI-suggested passage';
+      default:
+        return `Dismissed an AI-suggested relationship between ${name(i.origin, 'a node')} and ${name(i.target, 'a node')}`;
+    }
+  },
   edge_removed: (i) =>
     `Removed the relationship from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`,
   edge_restored: (i) =>

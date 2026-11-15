@@ -10,8 +10,6 @@ import {
   type AiJobResponse,
   RETRYABLE_AI_JOB_ERRORS,
   STUDY_TRASHED,
-  type RelationshipsJobOutput,
-  type SummaryOutputV0,
 } from '@bible-artisan/contracts';
 import { fn, QueryTypes, type Transaction } from 'sequelize';
 import { randomUUID } from 'node:crypto';
@@ -35,6 +33,8 @@ import { AI_RUNTIME, type AiRuntime } from './provider/ai-provider';
 const ACTIVE_STATES = ['queued', 'running'] as const;
 const HOUR_SECONDS = 3600;
 const DAY_SECONDS = 86_400;
+/** PRD section 17: "Manual regenerate is allowed once per ten seconds". */
+const SUMMARY_REGENERATE_SECONDS = 10;
 
 /**
  * AI job requests, status and cancellation (BIB-39, PRD sections 24, 25). Requests only record a
@@ -101,6 +101,7 @@ export class AiJobsService {
       ).find((job) => isDeepStrictEqual(job.input, input));
       if (active) return accepted(active, 'existing');
 
+      if (capability === 'summary') await this.checkRegenerateInterval(ownerId, studyId);
       await this.checkLimits(ownerId, transaction);
       const job = await AiJob.create(
         {
@@ -116,6 +117,62 @@ export class AiJobsService {
         { transaction },
       );
       return accepted(job, 'queued');
+    });
+  }
+
+  /**
+   * An automatic summary job (BIB-43, PRD section 17), queued by the worker's debounce. Never
+   * throws for a gate: returns false when AI is not allowed for the study, an equivalent job is
+   * already waiting or running, or the automatic daily limit or the spend cap is reached.
+   */
+  async requestAutomaticSummary(
+    ownerId: string,
+    studyId: string,
+    basisRevision: number,
+  ): Promise<boolean> {
+    try {
+      await this.access.assertRequestAllowed(ownerId, studyId);
+    } catch {
+      return false;
+    }
+    return this.db.transaction(async (transaction) => {
+      await this.db.query(`SELECT pg_advisory_xact_lock(hashtext('ai_job_request:' || $1))`, {
+        bind: [ownerId],
+        type: QueryTypes.SELECT,
+        transaction,
+      });
+      const active = await AiJob.count({
+        where: { ownerId, studyId, capability: 'summary', state: [...ACTIVE_STATES] },
+        transaction,
+      });
+      if (active > 0) return false;
+      const [row] = await this.db.query<{ count: number }>(
+        `SELECT count(*)::int AS count FROM ai_job
+          WHERE owner_id = $1 AND trigger = 'automatic'
+            AND created_at > now() - make_interval(secs => $2)`,
+        { bind: [ownerId, DAY_SECONDS], type: QueryTypes.SELECT, transaction },
+      );
+      if ((row?.count ?? 0) >= AI_LIMITS.automaticSummariesPerDay) return false;
+      try {
+        await this.checkLimits(ownerId, transaction);
+      } catch (error) {
+        if (error instanceof AiQuotaError) return false;
+        throw error;
+      }
+      await AiJob.create(
+        {
+          ownerId,
+          studyId,
+          capability: 'summary',
+          trigger: 'automatic',
+          requestKey: `auto:${randomUUID()}`,
+          input: {},
+          basisRevision,
+          consentVersion: AI_CONSENT_VERSION,
+        },
+        { transaction },
+      );
+      return true;
     });
   }
 
@@ -165,7 +222,7 @@ export class AiJobsService {
             id: result.id,
             modelId: result.modelId,
             promptVersion: result.promptVersion,
-            output: result.outputJson as SummaryOutputV0 | RelationshipsJobOutput,
+            output: result.outputJson as NonNullable<AiJobResponse['result']>['output'],
             createdAt: result.createdAt.toISOString(),
           }
         : null,
@@ -202,6 +259,25 @@ export class AiJobsService {
       },
     );
     return affected;
+  }
+
+  /**
+   * One manual summary request per study per ten seconds (429 with Retry-After). A request after
+   * a failed or cancelled one is a retry, not a regenerate, and is not held back.
+   */
+  private async checkRegenerateInterval(ownerId: string, studyId: string): Promise<void> {
+    const [row] = await this.db.query<{ retry_after: number | null }>(
+      `SELECT ceil(extract(epoch FROM max(created_at) + make_interval(secs => $3) - now()))::int
+                AS retry_after
+         FROM ai_job
+        WHERE owner_id = $1 AND study_id = $2 AND capability = 'summary' AND trigger = 'user'
+          AND state NOT IN ('failed', 'cancelled')
+          AND created_at > now() - make_interval(secs => $3)`,
+      { bind: [ownerId, studyId, SUMMARY_REGENERATE_SECONDS], type: QueryTypes.SELECT },
+    );
+    if (row?.retry_after != null) {
+      throw new AiQuotaError(AI_QUOTA_EXCEEDED, Math.max(1, row.retry_after));
+    }
   }
 
   /** The rolling request limits and the monthly spend cap (PRD section 25). */
