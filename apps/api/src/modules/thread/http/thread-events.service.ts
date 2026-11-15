@@ -41,6 +41,22 @@ const FILTER_TYPES: Record<Exclude<ThreadFilter, 'all'>, string[]> = {
   ],
 };
 
+/**
+ * A filter's events. Questions also lists the acceptance of an AI-suggested question: it shares
+ * the created question's action, so that card still says the question came from an AI suggestion
+ * the user accepted (FR-AI-013) rather than reading as the user's own.
+ */
+function filterWhere(filter: ThreadFilter): WhereOptions {
+  if (filter === 'all') return {};
+  if (filter !== 'questions') return { eventType: FILTER_TYPES[filter] };
+  return {
+    [Op.or]: [
+      { eventType: FILTER_TYPES.questions },
+      { eventType: 'ai_suggestion_accepted', payloadJson: { capability: 'questions' } },
+    ],
+  };
+}
+
 /** Correlated records shown with one event's details (one action writes a handful at most). */
 const CORRELATED_MAX = 50;
 
@@ -111,7 +127,7 @@ export class ThreadEventsService {
       studyId,
       ownerId,
       ...(listing.includeInternal ? {} : { visibility: 'visible' }),
-      ...(listing.filter === 'all' ? {} : { eventType: FILTER_TYPES[listing.filter] }),
+      ...filterWhere(listing.filter),
       ...(listing.branchId ? { branchId: listing.branchId } : {}),
       ...(after !== null
         ? { sequence: listing.order === 'desc' ? { [Op.lt]: after } : { [Op.gt]: after } }
