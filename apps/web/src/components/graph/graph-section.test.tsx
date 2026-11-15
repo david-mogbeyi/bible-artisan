@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NODES_COPY, NodesSection } from '@/components/nodes/nodes-section';
 import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
+import { ViewStateSaver } from '@/components/studies/view-state-saver';
 import { GRAPH_COPY, GraphSection } from './graph-section';
 import { POSITION_SAVE_DEBOUNCE_MS } from './use-position-saver';
 
@@ -82,6 +83,8 @@ let graphReplies: (() => Reply)[];
 let graphReads: number;
 let patchReplies: Reply[];
 let fetchMock: ReturnType<typeof vi.fn>;
+/** View-state saves sent (tests that render ViewStateSaver). */
+let viewStateSaves = 0;
 
 function reply(next: Reply | undefined, what: string): Promise<Response> {
   if (!next) throw new Error(`unexpected ${what}`);
@@ -92,6 +95,7 @@ beforeEach(() => {
   graphReplies = [];
   graphReads = 0;
   patchReplies = [];
+  viewStateSaves = 0;
   fetchMock = vi.fn((input: string, init?: RequestInit) => {
     const path = input.replace(/^.*\/v1/, '');
     if (path === `/studies/${STUDY_ID}/graph`) {
@@ -101,6 +105,13 @@ beforeEach(() => {
     }
     if (path === `/studies/${STUDY_ID}/positions` && init?.method === 'PATCH') {
       return reply(patchReplies.shift(), 'position save');
+    }
+    if (path === `/studies/${STUDY_ID}/view-state` && init?.method === 'PATCH') {
+      // Answered a moment later: still in flight while a pagehide handler runs.
+      viewStateSaves += 1;
+      return new Promise<Response>((_resolve, rejectSave) => {
+        setTimeout(() => rejectSave(new TypeError('network')), 0);
+      });
     }
     if (path === `/studies/${STUDY_ID}/nodes`) {
       return Promise.resolve(jsonResponse(200, { items: NODES }));
@@ -444,6 +455,43 @@ describe('GraphSection (BIB-28)', () => {
       ([, init]) => init?.method === 'PATCH',
     );
     expect(patch?.[1]?.keepalive).toBe(true);
+  });
+
+  it('sends a queued move before a waiting view-state save when the page is hidden, so the move is not left behind it', async () => {
+    graphReplies.push(() => jsonResponse(200, GRAPH));
+    // As on the study page: the view-state saver comes first, so its pagehide listener is older.
+    renderWithQuery(
+      <>
+        <ViewStateSaver studyId={STUDY_ID} active openedNodeId={null} openedBranchId={null} />
+        <GraphSection study={STUDY} />
+      </>,
+    );
+    await screen.findByRole('group', { name: 'Study graph' });
+    // Selecting the node queues a view-state save (800 ms); the move queues a position save.
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'Enter' });
+    await waitFor(() =>
+      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
+    );
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowRight' });
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+    // Synchronously, as the page goes: a request still waiting in the view lane never leaves.
+    const sent = (fetchMock.mock.calls as [string, RequestInit | undefined][])
+      .filter(([, init]) => init?.method === 'PATCH')
+      .map(([url, init]) => ({
+        path: url.replace(/^.*\/v1/, ''),
+        body: JSON.parse(init?.body as string) as unknown,
+        keepalive: init?.keepalive,
+      }));
+    expect(sent[0]).toStrictEqual({
+      path: `/studies/${STUDY_ID}/positions`,
+      body: { expectedRevision: 5, positions: [{ nodeId: Q, x: 5, y: 0 }] },
+      keepalive: true,
+    });
+    // The view-state save follows once the move settles, leaving the study's view lane idle.
+    await waitFor(() => expect(viewStateSaves).toBe(1));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 10)));
   });
 
   it('sends queued moves when the page is hidden, and asks before leaving while a save is held for Retry', async () => {
