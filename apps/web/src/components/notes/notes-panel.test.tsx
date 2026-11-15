@@ -5,6 +5,7 @@ import {
   noteDocumentSchema,
   type StudyResponse,
 } from '@bible-artisan/contracts';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { Editor } from '@tiptap/react';
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
@@ -463,6 +464,42 @@ describe('NotesPanel (BIB-23)', () => {
     expect(textOf(screen.getByRole('alert'))).toContain('Enter a full web address');
     expect(editor.getHTML()).not.toContain('javascript:');
     await expectNoA11yViolations(document.body);
+  });
+
+  it('closes the Link form with Escape or Cancel and returns focus to Link, changing nothing', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    const toolbar = screen.getByRole('toolbar', { name: 'Formatting' });
+    const link = within(toolbar).getByRole('button', { name: 'Link' });
+    fireEvent.click(link);
+    fireEvent.keyDown(screen.getByLabelText('Link address'), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByLabelText('Link address')).toBeNull());
+    expect(document.activeElement).toBe(link);
+    expect(link.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(link);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByLabelText('Link address')).toBeNull());
+    expect(document.activeElement).toBe(link);
+    expect(editor.getHTML()).not.toContain('<a');
+  });
+
+  it('opens a note asked for elsewhere on the page (a summary citation) and focuses its list item', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    const props = { study: STUDY, onReload: () => Promise.resolve(), onUnsavedChange: vi.fn() };
+    const { rerender, queryClient } = renderWithQuery(<NotesPanel {...props} />);
+    const item = await screen.findByRole('button', { name: 'First thoughts' });
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <NotesPanel {...props} openRequest={{ noteId: NOTE_ID }} />
+      </QueryClientProvider>,
+    );
+    await noteEditor();
+    expect(item.getAttribute('aria-pressed')).toBe('true');
+    await waitFor(() => expect(document.activeElement).toBe(item));
   });
 
   it('groups orphaned notes with their deleted target, and restores a note from the note trash', async () => {

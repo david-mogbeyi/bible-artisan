@@ -401,13 +401,16 @@ function ScriptureContent({
   const edition = translations.data?.translations.find((t) => t.id === reference.editionId);
   return (
     <>
-      <Row label="Passage">{reference.label}</Row>
+      {/* The reader link sits in the passage's <dd>: a <dl> may only hold dt/dd groups. */}
+      <Row label="Passage">
+        {reference.label}
+        <span className="block">
+          <Link href={bibleHref(reference.id, studyId)} className="text-accent underline">
+            Open in reader <span className="sr-only">{reference.label}</span>
+          </Link>
+        </span>
+      </Row>
       {edition ? <Row label="Translation">{edition.name}</Row> : null}
-      <div>
-        <Link href={bibleHref(reference.id, studyId)} className="text-accent underline">
-          Open in reader <span className="sr-only">{reference.label}</span>
-        </Link>
-      </div>
     </>
   );
 }
@@ -484,6 +487,7 @@ function EditNode({
   const queryClient = useQueryClient();
   const kindId = useId();
   const editButton = useRef<HTMLButtonElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Draft>(() => draftOf(node));
   const [base, setBase] = useState(node);
@@ -508,7 +512,17 @@ function EditNode({
   }, [editing, onEditingChange]);
 
   useEffect(() => {
-    if (editing || !returnFocus.current) return;
+    if (editing) {
+      // The Edit button is replaced by the form: focus its first control (the chosen kind, the
+      // text, or a source's title), so focus never falls to the page and Escape reaches the form.
+      formRef.current
+        ?.querySelector<HTMLElement>(
+          'input[type="radio"]:checked, input:not([type="radio"]), textarea',
+        )
+        ?.focus();
+      return;
+    }
+    if (!returnFocus.current) return;
     returnFocus.current = false;
     editButton.current?.focus();
   }, [editing]);
@@ -625,6 +639,7 @@ function EditNode({
 
   return (
     <form
+      ref={formRef}
       noValidate
       aria-label={`Edit ${NODE_TYPE_NAMES[node.type].toLowerCase()}`}
       className="flex flex-col gap-3"

@@ -11,6 +11,7 @@ import {
 } from '@bible-artisan/contracts';
 import { useQuery } from '@tanstack/react-query';
 import {
+  type AriaLabelConfig,
   Background,
   type Connection,
   ConnectionMode,
@@ -91,6 +92,24 @@ export const GRAPH_COPY = {
   skipCanvas: 'Skip the canvas',
   afterCanvas: 'End of the canvas',
 } as const;
+
+/**
+ * BIB-53: React Flow's own screen-reader text, matched to this canvas. Its defaults offer Delete
+ * (off here) and announce each arrow-key move with the position from before the move.
+ */
+function canvasAriaLabels(movable: boolean): Partial<AriaLabelConfig> {
+  const node = movable
+    ? 'Enter or Space selects this node and opens it in the Nodes list. Arrow keys then move it. Escape clears the selection.'
+    : 'Enter or Space selects this node and opens it in the Nodes list. Escape clears the selection.';
+  return {
+    'node.a11yDescription.default': node,
+    'node.a11yDescription.keyboardDisabled': node,
+    'node.a11yDescription.ariaLiveMessage': ({ direction }) => `Moved ${direction}.`,
+    'edge.a11yDescription.default':
+      'A relationship. Change or remove it from either node in the Nodes list.',
+    'minimap.ariaLabel': 'Graph overview',
+  };
+}
 
 const LOAD_COPY: ProblemCopy = {
   notFound: "Couldn't load the graph. The Nodes list below still has everything.",
@@ -338,6 +357,7 @@ function GraphCanvas({
     [connectable, content, data, movable, positions, preview, selected, view.visible],
   );
   const edges = useMemo(() => toFlowEdges(content, view.visible), [content, view.visible]);
+  const ariaLabels = useMemo(() => canvasAriaLabels(movable), [movable]);
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
@@ -840,6 +860,9 @@ function GraphCanvas({
                 selectionKeyCode={null}
                 multiSelectionKeyCode="Shift"
                 disableKeyboardA11y={false}
+                ariaLabelConfig={ariaLabels}
+                // Arrowheads carry a relationship's direction: muted, 6.6:1 (React Flow: #b1b1b7).
+                defaultMarkerColor="var(--color-muted)"
                 onlyRenderVisibleElements={nodes.length > 100}
               >
                 <Background />

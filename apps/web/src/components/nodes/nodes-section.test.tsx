@@ -481,6 +481,11 @@ describe('NodesSection', () => {
     expect(said.map((el) => el.getAttribute('role'))).toStrictEqual(['status', null]);
     expect(within(original).queryByText('Duplicate')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Show it' })).toBeNull();
+    // The reader link sits inside the passage's term group (axe: definition-list).
+    expect(
+      within(original).getByRole('link', { name: 'Open in reader Romans 9:1' }).closest('dd'),
+    ).toBeTruthy();
+    await expectNoA11yViolations(original);
     expect(queryClient.getQueryData<StudyResponse>(studyQueryKey(STUDY_ID))?.revision).toBe(5);
 
     fireEvent.click(screen.getByRole('button', { name: 'Add a separate copy' }));
@@ -614,6 +619,27 @@ describe('NodesSection', () => {
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add node' })),
     );
+  });
+
+  it('moves focus into the Edit form when it opens, and Escape closes it back to Edit', async () => {
+    reply(`GET ${NODES}`, jsonResponse(200, { items: [summary()] }));
+    reply(
+      `GET ${NODE}`,
+      jsonResponse(200, { type: 'thought', ...common(), text: 'T', derivedFromNote: null }),
+    );
+    renderSection();
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Thought · You Maybe a second witness' }),
+    );
+    const region = await screen.findByRole('region', { name: 'Thought' });
+    fireEvent.click(within(region).getByRole('button', { name: 'Edit' }));
+    const form = within(region).getByRole('form', { name: 'Edit thought' });
+    await waitFor(() => expect(document.activeElement).toBe(within(form).getByLabelText('Text')));
+    fireEvent.keyDown(within(form).getByLabelText('Text'), { key: 'Escape' });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Edit' })),
+    );
+    expect(within(region).queryByRole('form', { name: 'Edit thought' })).toBeNull();
   });
 
   it('shows a source citation, linking its URL only when it is http or https', async () => {

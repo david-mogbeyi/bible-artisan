@@ -7,10 +7,14 @@ import type {
   SummaryItem,
 } from '@bible-artisan/contracts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useId, useState } from 'react';
+import Link from 'next/link';
+import { Fragment, type ReactNode, useId, useState } from 'react';
 import { fetchStudySummary, requestStudySummary, studySummaryQueryKey } from '@/lib/ai';
 import { ApiError } from '@/lib/api-client';
+import { bibleHref } from '@/lib/bible';
+import { useGraphViewStore } from '@/lib/graph-store';
 import { listNodes, nodeOptionText, nodesQueryKey } from '@/lib/nodes';
+import { listNotes, notesQueryKey } from '@/lib/notes';
 
 export const SUMMARY_COPY = {
   heading: 'Study summary',
@@ -57,11 +61,23 @@ const ATTRIBUTION: Record<SummaryItem['attribution'], string> = {
  * freshness. A summary on an older basis says "Based on an earlier version of this study"; a
  * failed regeneration keeps the last valid summary and says so. Open questions and conclusions
  * are the study's own (statuses set only by the user). Every item names its attribution and its
- * evidence in text, never by color alone.
+ * evidence in text, never by color alone. Each cited node or note still in the study is a button
+ * that opens it (its detail or the note), and a passage no longer in the study links to the reader
+ * (BIB-53: follow a citation).
  */
-export function StudySummaryPanel({ studyId, active }: { studyId: string; active: boolean }) {
+export function StudySummaryPanel({
+  studyId,
+  active,
+  onOpenNote,
+}: {
+  studyId: string;
+  active: boolean;
+  /** Opens a cited note in the Notes panel; without it, notes are cited in text only. */
+  onOpenNote?: (noteId: string) => void;
+}) {
   const headingId = useId();
   const queryClient = useQueryClient();
+  const graphView = useGraphViewStore();
   const [problem, setProblem] = useState<string | null>(null);
   const summary = useQuery({
     queryKey: studySummaryQueryKey(studyId),
@@ -70,6 +86,19 @@ export function StudySummaryPanel({ studyId, active }: { studyId: string; active
   });
   const nodes = useQuery({ queryKey: nodesQueryKey(studyId), queryFn: () => listNodes(studyId) });
   const generating = summary.data?.generating ?? false;
+  const citesNotes =
+    onOpenNote !== undefined &&
+    SECTIONS.some(({ key }) =>
+      ((summary.data?.summary?.[key] ?? []) as SummaryItem[]).some((item) =>
+        item.evidenceRefs.some((ref) => ref.type === 'note_version'),
+      ),
+    );
+  // The Notes panel's own list (the same cache entry): a note cited but since trashed stays text.
+  const notes = useQuery({
+    queryKey: notesQueryKey(studyId, 'active'),
+    queryFn: () => listNotes(studyId, 'active'),
+    enabled: citesNotes,
+  });
 
   const ask = useMutation({
     mutationFn: () => requestStudySummary(studyId, crypto.randomUUID()),
@@ -78,9 +107,50 @@ export function StudySummaryPanel({ studyId, active }: { studyId: string; active
     onError: (error) => setProblem(requestProblem(error)),
   });
 
-  const labelOf = (nodeId: string): string => {
-    const found = nodes.data?.items.find((node: NodeSummary) => node.id === nodeId);
-    return found ? nodeOptionText(found) : 'An item no longer in this study';
+  const nodeOf = (nodeId: string): NodeSummary | undefined =>
+    nodes.data?.items.find((node: NodeSummary) => node.id === nodeId);
+
+  /** Selects the node and moves focus to its detail, as the Nodes list does (narrow: Notes tab). */
+  const showNode = (nodeId: string) =>
+    graphView.getState().select([nodeId], 'list', { focusDetail: true });
+
+  const citation = (ref: SummaryEvidenceRef): ReactNode => {
+    const quote = 'quote' in ref && ref.quote ? ` — “${ref.quote}”` : '';
+    const follow = (label: string, onClick: () => void) => (
+      <>
+        <button type="button" onClick={onClick} className="text-accent underline">
+          {label}
+        </button>
+        {quote}
+      </>
+    );
+    switch (ref.type) {
+      case 'scripture': {
+        if (nodeOf(ref.nodeId)) return follow(ref.label, () => showNode(ref.nodeId));
+        if (!ref.referenceId) return `${ref.label}${quote}`;
+        return (
+          <>
+            <Link href={bibleHref(ref.referenceId, studyId)} className="text-accent underline">
+              {ref.label}
+            </Link>
+            {quote}
+          </>
+        );
+      }
+      case 'node_version':
+      case 'source': {
+        const found = nodeOf(ref.nodeId);
+        if (!found) return `An item no longer in this study${quote}`;
+        return follow(nodeOptionText(found), () => showNode(ref.nodeId));
+      }
+      case 'note_version': {
+        const note = notes.data?.items.find((candidate) => candidate.id === ref.noteId);
+        if (!note || !onOpenNote) return `A note${quote}`;
+        return follow(`Note: ${note.preview || 'Empty note'}`, () => onOpenNote(ref.noteId));
+      }
+      case 'event':
+        return 'An entry in the study history';
+    }
   };
 
   const data = summary.data;
@@ -99,9 +169,12 @@ export function StudySummaryPanel({ studyId, active }: { studyId: string; active
       {active && data ? (
         <button
           type="button"
-          disabled={generating || ask.isPending}
-          onClick={() => ask.mutate()}
-          className="self-start rounded border border-accent px-3 py-1 text-accent disabled:opacity-60"
+          // aria-disabled, not disabled: a disabled button drops keyboard focus to the page.
+          aria-disabled={generating || ask.isPending ? true : undefined}
+          onClick={() => {
+            if (!generating && !ask.isPending) ask.mutate();
+          }}
+          className="self-start rounded border border-accent px-3 py-1 text-accent aria-disabled:opacity-60"
         >
           {current ? SUMMARY_COPY.regenerate : SUMMARY_COPY.generate}
         </button>
@@ -161,7 +234,13 @@ export function StudySummaryPanel({ studyId, active }: { studyId: string; active
                       {item.evidenceRefs.length > 0 ? (
                         <p className="text-sm">
                           {SUMMARY_COPY.evidence}:{' '}
-                          {item.evidenceRefs.map((ref) => refText(ref, labelOf)).join('; ')}
+                          {item.evidenceRefs.map((ref, index) => (
+                            // Refs have no id of their own, and their order is fixed.
+                            <Fragment key={index}>
+                              {index > 0 ? '; ' : null}
+                              {citation(ref)}
+                            </Fragment>
+                          ))}
                         </p>
                       ) : null}
                     </li>
@@ -179,21 +258,6 @@ export function StudySummaryPanel({ studyId, active }: { studyId: string; active
       ) : null}
     </section>
   );
-}
-
-function refText(ref: SummaryEvidenceRef, labelOf: (nodeId: string) => string): string {
-  const quote = 'quote' in ref && ref.quote ? ` — “${ref.quote}”` : '';
-  switch (ref.type) {
-    case 'scripture':
-      return `${ref.label}${quote}`;
-    case 'node_version':
-    case 'source':
-      return `${labelOf(ref.nodeId)}${quote}`;
-    case 'note_version':
-      return `A note${quote}`;
-    case 'event':
-      return 'An entry in the study history';
-  }
 }
 
 function requestProblem(error: unknown): string {

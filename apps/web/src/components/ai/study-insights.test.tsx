@@ -7,6 +7,7 @@ import type {
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REASONING_COPY, ReasoningPath } from '@/components/nodes/reasoning-path';
+import { useGraphView } from '@/lib/graph-store';
 import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { INSIGHTS_COPY, StudyInsights } from './study-insights';
@@ -154,6 +155,116 @@ describe('StudySummaryPanel (BIB-43)', () => {
         `/studies/${STUDY_ID}/ai/summary`,
       ]),
     );
+  });
+});
+
+/** The page's shared selection, as the Nodes list reads it. */
+function SelectionProbe() {
+  const ids = useGraphView((state) => state.selectedNodeIds);
+  const focusDetail = useGraphView((state) => state.focusDetail);
+  return (
+    <output aria-label="Selection">{`${ids.join(',')}${focusDetail ? ' (focus)' : ''}`}</output>
+  );
+}
+
+describe('StudySummaryPanel citations and focus (BIB-53)', () => {
+  it('makes each cited node, note and passage followable, and keeps Generate focusable while it works', async () => {
+    const NOTE = 'a0000000-2222-4333-8444-555555555555';
+    const GONE = 'b0000000-2222-4333-8444-555555555555';
+    const cited: StudySummary = {
+      ...summary,
+      establishedFindings: [
+        {
+          ...summary.establishedFindings[0]!,
+          evidenceRefs: [
+            { type: 'node_version', nodeId: OBS, revision: 1, quote: null },
+            {
+              type: 'scripture',
+              nodeId: GONE,
+              referenceId: REF,
+              editionId: EDI,
+              label: 'Romans 8:16',
+              quote: null,
+            },
+            { type: 'note_version', noteId: NOTE, revision: 2, quote: 'inner witness' },
+          ],
+        },
+      ],
+    };
+    reply(
+      `GET /studies/${STUDY_ID}/summary`,
+      jsonResponse(200, {
+        summary: cited,
+        stale: false,
+        currentContentRevision: 3,
+        generating: false,
+        lastFailure: null,
+      }),
+      jsonResponse(200, {
+        summary: cited,
+        stale: false,
+        currentContentRevision: 3,
+        generating: true,
+        lastFailure: null,
+      }),
+    );
+    reply(
+      `GET /studies/${STUDY_ID}/notes`,
+      jsonResponse(200, {
+        items: [
+          {
+            id: NOTE,
+            revision: 2,
+            target: null,
+            preview: 'Inner witness',
+            characterCount: 13,
+            createdAt: T,
+            updatedAt: T,
+            deletedAt: null,
+          },
+        ],
+      }),
+    );
+    reply(
+      `POST /studies/${STUDY_ID}/ai/summary`,
+      jsonResponse(202, {
+        jobId: JOB,
+        basisRevision: 3,
+        statusUrl: `/v1/studies/${STUDY_ID}/ai/jobs/${JOB}`,
+        outcome: 'queued',
+      }),
+    );
+    const onOpenNote = vi.fn();
+    renderWithQuery(
+      <>
+        <StudySummaryPanel studyId={STUDY_ID} active onOpenNote={onOpenNote} />
+        <SelectionProbe />
+      </>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Observation: Witness' }));
+    expect(screen.getByRole('status', { name: 'Selection' }).textContent).toBe(`${OBS} (focus)`);
+    // The passage's node left the study: the passage itself still opens in the reader.
+    expect(screen.getByRole('link', { name: 'Romans 8:16' }).getAttribute('href')).toBe(
+      `/bible?ref=${REF}&study=${STUDY_ID}`,
+    );
+    const note = await screen.findByRole('button', { name: 'Note: Inner witness' });
+    expect(textOf(note.closest('p'))).toBe(
+      'Evidence: Observation: Witness; Romans 8:16; Note: Inner witness — “inner witness”',
+    );
+    fireEvent.click(note);
+    expect(onOpenNote.mock.calls).toStrictEqual([[NOTE]]);
+    await expectNoA11yViolations(document.body);
+
+    // aria-disabled, never disabled: a disabled button would drop focus to the page.
+    const regenerate = screen.getByRole('button', { name: SUMMARY_COPY.regenerate });
+    regenerate.focus();
+    fireEvent.click(regenerate);
+    await screen.findByText(SUMMARY_COPY.generating);
+    expect(regenerate.getAttribute('aria-disabled')).toBe('true');
+    expect(regenerate.hasAttribute('disabled')).toBe(false);
+    expect(document.activeElement).toBe(regenerate);
+    fireEvent.click(regenerate);
+    expect(requests.filter((r) => r.method === 'POST')).toHaveLength(1);
   });
 });
 

@@ -65,10 +65,13 @@ export function NotesPanel({
   study,
   onReload,
   onUnsavedChange,
+  openRequest = null,
 }: {
   study: StudyResponse;
   onReload: () => Promise<unknown>;
   onUnsavedChange: (unsaved: boolean) => void;
+  /** A note to open from elsewhere on the page (a summary citation, BIB-53); a new object each time. */
+  openRequest?: { noteId: string } | null;
 }) {
   const queryClient = useQueryClient();
   const editable = study.lifecycle === 'active';
@@ -150,6 +153,17 @@ export function NotesPanel({
       setOpenId(noteId);
     });
   }
+
+  // A cited note opens like a click on its list item, which then has focus (the open note follows).
+  const openNoteRef = useRef(openNote);
+  useEffect(() => {
+    openNoteRef.current = openNote;
+  });
+  useEffect(() => {
+    if (!openRequest) return;
+    const { noteId } = openRequest;
+    void openNoteRef.current(noteId).then(() => itemButtons.current.get(noteId)?.focus());
+  }, [openRequest]);
 
   function create(retry = false) {
     if (creating) return Promise.resolve();

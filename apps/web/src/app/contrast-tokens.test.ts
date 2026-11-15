@@ -83,4 +83,13 @@ describe('design token contrast (BIB-53)', () => {
       /\.react-flow \.react-flow__node\.selectable:focus-visible \{\s*outline: 2px solid var\(--color-accent\)/,
     );
   });
+
+  it('draws React Flow’s attribution link in muted ink on a canvas-coloured panel', () => {
+    expect(css).toMatch(
+      /\.react-flow \.react-flow__attribution \{\s*background: var\(--color-canvas\)/,
+    );
+    expect(css).toMatch(
+      /\.react-flow \.react-flow__attribution a \{\s*color: var\(--color-muted\)/,
+    );
+  });
 });

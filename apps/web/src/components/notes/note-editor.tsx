@@ -431,6 +431,7 @@ export function NoteEditor({
   // "Mention node…" (BIB-58): whether its picker is open, and where focus returns.
   const [mentionOpen, setMentionOpen] = useState(false);
   const mentionButton = useRef<HTMLButtonElement>(null);
+  const linkButton = useRef<HTMLButtonElement>(null);
   // "Resolve reference" (BIB-24): the selection it was asked for, and what came back.
   const [resolving, setResolving] = useState(false);
   const [resolveMessage, setResolveMessage] = useState<string | null>(null);
@@ -839,6 +840,13 @@ export function NoteEditor({
     setActionMessage(MENTION_COPY.inserted);
   }
 
+  /** Closes the Link form unchanged (Cancel or Escape), back to the Link button that opened it. */
+  function cancelLink() {
+    setLinkOpen(false);
+    setLinkError(null);
+    linkButton.current?.focus();
+  }
+
   function removeLink() {
     editor?.chain().focus().extendMarkRange('link').unsetLink().run();
     setLinkOpen(false);
@@ -881,7 +889,7 @@ export function NoteEditor({
       aria-pressed={pressed}
       aria-keyshortcuts={shortcut}
       onClick={run}
-      className="rounded border border-muted px-2 py-1 text-sm aria-pressed:bg-accent aria-pressed:text-canvas"
+      className="rounded border border-muted px-2 py-1 text-sm aria-pressed:border-2 aria-pressed:border-accent aria-pressed:bg-accent aria-pressed:font-semibold aria-pressed:text-canvas"
     >
       {label}
     </button>
@@ -930,6 +938,7 @@ export function NoteEditor({
         )}
         {tool('Quote', active?.quote, () => editor?.chain().focus().toggleBlockquote().run())}
         <button
+          ref={linkButton}
           type="button"
           aria-pressed={active?.link}
           aria-expanded={linkOpen}
@@ -939,7 +948,7 @@ export function NoteEditor({
             setLinkError(null);
             setLinkOpen((open) => !open);
           }}
-          className="rounded border border-muted px-2 py-1 text-sm aria-pressed:bg-accent aria-pressed:text-canvas"
+          className="rounded border border-muted px-2 py-1 text-sm aria-pressed:border-2 aria-pressed:border-accent aria-pressed:bg-accent aria-pressed:font-semibold aria-pressed:text-canvas"
         >
           Link
         </button>
@@ -1018,7 +1027,17 @@ export function NoteEditor({
         />
       ) : null}
       {linkOpen ? (
-        <form id={ids.link} onSubmit={applyLink} className="flex flex-wrap items-end gap-2">
+        <form
+          id={ids.link}
+          onSubmit={applyLink}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              cancelLink();
+            }
+          }}
+          className="flex flex-wrap items-end gap-2"
+        >
           <label className="flex flex-col text-sm">
             Link address
             <input
@@ -1045,10 +1064,7 @@ export function NoteEditor({
           ) : null}
           <button
             type="button"
-            onClick={() => {
-              setLinkOpen(false);
-              editor?.commands.focus();
-            }}
+            onClick={cancelLink}
             className="rounded border border-muted px-2 py-1 text-sm"
           >
             Cancel
