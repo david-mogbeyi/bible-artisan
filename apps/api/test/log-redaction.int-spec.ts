@@ -4,6 +4,7 @@ import { inspect } from 'node:util';
 import { type INestApplication, Module } from '@nestjs/common';
 import { CORRELATION_ID_HEADER, STUDY_START_REQUIRED } from '@bible-artisan/contracts';
 import request, { type Response, type Test } from 'supertest';
+import { Op } from 'sequelize';
 import { afterAll, beforeAll, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
@@ -12,11 +13,18 @@ import { BibleBook } from '../src/database/models/bible-book.model';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
 import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { Study } from '../src/database/models/study.model';
+import { OperationalRequestMetric } from '../src/database/models/operational-request-metric.model';
 import { User } from '../src/database/models/user.model';
 import { DevOtpProvider } from '../src/modules/identity/otp/dev-otp.provider';
 import { OTP_PROVIDER, type OtpProvider } from '../src/modules/identity/otp/otp-provider';
 import { SessionService } from '../src/modules/identity/session.service';
+import type {
+  AiOperationalStats,
+  AiOperationsService,
+} from '../src/modules/ai/ai-operations.service';
 import { createAppLogger } from '../src/modules/observability/logger';
+import { OperationalAlertsService } from '../src/modules/observability/operational-alerts.service';
+import { RequestMetricsFlusher } from '../src/modules/observability/request-metrics-flusher.service';
 import { createTestApp } from './app';
 import { envelope, NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
 import { MutationProbeModule } from './support/mutation-probe';
@@ -1890,6 +1898,55 @@ describe('content-redacted operational logs', () => {
     await vi.waitFor(async () => expect((await Study.findByPk(studyId))?.revision).toBe(3), {
       timeout: 3000,
     });
+    expect(leaks()).toStrictEqual([]);
+  });
+
+  it('keeps the operational metrics and alert lines free of what the requests above carried (BIB-50)', async () => {
+    // Every request above (sentinels in paths, queries, headers, cookies and bodies) was counted
+    // into the process recorder; write it out as the API does every few seconds.
+    await app.get(RequestMetricsFlusher).flush();
+    const stored = await OperationalRequestMetric.findAll({
+      where: { bucketStart: { [Op.gte]: new Date(Date.now() - 60 * 60 * 1000) } },
+      raw: true,
+    });
+    expect(stored.map((row) => row.route)).toEqual(
+      expect.arrayContaining(['/v1/studies/:studyId/exports', 'unmatched']),
+    );
+    const storedText = JSON.stringify(stored).toLowerCase();
+    expect(sentinels.filter((value) => storedText.includes(value.toLowerCase()))).toStrictEqual([]);
+
+    // The worker's evaluator over the same window, logging through this production logger. AI
+    // figures are zeroed so every logged number stays short (digit-only secrets are tracked).
+    const quietAi: AiOperationalStats = {
+      queuedJobs: 0,
+      runningJobs: 0,
+      oldestEligibleJobSeconds: 0,
+      finishedJobs: 0,
+      succeededJobs: 0,
+      invalidOutputJobs: 0,
+      providerFailedJobs: 0,
+      windowInputTokens: 0,
+      windowOutputTokens: 0,
+      windowCostMicros: 0,
+      monthSpendMicros: 0,
+      monthSpendCapMicros: 0,
+    };
+    const evaluator = new OperationalAlertsService(app.get<Database>(DATABASE), {
+      stats: () => Promise.resolve(quietAi),
+    } as unknown as AiOperationsService);
+    const { metrics } = await evaluator.evaluate(new Date());
+    expect(metrics.requests).toBeGreaterThanOrEqual(stored.length);
+    const opsLines = entries().filter(
+      (entry) => entry.message === 'ops_metrics' || entry.message === 'ops_alert',
+    );
+    expect(opsLines.length).toBeGreaterThanOrEqual(1);
+    for (const entry of opsLines) {
+      for (const [key, value] of Object.entries(entry)) {
+        // Numbers, fixed names, and route patterns from the code only.
+        if (key === 'route') expect(String(value)).toMatch(/^(\/v1\/[\w/:.-]*|unmatched)$/);
+        else expect(typeof value === 'number' || /^[\w-]+$/.test(String(value))).toBe(true);
+      }
+    }
     expect(leaks()).toStrictEqual([]);
   });
 

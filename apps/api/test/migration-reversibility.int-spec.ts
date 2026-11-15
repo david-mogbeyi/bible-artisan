@@ -78,6 +78,8 @@ const SUGGESTIONS_REFUSED =
 const INSIGHTS_MIGRATION = '20261115160000_add_ai_insights.ts';
 const INSIGHTS_REFUSED =
   'AI insights drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-50's operational request metrics: derived counters, so its `down` needs no opt-in. */
+const OPS_METRICS_MIGRATION = '20261115170000_create_operational_request_metric.ts';
 
 const DOMAIN_TABLES = [
   'account_deletion',
@@ -284,8 +286,11 @@ describe('migration reversibility', () => {
         { bind: [userId], type: QueryTypes.SELECT },
       );
     try {
+      // BIB-50's metrics table holds no user data, so its `down` runs without the opt-in; take it
+      // down first so the newest remaining step is the first destructive one.
+      await migrator.down({ to: OPS_METRICS_MIGRATION });
       const before = await recordedMigrations(db);
-      expect(before).toStrictEqual(shippedMigrationNames());
+      expect(before).toStrictEqual(shippedMigrationNames().slice(0, -1));
       const tablesBefore = await publicTables(db, DOMAIN_TABLES);
       const columnsBefore = await columns([
         'study',
@@ -358,6 +363,38 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies the operational request metrics (BIB-50) without the opt-in; the table and its CHECKs come back', async () => {
+    const migrator = createMigrator(db);
+    const checks = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conname LIKE 'operational\\_request\\_metric%' ORDER BY conname`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(OPS_METRICS_MIGRATION);
+      const checksBefore = await checks();
+      expect(checksBefore.map((row) => row.name)).toStrictEqual([
+        'operational_request_metric_counts_check',
+        'operational_request_metric_histogram_check',
+        'operational_request_metric_label_check',
+        'operational_request_metric_minute_check',
+        'operational_request_metric_pkey',
+      ]);
+      await migrator.down();
+      expect(await publicTables(db, ['operational_request_metric'])).toStrictEqual([]);
+      await migrator.up();
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, ['operational_request_metric'])).toStrictEqual([
+        'operational_request_metric',
+      ]);
+      expect(await checks()).toStrictEqual(checksBefore);
+    } finally {
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies the AI insights (BIB-43/44/45) only with the study-data opt-in', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
@@ -366,6 +403,8 @@ describe('migration reversibility', () => {
         ['ai_suggestion.accepted_node_id'].includes(column),
       );
     try {
+      // The newer operational metrics step (BIB-50) goes down first; it needs no opt-in.
+      await migrator.down({ to: OPS_METRICS_MIGRATION });
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(INSIGHTS_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -379,7 +418,7 @@ describe('migration reversibility', () => {
       expect(await publicTables(db, ['study_summary', 'study_summary_schedule'])).toStrictEqual([]);
       expect(await acceptedNode()).toStrictEqual([]);
       await migrator.up();
-      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await recordedMigrations(db)).toStrictEqual([...before, OPS_METRICS_MIGRATION]);
       expect(await publicTables(db, ['study_summary', 'study_summary_schedule'])).toStrictEqual([
         'study_summary',
         'study_summary_schedule',
@@ -764,6 +803,7 @@ describe('migration reversibility', () => {
         DERIVED_FROM_MIGRATION,
         SUGGESTIONS_MIGRATION,
         INSIGHTS_MIGRATION,
+        OPS_METRICS_MIGRATION,
       ]);
       expect(await columns(['study_edge'])).toContain('study_edge.deleted_with_node_id');
     } finally {
@@ -809,6 +849,7 @@ describe('migration reversibility', () => {
         ...before,
         SUGGESTIONS_MIGRATION,
         INSIGHTS_MIGRATION,
+        OPS_METRICS_MIGRATION,
       ]);
       expect(await derivedSchema()).toStrictEqual(schemaBefore);
     } finally {

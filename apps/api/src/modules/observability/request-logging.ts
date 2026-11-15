@@ -2,6 +2,7 @@ import { METHODS } from 'node:http';
 import { Logger } from '@nestjs/common';
 import { CORRELATION_ID_HEADER } from '@bible-artisan/contracts';
 import { correlationIdOf } from './correlation';
+import { requestMetrics } from './request-metrics';
 
 /** The slice of an Express request the access log reads. Deliberately no `url`/`query`/`body`. */
 export interface LoggedRequest {
@@ -85,7 +86,8 @@ const logger = new Logger('HttpRequest');
  * Express middleware registered FIRST in `configureApp`, ahead of the CSRF/JSON middlewares, the
  * body parsers, guards and handlers, so every /v1 request (including ones those layers refuse)
  * gets its correlation ID before anything can fail, returns it as `X-Correlation-Id`, and emits
- * exactly one access line when the response finishes (or the connection closes first).
+ * exactly one access line when the response finishes (or the connection closes first). The same
+ * fields are counted into `requestMetrics` for the operational alerts (BIB-50).
  */
 export function requestLogging(
   req: LoggedRequest,
@@ -107,6 +109,14 @@ export function requestLogging(
       !res.writableFinished,
     );
     logger.log('http_request', fields);
+    // BIB-50: the same allowlisted fields feed the operational metrics (never the raw URL).
+    requestMetrics.record({
+      method: fields.method,
+      route: fields.route,
+      status: fields.status,
+      durationMs: fields.durationMs,
+      aborted: fields.aborted === true,
+    });
   };
   // `finish` fires once the response is handed to the OS (before the client has read it all), so
   // the line is written by the time a client sees the response. `close` covers aborted requests.

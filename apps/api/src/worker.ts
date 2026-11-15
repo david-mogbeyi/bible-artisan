@@ -7,6 +7,7 @@ import { AccountPurgeService } from './modules/identity/account-purge.service';
 import { schedulePrivacyPurge } from './modules/identity/privacy-purge-schedule';
 import { runEntrypoint } from './modules/observability/entrypoint';
 import { createAppLogger } from './modules/observability/logger';
+import { OperationalAlertsService } from './modules/observability/operational-alerts.service';
 import { StudyTrashPurgeService } from './modules/study/trash/study-trash-purge.service';
 import { scheduleTrashPurge } from './modules/study/trash/trash-purge-schedule';
 import { WorkerModule } from './worker.module';
@@ -29,10 +30,13 @@ async function bootstrap(): Promise<void> {
     accounts: app.get(AccountPurgeService),
     exports: app.get(ExportPurgeService),
   });
+  // BIB-50: evaluates the section 30 alert rules every minute and logs `ops_metrics` / `ops_alert`.
+  const stopAlerts = app.get(OperationalAlertsService).start();
   const stop = (): void => {
     stopPurge();
     stopAiJobs();
     stopPrivacyPurge();
+    stopAlerts();
   };
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);

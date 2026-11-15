@@ -11,6 +11,7 @@ import { ThreadModule } from '../thread/thread.module';
 import { AiAccessService } from './ai-access.service';
 import { AiJobRunnerService } from './ai-job-runner.service';
 import { AiJobsService } from './ai-jobs.service';
+import { AiOperationsService } from './ai-operations.service';
 import { AiSettingsService } from './ai-settings.service';
 import { AiSuggestionsService } from './ai-suggestions.service';
 import { AiSummaryService } from './ai-summary.service';
@@ -76,12 +77,13 @@ export function providerFromEnv(env: Env): AiProvider | null {
     },
     AiAccessService,
     AiJobsService,
+    AiOperationsService,
     AiSettingsService,
     AiJobRunnerService,
     AiSuggestionsService,
     AiSummaryService,
     ContextCandidatesService,
   ],
-  exports: [AiJobRunnerService],
+  exports: [AiJobRunnerService, AiOperationsService],
 })
 export class AiModule {}
