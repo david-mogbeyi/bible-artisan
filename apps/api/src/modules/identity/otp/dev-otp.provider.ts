@@ -3,6 +3,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { OTP_TTL_MINUTES, type OtpProvider, type OtpVerifyResult } from './otp-provider';
 
+/** The sign-in code every email gets with the dev provider in local development. */
+export const DEV_FIXED_OTP_CODE = '000000';
+
 interface ActiveCode {
   email: string;
   code: string;
@@ -16,9 +19,13 @@ interface ActiveCode {
  * relies on: one active code per email, ten-minute expiry, single use. Codes live in memory only.
  * They are never logged; when `outboxFile` is set the latest code is written to that local file
  * (mode 0600) so a developer can sign in without email delivery.
+ *
+ * With NODE_ENV=development every code is DEV_FIXED_OTP_CODE (000000), so local sign-in needs no
+ * outbox lookup. Tests keep random codes so wrong-code and superseded-code paths stay meaningful.
  */
 export class DevOtpProvider implements OtpProvider {
   private readonly active = new Map<string, ActiveCode>();
+  private readonly fixedCode: string | undefined;
 
   constructor(
     nodeEnv: string,
@@ -27,11 +34,12 @@ export class DevOtpProvider implements OtpProvider {
     if (nodeEnv === 'production') {
       throw new Error('DevOtpProvider cannot run in production');
     }
+    this.fixedCode = nodeEnv === 'development' ? DEV_FIXED_OTP_CODE : undefined;
   }
 
   async send(email: string): Promise<{ providerRef: string }> {
     const providerRef = `dev-email-${digest(email)}`;
-    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    const code = this.fixedCode ?? String(randomInt(0, 1_000_000)).padStart(6, '0');
     const expiresAt = Date.now() + OTP_TTL_MINUTES * 60_000;
     this.active.set(providerRef, { email, code, expiresAt, used: false });
     if (this.outboxFile) {
