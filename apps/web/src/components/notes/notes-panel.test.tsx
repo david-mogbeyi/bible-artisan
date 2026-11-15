@@ -257,7 +257,16 @@ describe('NotesPanel (BIB-23)', () => {
     expect([patches[1]?.body, patches[1]?.key]).toStrictEqual([patches[0]?.body, patches[0]?.key]);
   });
 
-  it('keeps the draft on a conflict, and Keep mine saves it as a new version on the current revision', async () => {
+  const CONFLICT_409 = () =>
+    jsonResponse(409, {
+      code: 'REVISION_CONFLICT',
+      message: 'Revision conflict',
+      retryable: false,
+      correlationId: 'x',
+      currentRevision: 7,
+    });
+
+  it('keeps the draft on a conflict, shows both texts, and Save my version saves it as a new version on the current revision (BIB-37)', async () => {
     reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
     reply(
       `GET ${NOTE}`,
@@ -266,13 +275,7 @@ describe('NotesPanel (BIB-23)', () => {
     );
     reply(
       `PATCH ${NOTE}`,
-      jsonResponse(409, {
-        code: 'REVISION_CONFLICT',
-        message: 'Revision conflict',
-        retryable: false,
-        correlationId: 'x',
-        currentRevision: 7,
-      }),
+      CONFLICT_409(),
       jsonResponse(200, mutation({ revision: 8, latestVersionNumber: 2 })),
     );
     renderPanel();
@@ -283,15 +286,109 @@ describe('NotesPanel (BIB-23)', () => {
       timeout: 2000,
     });
     expect(editor.getText()).toBe('Mine');
-    fireEvent.click(screen.getByRole('button', { name: 'Keep mine' }));
+    const panel = screen.getByRole('region', { name: 'Resolve conflict' });
+    await waitFor(() => expect(within(panel).getByText('Theirs')).toBeTruthy());
+    expect(within(panel).getByText('Mine')).toBeTruthy();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Save my version' }));
     await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
     const patches = requests.filter((r) => r.method === 'PATCH');
     expect(patches[1]?.body).toStrictEqual({
       expectedRevision: 7,
       content: doc('Mine'),
       checkpoint: true,
+      resolution: 'keep_mine',
     });
     expect(patches[1]?.key).not.toBe(patches[0]?.key);
+    expect(screen.queryByRole('region', { name: 'Resolve conflict' })).toBeNull();
+  });
+
+  it('on a conflict, Keep server version shows the server text and sends nothing more', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(
+      `GET ${NOTE}`,
+      jsonResponse(200, note()),
+      jsonResponse(200, note({ revision: 7, content: doc('Theirs') })),
+    );
+    reply(`PATCH ${NOTE}`, CONFLICT_409());
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    typeText(editor, 'Mine');
+    const panel = await screen.findByRole(
+      'region',
+      { name: 'Resolve conflict' },
+      { timeout: 2000 },
+    );
+    await waitFor(() => expect(within(panel).getByText('Theirs')).toBeTruthy());
+    fireEvent.click(within(panel).getByRole('button', { name: 'Keep server version' }));
+    await waitFor(() => expect(editor.getText()).toBe('Theirs'));
+    expect(textOf(saveStatus())).toContain(SAVE_COPY.saved);
+    expect(requests.filter((r) => r.method === 'PATCH')).toHaveLength(1);
+  });
+
+  it('on a conflict, Combine manually lets the user edit and saves the combination as resolution combined', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(
+      `GET ${NOTE}`,
+      jsonResponse(200, note()),
+      jsonResponse(200, note({ revision: 7, content: doc('Theirs') })),
+    );
+    reply(
+      `PATCH ${NOTE}`,
+      CONFLICT_409(),
+      jsonResponse(200, mutation({ revision: 8, latestVersionNumber: 2 })),
+    );
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    typeText(editor, 'Mine');
+    const panel = await screen.findByRole(
+      'region',
+      { name: 'Resolve conflict' },
+      { timeout: 2000 },
+    );
+    await waitFor(() => expect(within(panel).getByText('Theirs')).toBeTruthy());
+    fireEvent.click(within(panel).getByRole('button', { name: 'Combine manually' }));
+    typeText(editor, 'Mine and Theirs');
+    fireEvent.click(within(panel).getByRole('button', { name: 'Save combined version' }));
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
+    expect(requests.filter((r) => r.method === 'PATCH')[1]?.body).toStrictEqual({
+      expectedRevision: 7,
+      content: doc('Mine and Theirs'),
+      checkpoint: true,
+      resolution: 'combined',
+    });
+  });
+
+  it('keeps the draft when the session expires, and resends the identical request after sign-in (BIB-37)', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    reply(
+      `PATCH ${NOTE}`,
+      jsonResponse(401, {
+        code: 'UNAUTHENTICATED',
+        message: 'Sign in',
+        retryable: false,
+        correlationId: 'x',
+      }),
+      jsonResponse(200, mutation()),
+    );
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    typeText(editor, 'Mine');
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.signedOut), {
+      timeout: 2000,
+    });
+    expect(editor.getText()).toBe('Mine');
+    expect(screen.getByRole('link', { name: 'Sign in again (opens a new tab)' })).toBeTruthy();
+    // Back in this tab after signing in elsewhere.
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
+    const patches = requests.filter((r) => r.method === 'PATCH');
+    expect([patches[1]?.body, patches[1]?.key]).toStrictEqual([patches[0]?.body, patches[0]?.key]);
   });
 
   it('shows the limit, sends nothing and keeps the draft over 50,000 characters', async () => {

@@ -66,6 +66,8 @@ export const NOTE_EVENTS = {
   autosaved: 'note_autosaved',
   trashed: 'note_trashed',
   restored: 'note_restored',
+  /** BIB-37: a save that resolved a revision conflict by the user's explicit choice. */
+  conflictResolved: 'note_conflict_resolved',
 } as const;
 
 /**
@@ -301,8 +303,11 @@ export class NotesService {
           rejectOnEmpty: true,
         });
         const resulting = contentChanged && next ? next.content : current.richTextJson;
+        // A conflict resolution always asks for a version: the user's choice is a checkpoint.
         const versionDue =
-          body.checkpoint === true || (contentChanged && latest.get('intervalElapsed') === true);
+          body.checkpoint === true ||
+          body.resolution !== undefined ||
+          (contentChanged && latest.get('intervalElapsed') === true);
         const writeVersion = versionDue && !sameDocument(resulting, latest.richTextJson);
         if (!contentChanged && !writeVersion) throw new NoteRuleError(NOTE_UNCHANGED);
 
@@ -344,10 +349,14 @@ export class NotesService {
           });
           m.bumpContentRevision();
         }
-        const event = await m.appendEvent({
-          eventType: NOTE_EVENTS.autosaved,
-          payload: { noteId: updated.id, versionId },
-        });
+        const event = await m.appendEvent(
+          body.resolution === undefined
+            ? { eventType: NOTE_EVENTS.autosaved, payload: { noteId: updated.id, versionId } }
+            : {
+                eventType: NOTE_EVENTS.conflictResolved,
+                payload: { noteId: updated.id, versionId, resolution: body.resolution },
+              },
+        );
         return { status: 200, body: mutationBody(updated, event.sequence) };
       },
     });

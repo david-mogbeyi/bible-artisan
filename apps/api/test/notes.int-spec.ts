@@ -1343,6 +1343,68 @@ describe('notes (BIB-23)', () => {
       expect([crossed.status, crossed.body]).toStrictEqual([404, NOT_FOUND]);
     });
 
+    it('resolves a conflict by explicit choice (BIB-37): a stale save is 409, then Save my version from the current revision stores a new version and one note_conflict_resolved event', async () => {
+      const study = await createStudy(alice);
+      const note = await createNote(alice, study.studyId, doc('original'));
+      // Another tab saves first; this tab's save from revision 1 is refused, nothing overwritten.
+      expect(
+        (await save(alice, study.studyId, note.id, { expectedRevision: 1, content: doc('server') }))
+          .status,
+      ).toBe(200);
+      const stale = await save(alice, study.studyId, note.id, {
+        expectedRevision: 1,
+        content: doc('mine'),
+      });
+      expect([stale.status, stale.body]).toStrictEqual([409, conflict(2)]);
+      expect((await Note.findByPk(note.id, { rejectOnEmpty: true })).plainText).toBe('server');
+
+      // A resolution needs content; malformed values are 400; both write nothing.
+      const before = await ownerRows(alice);
+      for (const body of [
+        { expectedRevision: 2, checkpoint: true, resolution: 'keep_mine' },
+        { expectedRevision: 2, content: doc('mine'), resolution: 'overwrite' },
+      ]) {
+        const res = await save(alice, study.studyId, note.id, body);
+        expect([res.status, res.body]).toStrictEqual([400, INVALID]);
+      }
+      expect(await ownerRows(alice)).toStrictEqual(before);
+
+      const resolved = await save(
+        alice,
+        study.studyId,
+        note.id,
+        { expectedRevision: 2, content: doc('mine'), resolution: 'keep_mine' },
+        randomUUID(),
+      );
+      expect([resolved.status, resolved.body]).toStrictEqual([
+        200,
+        {
+          id: note.id,
+          studyId: study.studyId,
+          revision: 3,
+          targetNodeId: null,
+          targetReferenceId: null,
+          characterCount: 4,
+          latestVersionNumber: 2,
+          createdAt: note.createdAt,
+          updatedAt: anyTime,
+          deletedAt: null,
+          lastEventSequence: expect.any(String) as string,
+        },
+      ]);
+      const version = await NoteVersion.findOne({
+        where: { noteId: note.id, versionNumber: 2 },
+        rejectOnEmpty: true,
+      });
+      expect(version.plainText).toBe('mine');
+      expect((await events(study.studyId)).slice(-1)).toStrictEqual([
+        {
+          eventType: 'note_conflict_resolved',
+          payload: { noteId: note.id, versionId: version.id, resolution: 'keep_mine' },
+        },
+      ]);
+    });
+
     it('serializes two saves racing from one revision: exactly one commits, the other is 409 with the current revision', async () => {
       const study = await createStudy(alice);
       const note = await createNote(alice, study.studyId);
