@@ -53,6 +53,7 @@ import {
 } from '@/lib/notes';
 import { useNoteTabs } from '@/lib/note-tabs';
 import { invalidateLibrary } from '@/lib/studies';
+import { MAKE_NODE_COPY, MakeNodeForm } from './make-node-form';
 import { NOTE_LINK_REL, NOTE_LINK_TARGET } from './note-content';
 import { characterCount, NoteAutosave, type SaveState } from './note-autosave';
 import { cleanNoteText, type NoteContentProblem, toNoteDraft } from './note-document';
@@ -319,6 +320,7 @@ export interface NoteEditorHandle {
  */
 export function NoteEditor({
   studyId,
+  studyRevision,
   note,
   editionId = null,
   autoFocus = false,
@@ -328,6 +330,8 @@ export function NoteEditor({
   onReloadStudy,
 }: {
   studyId: string;
+  /** The study's revision, for "Make node…" (BIB-57): creating a node is a study change. */
+  studyRevision: number;
   note: NoteResponse;
   /**
    * The translation typed references resolve in (BIB-24): the study's starting passage edition;
@@ -357,6 +361,10 @@ export function NoteEditor({
   const [trashing, setTrashing] = useState(false);
   const trashAttempt = useRef<{ key: string; revision: number } | null>(null);
   const [reloadProblem, setReloadProblem] = useState(false);
+  // "Make node…" (BIB-57): the selected text it opened with, and the outcome it announced.
+  const [makeNode, setMakeNode] = useState<{ text: string } | null>(null);
+  const [makeNodeMessage, setMakeNodeMessage] = useState<string | null>(null);
+  const makeNodeButton = useRef<HTMLButtonElement>(null);
   // "Resolve reference" (BIB-24): the selection it was asked for, and what came back.
   const [resolving, setResolving] = useState(false);
   const [resolveMessage, setResolveMessage] = useState<string | null>(null);
@@ -474,6 +482,7 @@ export function NoteEditor({
       link: current?.isActive('link') ?? false,
       canUndo: current?.can().undo() ?? false,
       canRedo: current?.can().redo() ?? false,
+      hasSelection: current ? !current.state.selection.empty : false,
       count: current ? editorCharacters(current) : null,
     }),
   });
@@ -682,6 +691,28 @@ export function NoteEditor({
     }
   }
 
+  /**
+   * Opens "Make node…" with the selected text (trimmed; blocks joined by a line break). Only a
+   * note the server already holds is converted: while anything is unsaved it asks to wait.
+   */
+  function openMakeNode() {
+    if (!editor || !writable) return;
+    setMakeNodeMessage(null);
+    if (unsaved) return setMakeNodeMessage(MAKE_NODE_COPY.unsaved);
+    const { from, to } = trimmedRange(editor.state.doc, editor.state.selection);
+    const leafText = (leaf: ProseMirrorNode) =>
+      leaf.type.name === 'scriptureReference' ? String(leaf.attrs.label ?? '') : '\n';
+    const text = editor.state.doc.textBetween(from, to, '\n', leafText);
+    if (text.trim() === '') return setMakeNodeMessage(MAKE_NODE_COPY.noSelection);
+    setMakeNode({ text });
+  }
+
+  function closeMakeNode(message: string | null) {
+    setMakeNode(null);
+    setMakeNodeMessage(message);
+    makeNodeButton.current?.focus();
+  }
+
   function removeLink() {
     editor?.chain().focus().extendMarkRange('link').unsetLink().run();
     setLinkOpen(false);
@@ -785,6 +816,16 @@ export function NoteEditor({
           Resolve reference
         </button>
         <button
+          ref={makeNodeButton}
+          type="button"
+          aria-disabled={!writable || unsaved || !active?.hasSelection ? true : undefined}
+          aria-expanded={makeNode !== null}
+          onClick={openMakeNode}
+          className="rounded border border-muted px-2 py-1 text-sm aria-disabled:opacity-60"
+        >
+          {MAKE_NODE_COPY.button}
+        </button>
+        <button
           type="button"
           aria-disabled={!active?.canUndo}
           aria-keyshortcuts="Control+Z"
@@ -803,6 +844,17 @@ export function NoteEditor({
           Redo
         </button>
       </div>
+      {makeNode ? (
+        <MakeNodeForm
+          studyId={studyId}
+          studyRevision={studyRevision}
+          noteId={note.id}
+          initialText={makeNode.text}
+          onCreated={(message) => closeMakeNode(message)}
+          onCancel={() => closeMakeNode(null)}
+          onReload={onReloadStudy}
+        />
+      ) : null}
       {linkOpen ? (
         <form id={ids.link} onSubmit={applyLink} className="flex flex-wrap items-end gap-2">
           <label className="flex flex-col text-sm">
@@ -961,6 +1013,10 @@ export function NoteEditor({
       {/* Polite: the outcome of Resolve reference (references only, never the typed text). */}
       <p role="status" aria-live="polite" className={resolveMessage ? 'text-sm' : 'sr-only'}>
         {resolving ? 'Checking the reference…' : (resolveMessage ?? '')}
+      </p>
+      {/* Polite: the outcome of Make node (fixed copy, never the excerpt). */}
+      <p role="status" aria-live="polite" className={makeNodeMessage ? 'text-sm' : 'sr-only'}>
+        {makeNodeMessage ?? ''}
       </p>
       {candidates ? (
         <div role="group" aria-label="Choose the book" className="flex flex-col gap-2">

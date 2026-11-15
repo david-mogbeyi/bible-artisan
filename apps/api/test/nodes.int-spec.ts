@@ -428,11 +428,17 @@ describe('typed graph nodes (BIB-25)', () => {
             text: 'Paul appeals to his\nconscience as a witness.',
             observationKind: 'textual_observation',
             establishedAt: null,
+            derivedFromNote: null,
           },
         ],
         [
           200,
-          { type: 'thought', ...common(3, 'user'), text: 'Maybe conscience is a second witness.' },
+          {
+            type: 'thought',
+            ...common(3, 'user'),
+            text: 'Maybe conscience is a second witness.',
+            derivedFromNote: null,
+          },
         ],
         [
           200,

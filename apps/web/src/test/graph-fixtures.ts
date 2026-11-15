@@ -106,6 +106,7 @@ function nodeDetail(node: NodeSummary | undefined) {
         text: node.label,
         observationKind: 'textual_observation',
         establishedAt: null,
+        derivedFromNote: null,
       };
     case 'scripture':
       return { ...common, type: 'scripture', reference: null };

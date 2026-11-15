@@ -362,6 +362,7 @@ export function NotesPanel({
             <NoteEditor
               key={open.data.id}
               studyId={study.id}
+              studyRevision={study.revision}
               note={open.data}
               editionId={study.startingReference?.editionId ?? null}
               autoFocus={freshId === open.data.id}

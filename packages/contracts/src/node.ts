@@ -339,11 +339,14 @@ export const createNodeRequestSchema = z.discriminatedUnion('type', [
     expectedRevision: expectedRevisionSchema,
     text: nodeTextSchema,
     observationKind: z.enum(OBSERVATION_KINDS),
+    /** BIB-57: the note this text was taken from. Provenance only; the note is not changed. */
+    derivedFromNoteId: z.uuid().optional(),
   }),
   z.strictObject({
     type: z.literal('thought'),
     expectedRevision: expectedRevisionSchema,
     text: nodeTextSchema,
+    derivedFromNoteId: z.uuid().optional(),
   }),
   z.strictObject({
     type: z.literal('conclusion'),
@@ -565,6 +568,8 @@ export const deletedNodeListResponseSchema = z.object({
 
 export type DeletedNodeListResponse = z.infer<typeof deletedNodeListResponseSchema>;
 
+const derivedFromNoteSchema = z.object({ id: z.uuid(), trashed: z.boolean() }).nullable();
+
 const nodeCommon = {
   id: z.uuid(),
   studyId: z.uuid(),
@@ -600,8 +605,14 @@ export const nodeResponseSchema = z.discriminatedUnion('type', [
     observationKind: z.enum(OBSERVATION_KINDS),
     /** When the owner marked it "Established by me" (BIB-62), else null. */
     establishedAt: z.iso.datetime().nullable(),
+    derivedFromNote: derivedFromNoteSchema,
   }),
-  z.object({ type: z.literal('thought'), ...nodeCommon, text: z.string() }),
+  z.object({
+    type: z.literal('thought'),
+    ...nodeCommon,
+    text: z.string(),
+    derivedFromNote: derivedFromNoteSchema,
+  }),
   z.object({
     type: z.literal('conclusion'),
     ...nodeCommon,
@@ -616,6 +627,12 @@ export const nodeResponseSchema = z.discriminatedUnion('type', [
 ]);
 
 export type NodeResponse = z.infer<typeof nodeResponseSchema>;
+
+/**
+ * Where an Observation or Thought was converted from (BIB-57): the note's id and whether it is in
+ * the note trash now. Never the note's text or title.
+ */
+export type DerivedFromNote = z.infer<typeof derivedFromNoteSchema>;
 
 /** Whether a live edge counts for or against a conclusion at a version. */
 export const EVIDENCE_ROLES = ['supporting', 'challenging'] as const;

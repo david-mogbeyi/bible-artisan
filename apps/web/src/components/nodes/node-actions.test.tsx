@@ -71,6 +71,7 @@ const OBSERVATION = {
   text: 'Paul appeals',
   observationKind: 'textual_observation',
   establishedAt: null,
+  derivedFromNote: null,
 };
 const CONCLUSION = {
   type: 'conclusion',

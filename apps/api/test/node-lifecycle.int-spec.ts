@@ -483,6 +483,7 @@ describe('node lifecycle: establish observations, duplicate, delete and restore'
         text: 'Paul appeals to conscience',
         observationKind: 'textual_observation',
         establishedAt: null,
+        derivedFromNote: null,
       });
       expect(await dup(question)).toMatchObject({ text: 'Why?', status: 'open' });
       expect(await dup(th)).toMatchObject({ text: 'Maybe so', origin: 'user' });

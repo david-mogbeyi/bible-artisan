@@ -574,6 +574,38 @@ export class NotesService {
     }
   }
 
+  /**
+   * BIB-57: the note an Observation or Thought is being converted from, read inside the Graph
+   * mutation (study lock held). Absent, another study's or another owner's is 404; a note in the
+   * note trash is 422 `NOTE_TRASHED`. Its target's state does not matter. The note is not changed.
+   */
+  async requireConvertibleNote(m: StudyMutation, noteId: string): Promise<void> {
+    if (!isResourceId(noteId)) throw new NotFoundError();
+    const note = await Note.findOne({
+      where: { id: noteId, studyId: m.studyId, ownerId: m.ownerId },
+      attributes: ['id', 'deletedAt'],
+    });
+    if (!note) throw new NotFoundError();
+    if (note.deletedAt !== null) throw new NoteRuleError(NOTE_TRASHED);
+  }
+
+  /**
+   * BIB-57: whether each of these notes of one (already resolved) study is in the note trash, for a
+   * node's "Derived from a note". Ids only, never text.
+   */
+  async noteTrashState(
+    ownerId: string,
+    studyId: string,
+    noteIds: readonly string[],
+  ): Promise<Map<string, boolean>> {
+    if (noteIds.length === 0) return new Map();
+    const notes = await Note.findAll({
+      where: { id: [...new Set(noteIds)], studyId, ownerId },
+      attributes: ['id', 'deletedAt'],
+    });
+    return new Map(notes.map((note) => [note.id, note.deletedAt !== null]));
+  }
+
   /** A note of this (already resolved) study and owner, live or trashed; otherwise 404. */
   private async ownedNote(ownerId: string, studyId: string, noteId: string): Promise<Note> {
     if (!isResourceId(noteId)) throw new NotFoundError();

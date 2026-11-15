@@ -427,6 +427,7 @@ describe('NotesPanel (BIB-23)', () => {
       'Quote',
       'Link',
       'Resolve reference',
+      'Make node…',
       'Undo',
       'Redo',
     ]);
@@ -1049,5 +1050,135 @@ describe('Bible references and passages in notes (BIB-24)', () => {
         .getByRole('link', { name: 'Reselect Romans 9:1' })
         .getAttribute('href'),
     }).toStrictEqual({ quote: '“I tell”', reselect: `/bible?ref=${ROMANS.id}&study=${STUDY_ID}` });
+  });
+});
+
+describe('Make node from a note excerpt (BIB-57)', () => {
+  const NODES = `/studies/${STUDY_ID}/nodes`;
+  const created = {
+    id: '99999999-2222-4333-8444-555555555555',
+    studyId: STUDY_ID,
+    type: 'observation',
+    origin: 'user',
+    revision: 1,
+    referenceId: null,
+    createdAt: T,
+    updatedAt: T,
+    lastEventSequence: '10',
+    versionId: null,
+    previousVersionId: null,
+    warnings: [],
+    studyRevision: 5,
+    outcome: 'created',
+    canonicalNodeId: null,
+  };
+
+  async function openNote(text: string) {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note({ content: doc(text) })));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    return noteEditor();
+  }
+  function select(editor: Editor, text: string) {
+    const start = editor.state.doc.textContent.indexOf(text);
+    act(() => {
+      editor.commands.setTextSelection({ from: start + 1, to: start + 1 + text.length });
+    });
+  }
+  const makeNodeButton = () => screen.getByRole('button', { name: 'Make node…' });
+  const makeNodeStatus = () =>
+    within(screen.getByRole('region', { name: 'Note editor' })).getAllByRole('status')[2];
+
+  it('is disabled with nothing selected and says to select text first', async () => {
+    await openNote('The law written on their hearts');
+    expect(makeNodeButton().getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(makeNodeButton());
+    expect(textOf(makeNodeStatus())).toBe('Select some text in the note first.');
+    expect(screen.queryByLabelText('Node text')).toBeNull();
+  });
+
+  it('creates an Observation from the selection with the note as provenance, announces it and leaves the note alone', async () => {
+    reply(`POST ${NODES}`, jsonResponse(201, created));
+    const editor = await openNote('Paul says the law is written on their hearts');
+    select(editor, ' written on their hearts');
+    await waitFor(() => expect(makeNodeButton().getAttribute('aria-disabled')).toBeNull());
+    fireEvent.click(makeNodeButton());
+
+    expect(document.activeElement).toBe(screen.getByRole('radio', { name: 'Observation' }));
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Node text').value).toBe(
+      'written on their hearts',
+    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Interpretation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Create node' }));
+
+    await waitFor(() =>
+      expect(textOf(makeNodeStatus())).toBe('Created an Observation from this note.'),
+    );
+    expect(screen.queryByLabelText('Node text')).toBeNull();
+    expect(document.activeElement).toBe(makeNodeButton());
+    expect(
+      requests.filter((r) => r.method !== 'GET').map((r) => [r.method, r.path, r.body]),
+    ).toStrictEqual([
+      [
+        'POST',
+        NODES,
+        {
+          type: 'observation',
+          expectedRevision: STUDY.revision,
+          text: 'written on their hearts',
+          observationKind: 'interpretation',
+          derivedFromNoteId: NOTE_ID,
+        },
+      ],
+    ]);
+  });
+
+  it('keeps the edited text on a 409, and Retry after an unknown outcome reuses the same key', async () => {
+    reply(
+      `POST ${NODES}`,
+      new TypeError('network down'),
+      jsonResponse(409, {
+        code: 'REVISION_CONFLICT',
+        message: 'Revision conflict',
+        retryable: false,
+        correlationId: 'c',
+        currentRevision: 7,
+      }),
+    );
+    const editor = await openNote('A thought worth keeping');
+    select(editor, 'thought worth');
+    fireEvent.click(makeNodeButton());
+    fireEvent.click(screen.getByRole('radio', { name: 'Thought' }));
+    fireEvent.change(screen.getByLabelText('Node text'), { target: { value: 'Edited thought' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create node' }));
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('alert'))).toContain("Couldn't confirm the node was created"),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() =>
+      expect(textOf(screen.getByRole('alert'))).toContain(
+        'This study changed somewhere else, so the node was not created.',
+      ),
+    );
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Node text').value).toBe('Edited thought');
+    const posts = requests.filter((r) => r.method === 'POST');
+    expect(posts).toHaveLength(2);
+    expect(posts[1]?.key).toBe(posts[0]?.key);
+    expect(posts[1]?.body).toStrictEqual({
+      type: 'thought',
+      expectedRevision: STUDY.revision,
+      text: 'Edited thought',
+      derivedFromNoteId: NOTE_ID,
+    });
+  });
+
+  it('Escape closes the form and returns focus to Make node', async () => {
+    const editor = await openNote('Some text');
+    select(editor, 'Some');
+    fireEvent.click(makeNodeButton());
+    fireEvent.keyDown(screen.getByLabelText('Node text'), { key: 'Escape' });
+    expect(screen.queryByLabelText('Node text')).toBeNull();
+    expect(document.activeElement).toBe(makeNodeButton());
   });
 });
