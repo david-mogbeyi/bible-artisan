@@ -16,3 +16,4 @@ export * from './node';
 export * from './edge';
 export * from './branch';
 export * from './graph';
+export * from './thread';

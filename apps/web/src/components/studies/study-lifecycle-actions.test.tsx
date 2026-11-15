@@ -95,6 +95,10 @@ beforeEach(() => {
       if (path.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
       // The page's notes panel (BIB-23): no notes in these tests.
       if (path.includes('/notes')) return Promise.resolve(jsonResponse(200, { items: [] }));
+      // The page's thread (BIB-32): nothing recorded in these tests.
+      if (path.includes('/events')) {
+        return Promise.resolve(jsonResponse(200, { items: [], nextCursor: null }));
+      }
       // The page's Nodes section (BIB-25): no nodes in these tests.
       // The page's Graph section (BIB-28): an empty graph in these tests.
       if (path.endsWith('/graph')) return Promise.resolve(jsonResponse(200, EMPTY_GRAPH));

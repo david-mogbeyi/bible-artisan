@@ -49,6 +49,8 @@ describe('mutationRequestInfo', () => {
       route: '/v1/studies/:studyId',
       params: { studyId: STUDY, slug: 'Ab' },
       body: { a: 1 },
+      // BIB-55: the request's correlation id (a fresh UUID when the client sent none).
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
     });
   });
 

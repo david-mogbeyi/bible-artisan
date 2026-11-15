@@ -6,9 +6,9 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
  * Nullability and defaults mirror the migration.
  *
  * Rows are written only by `ThreadService.appendEvent` (via `StudyMutation.appendEvent`, BIB-12),
- * in the mutation's transaction, with `sequence` allocated from `study.last_event_sequence`. The activity-dedupe
- * columns (`client_mutation_id`, `correlation_id`) and the rest of the event taxonomy belong to
- * BIB-55.
+ * in the mutation's transaction, with `sequence` allocated from `study.last_event_sequence`. The
+ * thread columns (visibility, actor, navigation refs, `client_mutation_id`, `correlation_id`,
+ * `recorded_at`) are BIB-55's; node, version and branch ids are soft references (no FK).
  */
 @Table({ tableName: 'study_event', timestamps: false })
 export class StudyEvent extends Model {
@@ -45,4 +45,45 @@ export class StudyEvent extends Model {
     defaultValue: DataType.NOW,
   })
   declare occurredAt: Date;
+
+  @Column({ type: DataType.TEXT, allowNull: false, defaultValue: 'visible' })
+  declare visibility: 'visible' | 'internal';
+
+  @Column({ field: 'actor_kind', type: DataType.TEXT, allowNull: false, defaultValue: 'user' })
+  declare actorKind: 'user' | 'ai' | 'system';
+
+  @Column({ field: 'session_id', type: DataType.UUID, allowNull: true })
+  declare sessionId: string | null;
+
+  @Column({ field: 'node_id', type: DataType.UUID, allowNull: true })
+  declare nodeId: string | null;
+
+  @Column({ field: 'from_node_id', type: DataType.UUID, allowNull: true })
+  declare fromNodeId: string | null;
+
+  @Column({ field: 'version_id', type: DataType.UUID, allowNull: true })
+  declare versionId: string | null;
+
+  @Column({ field: 'branch_id', type: DataType.UUID, allowNull: true })
+  declare branchId: string | null;
+
+  @Column({ field: 'parent_visit_event_id', type: DataType.UUID, allowNull: true })
+  declare parentVisitEventId: string | null;
+
+  @Column({ field: 'schema_version', type: DataType.SMALLINT, allowNull: false, defaultValue: 1 })
+  declare schemaVersion: number;
+
+  @Column({ field: 'client_mutation_id', type: DataType.UUID, allowNull: true })
+  declare clientMutationId: string | null;
+
+  @Column({ field: 'correlation_id', type: DataType.UUID, allowNull: true })
+  declare correlationId: string | null;
+
+  @Column({
+    field: 'recorded_at',
+    type: DataType.DATE,
+    allowNull: false,
+    defaultValue: DataType.NOW,
+  })
+  declare recordedAt: Date;
 }

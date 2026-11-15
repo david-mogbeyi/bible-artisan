@@ -42,6 +42,10 @@ const MEMBERSHIP_REFUSED =
 const VERSIONS_MIGRATION = '20261008162848_add_conclusion_versions.ts';
 const VERSIONS_REFUSED =
   'conclusion versions drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-55's study thread columns migration. */
+const THREAD_MIGRATION = '20261115001324_add_study_event_thread_columns.ts';
+const THREAD_REFUSED =
+  'study event thread columns drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'annotation',
@@ -251,13 +255,19 @@ describe('migration reversibility', () => {
       ]);
       const dataBefore = await studyData();
       expect(dataBefore).toHaveLength(2);
+      // An event too, as every real study has one.
+      await db.query(
+        `INSERT INTO study_event (study_id, owner_id, sequence, event_type)
+         SELECT id, owner_id, 1, 'seeded' FROM study WHERE owner_id = $1`,
+        { bind: [userId] },
+      );
 
-      // No opt-in at all: the newest migration (BIB-30's conclusion versions) is the first `down`
+      // No opt-in at all: the newest migration (BIB-55's thread columns) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: VERSIONS_REFUSED,
+        message: THREAD_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -445,6 +455,8 @@ describe('migration reversibility', () => {
     try {
       const schemaBefore = await versionSchema();
       expect(schemaBefore.map((row) => row.name)).toContain('node_version_evidence_edge_fk');
+      // Later migrations (BIB-55's) step down first.
+      await withStudyDataDropAllowed(() => migrator.down({ to: THREAD_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(VERSIONS_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -957,7 +969,8 @@ describe('migration reversibility', () => {
             name !== EDGE_MIGRATION &&
             name !== LAYOUT_MIGRATION &&
             name !== MEMBERSHIP_MIGRATION &&
-            name !== VERSIONS_MIGRATION,
+            name !== VERSIONS_MIGRATION &&
+            name !== THREAD_MIGRATION,
         ),
       );
       expect(

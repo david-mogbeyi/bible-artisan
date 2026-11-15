@@ -1,6 +1,7 @@
 import { createParamDecorator, type ExecutionContext } from '@nestjs/common';
 import { IDEMPOTENCY_KEY_HEADER, idempotencyKeySchema } from '@bible-artisan/contracts';
 import { ValidationError } from '../errors/domain-errors';
+import { correlationIdOf } from '../../modules/observability/correlation';
 import { isUuid } from '../validation/uuid';
 
 /** What `MutationService` needs from the HTTP request. Built by `@MutationRequest()`. */
@@ -17,6 +18,11 @@ export interface MutationRequestInfo {
   params: Record<string, string | string[]>;
   /** The raw parsed JSON body. */
   body: unknown;
+  /**
+   * The request's correlation id (BIB-55): every event this mutation appends records it, so one
+   * action's events group into one thread card. Not part of the fingerprint.
+   */
+  correlationId?: string;
 }
 
 interface RequestLike {
@@ -56,6 +62,7 @@ export function mutationRequestInfo(request: RequestLike): MutationRequestInfo {
     route: `${request.baseUrl ?? ''}${pattern}`,
     params: normalizedParams(request.params ?? {}),
     body: request.body,
+    correlationId: correlationIdOf(request),
   };
 }
 

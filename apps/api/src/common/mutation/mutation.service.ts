@@ -64,6 +64,13 @@ export interface StudyMutationSpec {
    */
   lifecycleTransition?: StudyLifecycleTransition;
   /**
+   * Navigation and reading activity (BIB-55, `POST /studies/:id/activity`): a deliberate visit is
+   * recorded without an `expectedRevision`, so it never conflicts with (or 409s) edits in other
+   * tabs. The work needs no revision check, must append at least one event, and must not bump
+   * the content revision (`bumpsContentRevision: false`). Revision and content revision stay put.
+   */
+  navigation?: boolean;
+  /**
    * The domain work. Must revision-check at least one row with `m.updateWithExpectedRevision`
    * and append at least one event with `m.appendEvent`, or declare `m.unchanged()` before writing
    * anything (then neither, and no counters). Every query joins the mutation transaction
@@ -133,8 +140,11 @@ export class MutationService {
       // The lifecycle guard (BIB-22), once for every study mutation: under the lock, before any
       // work, so a refusal writes nothing and rolls the receipt back.
       assertLifecycleAllows(lock.lifecycle, spec.lifecycleTransition);
+      if (spec.navigation && spec.bumpsContentRevision) {
+        throw new Error('MutationService: a navigation mutation cannot bump the content revision');
+      }
       if (spec.bumpsContentRevision) lock.bumpContentRevision();
-      return this.run(lock, spec.work, false);
+      return this.run(lock, spec.work, false, request.correlationId ?? null, spec.navigation);
     });
   }
 
@@ -162,7 +172,7 @@ export class MutationService {
   ): Promise<MutationResult> {
     return this.transact(ownerId, request, async (transaction) => {
       const lock = await this.studyRevisions.create(transaction, ownerId, spec.study);
-      return this.run(lock, spec.work, true);
+      return this.run(lock, spec.work, true, request.correlationId ?? null);
     });
   }
 
@@ -215,8 +225,10 @@ export class MutationService {
     lock: StudyLock,
     work: StudyMutationSpec['work'],
     creating: boolean,
+    correlationId: string | null,
+    navigation = false,
   ): Promise<MutationResponse> {
-    const mutation = new StudyMutation(lock, this.thread, creating);
+    const mutation = new StudyMutation(lock, this.thread, creating, correlationId, navigation);
     let response: MutationResponse;
     try {
       response = await runWork(work, mutation);
@@ -233,7 +245,10 @@ export class MutationService {
       lock.release();
       return response;
     }
-    if (!creating && !mutation.revisionChecked) {
+    if (navigation && lock.contentRevision !== lock.lockedContentRevision) {
+      throw new Error('MutationService: a navigation mutation changed the content revision');
+    }
+    if (!creating && !navigation && !mutation.revisionChecked) {
       throw new Error(
         'MutationService: work made no revision check (m.updateWithExpectedRevision)',
       );

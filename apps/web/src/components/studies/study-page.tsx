@@ -10,6 +10,7 @@ import { GraphSection } from '@/components/graph/graph-section';
 import { NodesSection } from '@/components/nodes/nodes-section';
 import { NotesPanel } from '@/components/notes/notes-panel';
 import { RequireAuth } from '@/components/require-auth';
+import { ThreadPanel } from '@/components/thread/thread-panel';
 import { classifyError } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
 import { GraphViewProvider } from '@/lib/graph-store';
@@ -28,8 +29,8 @@ const LOAD_COPY: ProblemCopy = {
  * title, description, main question, pin and tags, so a study can be opened, organized and
  * reloaded. It archives, unarchives, trashes and restores the study; an archived or trashed study
  * stays readable but has no editor. Its graph canvas (BIB-28), typed nodes (BIB-25) and notes
- * (BIB-23) follow the editor; the canvas and the Nodes list share one selection. The thread and
- * summary arrive with later tickets. A missing or another user's study, or one past its trash window, shows the same
+ * (BIB-23) follow the editor; the canvas and the Nodes list share one selection. The Study Thread
+ * (BIB-32) follows the notes; the summary arrives with a later ticket. A missing or another user's study, or one past its trash window, shows the same
  * neutral unavailable state.
  */
 export function StudyPage() {
@@ -164,9 +165,9 @@ function StudyDetails({
         <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
       </GraphViewProvider>
       <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
-      <p className="text-muted">
-        The study is saved. Its thread and summary arrive in a later release.
-      </p>
+      {/* BIB-32: what happened in this study, newest first. */}
+      <ThreadPanel study={study} />
+      <p className="text-muted">The study is saved. Its summary arrives in a later release.</p>
       <nav aria-label="Study" className="flex flex-wrap gap-4">
         {/* BIB-24: the reader with this study's highlights (opaque ids only in the URL). */}
         <Link

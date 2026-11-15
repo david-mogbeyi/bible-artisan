@@ -1,6 +1,7 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import type { VisitOrigin } from '@bible-artisan/contracts';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
@@ -9,20 +10,25 @@ import {
   bibleHref,
   type ChapterTarget,
   fetchTranslations,
+  fromEventIdFromParams,
   referenceFor,
   referenceIdFromParams,
   studyIdFromParams,
   TRANSLATIONS_QUERY_KEY,
 } from '@/lib/bible';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
+import { invalidateThread, recordActivity, threadSessionId } from '@/lib/thread';
 import { BibleReader, type FocusRequest, usePassage } from './bible-reader';
 import { type Navigation, ReferenceSearch } from './bible-search';
 import { ProblemAlert } from './problem-alert';
 
 /**
  * `/bible`: reading outside a study (PRD section 9), or in one (`&study=<study id>`, BIB-24: its
- * highlights are drawn and can be added, and a selection can be noted). Reading records no study
- * events. The URL holds only opaque ids (`?ref=<scripture reference id>`, which also fixes the
+ * highlights are drawn and can be added, and a selection can be noted). Reading outside a study
+ * records nothing. In an active study (BIB-55), each deliberate navigation records one visit
+ * once its text has loaded, with its true origin (search, a reader link, an earlier thread event
+ * via `&from=<event id>`, or a direct open) and the previous visit as its parent. A reload,
+ * back/forward restoration or re-render records nothing. The URL holds only opaque ids (`?ref=<scripture reference id>`, which also fixes the
  * edition), so links, bookmarks, reload, and back/forward reopen the same passage in the same
  * edition while no Scripture reference, search text, quote or label reaches a URL, history entry,
  * or request log.
@@ -52,9 +58,28 @@ const TRANSLATIONS_COPY = {
   unavailable: "We couldn't load the Bible translations.",
 };
 
+interface PendingVisit {
+  referenceId: string;
+  origin: VisitOrigin;
+}
+
+/**
+ * True for the first workspace mount after the document itself was reloaded: restoring the page
+ * is not a deliberate visit (PRD section 13). Later mounts in the same document are navigations.
+ */
+let documentMounted = false;
+function isReloadRestore(): boolean {
+  const first = !documentMounted;
+  documentMounted = true;
+  if (!first || typeof performance === 'undefined') return false;
+  const [entry] = performance.getEntriesByType('navigation') as PerformanceNavigationTiming[];
+  return entry?.type === 'reload' || entry?.type === 'back_forward';
+}
+
 function BibleWorkspace() {
   const router = useRouter();
   const params = useSearchParams();
+  const queryClient = useQueryClient();
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const [opening, setOpening] = useState(false);
   const [openProblem, setOpenProblem] = useState<Pending | null>(null);
@@ -62,7 +87,19 @@ function BibleWorkspace() {
   const translations = useQuery({ queryKey: TRANSLATIONS_QUERY_KEY, queryFn: fetchTranslations });
   const referenceId = referenceIdFromParams(params);
   const studyId = studyIdFromParams(params);
+  const fromEventId = fromEventIdFromParams(params);
   const passage = usePassage(referenceId);
+  const [pendingVisit, setPendingVisit] = useState<PendingVisit | null>(() =>
+    referenceId && studyId && !isReloadRestore()
+      ? {
+          referenceId,
+          origin: fromEventId ? { kind: 'event', eventId: fromEventId } : { kind: 'direct' },
+        }
+      : null,
+  );
+  const lastVisitEventId = useRef<string | null>(null);
+  /** The pending visit already sent, so each deliberate navigation is recorded once. */
+  const sentVisit = useRef<PendingVisit | null>(null);
   const study = useQuery({
     queryKey: studyId ? studyQueryKey(studyId) : ['studies', 'none'],
     queryFn: () => {
@@ -77,6 +114,32 @@ function BibleWorkspace() {
   const editionId =
     (referenceId ? passage.data?.edition.id : undefined) ?? chosenEditionId ?? list[0]?.id;
   const translation = list.find((t) => t.id === editionId) ?? list[0];
+
+  // BIB-55: record the pending deliberate visit once its passage text has loaded.
+  const loaded = passage.isSuccess && !passage.isPlaceholderData;
+  const studyActive = study.data?.lifecycle === 'active';
+  useEffect(() => {
+    if (!pendingVisit || sentVisit.current === pendingVisit) return;
+    if (!studyId || !studyActive || !loaded || pendingVisit.referenceId !== referenceId) return;
+    sentVisit.current = pendingVisit;
+    recordActivity(studyId, {
+      kind: 'visit',
+      clientMutationId: crypto.randomUUID(),
+      sessionId: threadSessionId(),
+      occurredAt: new Date().toISOString(),
+      referenceId: pendingVisit.referenceId,
+      origin: pendingVisit.origin,
+      parentVisitEventId: lastVisitEventId.current,
+    }).then(
+      (recorded) => {
+        lastVisitEventId.current = recorded.eventId;
+        void invalidateThread(queryClient, studyId);
+      },
+      // Capture is best effort: a failed visit never blocks reading (the offline queue, BIB-36,
+      // will retry it).
+      () => undefined,
+    );
+  }, [pendingVisit, studyId, studyActive, loaded, referenceId, queryClient]);
 
   /**
    * Navigation order: every navigation the user starts takes the next token, and a result is
@@ -99,28 +162,32 @@ function BibleWorkspace() {
     setOpening(false);
   }, [referenceId]);
 
-  const open = (token: number, id: string, focus: boolean) => {
+  const open = (token: number, id: string, focus: boolean, origin: VisitOrigin) => {
     if (token !== latest.current) return;
     if (focus) setFocusRequest((prev) => ({ referenceId: id, n: (prev?.n ?? 0) + 1 }));
     pushedReferenceId.current = id;
+    setPendingVisit({ referenceId: id, origin });
     router.push(bibleHref(id, studyId), { scroll: false });
   };
-  const navigation: Navigation = { begin, open: (token, id) => open(token, id, true) };
+  const SEARCH: VisitOrigin = { kind: 'search' };
+  const fromReader = (): VisitOrigin =>
+    referenceId ? { kind: 'reader', referenceId } : { kind: 'reader' };
+  const navigation: Navigation = { begin, open: (token, id) => open(token, id, true, SEARCH) };
 
   /** Asks the API for a chapter's reference (a request body, never logged), then opens it. */
-  const openChapter = (target: ChapterTarget, focus: boolean) => {
+  const openChapter = (target: ChapterTarget, focus: boolean, origin: VisitOrigin) => {
     const token = begin();
     setOpening(true);
     referenceFor(target).then(
       (reference) => {
         if (token !== latest.current) return;
         setOpening(false);
-        open(token, reference.id, focus);
+        open(token, reference.id, focus, origin);
       },
       (error: unknown) => {
         if (token !== latest.current) return;
         setOpening(false);
-        setOpenProblem({ error, retry: () => openChapter(target, focus) });
+        setOpenProblem({ error, retry: () => openChapter(target, focus, origin) });
       },
     );
   };
@@ -177,7 +244,7 @@ function BibleWorkspace() {
           <ReferenceSearch
             translation={translation}
             navigation={navigation}
-            onOpenVerse={(target) => openChapter(target, true)}
+            onOpenVerse={(target) => openChapter(target, true, SEARCH)}
           />
           {openProblem ? (
             <ProblemAlert error={openProblem.error} copy={OPEN_COPY} onRetry={openProblem.retry} />
@@ -186,8 +253,8 @@ function BibleWorkspace() {
             translations={list}
             editionId={translation.id}
             referenceId={referenceId}
-            onOpenChapter={openChapter}
-            onOpenReference={(id) => open(begin(), id, true)}
+            onOpenChapter={(target, focus) => openChapter(target, focus, fromReader())}
+            onOpenReference={(id) => open(begin(), id, true, fromReader())}
             onChangeEdition={(id) => {
               begin();
               setChosenEditionId(id);

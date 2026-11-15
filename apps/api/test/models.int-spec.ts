@@ -528,8 +528,59 @@ describe('Sequelize models against the real schema', () => {
       eventType: 'study.created',
       payloadJson: {},
       occurredAt: expect.any(Date),
+      visibility: 'visible',
+      actorKind: 'user',
+      sessionId: null,
+      nodeId: null,
+      fromNodeId: null,
+      versionId: null,
+      branchId: null,
+      parentVisitEventId: null,
+      schemaVersion: 1,
+      clientMutationId: null,
+      correlationId: null,
+      recordedAt: expect.any(Date),
     });
     expect(typeof found.sequence).toBe('string');
+  });
+
+  it('rejects a StudyEvent whose parent visit is an event of another study, and a reused client mutation id (BIB-55)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const foreign = await StudyEvent.create({
+      studyId: other.id,
+      ownerId: owner.id,
+      sequence: '1',
+      eventType: 'scripture_opened',
+    });
+    await expect(
+      StudyEvent.create({
+        studyId: study.id,
+        ownerId: owner.id,
+        sequence: '1',
+        eventType: 'scripture_opened',
+        parentVisitEventId: foreign.id,
+      }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    const clientMutationId = randomUUID();
+    await StudyEvent.create({
+      studyId: study.id,
+      ownerId: owner.id,
+      sequence: '2',
+      eventType: 'scripture_opened',
+      clientMutationId,
+    });
+    await expect(
+      StudyEvent.create({
+        studyId: other.id,
+        ownerId: owner.id,
+        sequence: '2',
+        eventType: 'scripture_opened',
+        clientMutationId,
+      }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+    expect(await StudyEvent.count({ where: { studyId: study.id } })).toBe(1);
   });
 
   it('rejects a model-level StudyNode create whose owner_id does not own the study', async () => {
