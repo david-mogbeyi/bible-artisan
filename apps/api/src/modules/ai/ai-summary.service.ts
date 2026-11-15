@@ -111,11 +111,13 @@ export class AiSummaryService {
       transaction,
     });
     if (!schedule) {
+      // Observed as of the basis, not the study's current revision: a change committed while this
+      // first summary ran is then seen by the next debounce pass and gets its follow-up.
       await StudySummarySchedule.create(
         {
           ownerId,
           studyId,
-          observedRevision: study.contentRevision,
+          observedRevision: scope.basisRevision,
           summarizedRevision: scope.basisRevision,
           firstDirtyAt: null,
           lastDirtyAt: null,

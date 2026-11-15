@@ -438,6 +438,28 @@ describe('AI study insights (BIB-43, BIB-44, BIB-45)', () => {
       expect(latest.stale).toBe(false);
     });
 
+    it('queues a follow-up for a change committed while the first summary of a study was running', async () => {
+      const alice = await optedIn();
+      const { studyId } = await newStudy(alice);
+      fake.beforeAnswer = async () => {
+        fake.beforeAnswer = null;
+        await createNode(alice, studyId, { type: 'thought', text: 'While the first one ran' });
+      };
+      await requested(alice, requestSummaryPath(studyId));
+      await drain();
+      expect((await getSummary(alice, studyId)).stale).toBe(true);
+      const t0 = Date.now();
+      const scope = { ownerId: alice.user.id, studyId };
+      const automatic = () =>
+        AiJob.count({ where: { studyId, capability: 'summary', trigger: 'automatic' } });
+      await summaries.scheduleAutomatic(new Date(t0), scope);
+      expect(await automatic()).toBe(0);
+      await summaries.scheduleAutomatic(new Date(t0 + 30_001), scope);
+      expect(await automatic()).toBe(1);
+      await drain();
+      expect((await getSummary(alice, studyId)).stale).toBe(false);
+    });
+
     it('queues an automatic summary at most two minutes after the first change during sustained editing', async () => {
       const alice = await optedIn();
       const { studyId } = await newStudy(alice);
