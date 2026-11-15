@@ -74,6 +74,10 @@ const DERIVED_FROM_REFUSED =
 const SUGGESTIONS_MIGRATION = '20261115150000_add_ai_suggestions.ts';
 const SUGGESTIONS_REFUSED =
   'AI suggestions drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-43/44/45's AI insights migration (summaries, tension/question/passage proposals). */
+const INSIGHTS_MIGRATION = '20261115160000_add_ai_insights.ts';
+const INSIGHTS_REFUSED =
+  'AI insights drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'account_deletion',
@@ -103,6 +107,8 @@ const DOMAIN_TABLES = [
   'study_event',
   'study_node',
   'study_node_position',
+  'study_summary',
+  'study_summary_schedule',
   'study_tag',
   'study_view_state',
   'tag',
@@ -297,12 +303,12 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
 
-      // No opt-in at all: the newest migration (BIB-41/42's AI suggestions) is the first `down`
+      // No opt-in at all: the newest migration (BIB-43/44/45's AI insights) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: SUGGESTIONS_REFUSED,
+        message: INSIGHTS_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -325,6 +331,8 @@ describe('migration reversibility', () => {
         ['study_edge.suggestion_id', 'study_edge.accepted_by', 'ai_job.input'].includes(column),
       );
     try {
+      // The newer AI insights step (BIB-43/44/45) goes down first.
+      await withStudyDataDropAllowed(() => migrator.down({ to: INSIGHTS_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(SUGGESTIONS_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -344,6 +352,39 @@ describe('migration reversibility', () => {
         'study_edge.accepted_by',
         'study_edge.suggestion_id',
       ]);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies the AI insights (BIB-43/44/45) only with the study-data opt-in', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const acceptedNode = async () =>
+      (await columns(['ai_suggestion'])).filter((column) =>
+        ['ai_suggestion.accepted_node_id'].includes(column),
+      );
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(INSIGHTS_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: INSIGHTS_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['study_summary', 'study_summary_schedule'])).toStrictEqual([]);
+      expect(await acceptedNode()).toStrictEqual([]);
+      await migrator.up();
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await publicTables(db, ['study_summary', 'study_summary_schedule'])).toStrictEqual([
+        'study_summary',
+        'study_summary_schedule',
+      ]);
+      expect(await acceptedNode()).toStrictEqual(['ai_suggestion.accepted_node_id']);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();
@@ -722,6 +763,7 @@ describe('migration reversibility', () => {
         ACCOUNT_DELETION_MIGRATION,
         DERIVED_FROM_MIGRATION,
         SUGGESTIONS_MIGRATION,
+        INSIGHTS_MIGRATION,
       ]);
       expect(await columns(['study_edge'])).toContain('study_edge.deleted_with_node_id');
     } finally {
@@ -763,7 +805,11 @@ describe('migration reversibility', () => {
       expect(await columns(['study_node'])).not.toContain('study_node.derived_from_note_id');
       expect(await derivedSchema()).toStrictEqual([]);
       await migrator.up();
-      expect(await recordedMigrations(db)).toStrictEqual([...before, SUGGESTIONS_MIGRATION]);
+      expect(await recordedMigrations(db)).toStrictEqual([
+        ...before,
+        SUGGESTIONS_MIGRATION,
+        INSIGHTS_MIGRATION,
+      ]);
       expect(await derivedSchema()).toStrictEqual(schemaBefore);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });

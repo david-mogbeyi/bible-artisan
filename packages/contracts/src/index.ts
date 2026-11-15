@@ -18,5 +18,6 @@ export * from './branch';
 export * from './graph';
 export * from './thread';
 export * from './ai';
+export * from './ai-insights';
 export * from './resume';
 export * from './export';

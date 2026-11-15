@@ -41,6 +41,7 @@ const suggestion: AiSuggestion = {
   targetNodeId: THO,
   type: 'supports',
   rationale: 'The verse may speak of conscience bearing witness.',
+  caveat: null,
   evidence: [{ id: SCR, quote: 'my conscience testifying' }],
   revision: 1,
   basisRevision: 3,

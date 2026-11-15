@@ -37,6 +37,8 @@ import { StudyNodePosition } from '../src/database/models/study-node-position.mo
 import { StudyViewState } from '../src/database/models/study-view-state.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
 import { StudySession } from '../src/database/models/study-session.model';
+import { StudySummarySchedule } from '../src/database/models/study-summary-schedule.model';
+import { StudySummary } from '../src/database/models/study-summary.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { StudyTag } from '../src/database/models/study-tag.model';
 import { Study } from '../src/database/models/study.model';
@@ -2047,6 +2049,117 @@ describe('Sequelize models against the real schema', () => {
     await Study.destroy({ where: { id: study.id } });
     expect(await AiSuggestion.count({ where: { studyId: study.id } })).toBe(0);
     expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('creates a StudySummary and its schedule, and question/passage/tension AiSuggestions, through the models; summaries are immutable and nothing crosses owners (BIB-43/44/45)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const scope = { ownerId: owner.id, studyId: study.id };
+    const job = await AiJob.create({
+      ...scope,
+      capability: 'summary',
+      requestKey: `test:${randomUUID()}`,
+      basisRevision: 1,
+      consentVersion: 'v1',
+    });
+    const summaryValues = {
+      ...scope,
+      jobId: job.id,
+      basisContentRevision: 1,
+      publishedCurrent: true,
+      summaryJson: { contractVersion: 1 } as never,
+      modelId: 'fake-model-1',
+      promptVersion: 'p',
+      schemaVersion: 's',
+    };
+    const summary = await StudySummary.create(summaryValues);
+    const stored = await StudySummary.findByPk(summary.id, { rejectOnEmpty: true });
+    expect([
+      stored.publishedCurrent,
+      stored.basisContentRevision,
+      stored.summaryJson,
+    ]).toStrictEqual([true, 1, { contractVersion: 1 }]);
+    expect(stored.createdAt).toBeInstanceOf(Date);
+    await expect(
+      StudySummary.update({ publishedCurrent: false }, { where: { id: summary.id } }),
+    ).rejects.toThrow(/immutable/);
+    // One summary per job.
+    await expect(StudySummary.create(summaryValues)).rejects.toBeInstanceOf(UniqueConstraintError);
+    const other = await createUser();
+    await expect(
+      StudySummary.create({ ...summaryValues, ownerId: other.id }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+
+    const schedule = await StudySummarySchedule.create({
+      ...scope,
+      observedRevision: 1,
+      summarizedRevision: 1,
+    });
+    expect([schedule.firstDirtyAt, schedule.lastDirtyAt]).toStrictEqual([null, null]);
+    await expect(
+      StudySummarySchedule.create({ ...scope, observedRevision: 1, summarizedRevision: 1 }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+    await expect(
+      StudySummarySchedule.update(
+        { firstDirtyAt: new Date() },
+        { where: { ownerId: owner.id, studyId: study.id } },
+      ),
+    ).rejects.toBeInstanceOf(DatabaseError);
+
+    const a = await StudyNode.create({ ...scope, ...THOUGHT });
+    const b = await StudyNode.create({ ...scope, ...THOUGHT });
+    const base = {
+      ...scope,
+      jobId: job.id,
+      signature: 'sig',
+      basisContentRevision: 1,
+      dependencyVersions: {},
+      modelId: 'fake-model-1',
+      promptVersion: 'p',
+    };
+    const question = await AiSuggestion.create({
+      ...base,
+      capability: 'questions',
+      proposalJson: { text: 'Why?', rationale: 'Because.', evidence: [] },
+    });
+    expect([question.sourceNodeId, question.edgeType, question.acceptedNodeId]).toStrictEqual([
+      null,
+      null,
+      null,
+    ]);
+    await AiSuggestion.update(
+      { status: 'accepted', decidedAt: new Date(), decidedBy: owner.id, acceptedNodeId: a.id },
+      { where: { id: question.id } },
+    );
+    await AiSuggestion.create({
+      ...base,
+      capability: 'tensions',
+      sourceNodeId: a.id,
+      targetNodeId: b.id,
+      edgeType: 'qualifies',
+      proposalJson: { rationale: 'May.', evidence: [], caveat: 'Or not.' },
+    });
+    for (const bad of [
+      // Edge-shaped capabilities need both endpoints and a type; the others none.
+      { capability: 'tensions' },
+      { capability: 'passages', sourceNodeId: a.id, targetNodeId: b.id, edgeType: 'qualifies' },
+      // A tension is only contradicts or qualifies.
+      { capability: 'tensions', sourceNodeId: a.id, targetNodeId: b.id, edgeType: 'supports' },
+      // An accepted proposal names its node.
+      { capability: 'questions', status: 'accepted', decidedAt: new Date(), decidedBy: owner.id },
+    ]) {
+      await expect(
+        AiSuggestion.create({
+          ...base,
+          proposalJson: { rationale: 'x', evidence: [] },
+          ...bad,
+        } as never),
+      ).rejects.toBeInstanceOf(DatabaseError);
+    }
+
+    await Study.destroy({ where: { id: study.id } });
+    expect(await StudySummary.count({ where: { studyId: study.id } })).toBe(0);
+    expect(await StudySummarySchedule.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('refuses to truncate scripture_reference', async () => {

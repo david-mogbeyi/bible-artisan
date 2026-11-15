@@ -72,7 +72,14 @@ export interface AiRuntime {
   pollMs: number;
   /** Monthly spend cap in micros. */
   monthlySpendCapMicros: number;
+  /** BIB-43 (PRD section 17): automatic summary 30 seconds after the last significant change. */
+  summaryDebounceMs?: number;
+  /** BIB-43: at most two minutes of waiting during sustained editing. */
+  summaryMaxWaitMs?: number;
 }
+
+export const SUMMARY_DEBOUNCE_MS = 30_000;
+export const SUMMARY_MAX_WAIT_MS = 120_000;
 
 export const DEFAULT_AI_RUNTIME: Omit<AiRuntime, 'monthlySpendCapMicros'> = {
   leaseMs: 120_000,

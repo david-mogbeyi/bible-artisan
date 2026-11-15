@@ -210,6 +210,7 @@ describe('AI relationship suggestions (BIB-41, BIB-42)', () => {
         targetNodeId: high,
         type: 'related_to',
         rationale: 'These two items may address a shared theme.',
+        caveat: null,
         evidence: [
           { id: thought, quote: null },
           { id: question, quote: null },

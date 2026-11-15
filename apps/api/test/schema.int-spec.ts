@@ -171,6 +171,18 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'study_summary_schedule_study_owner_fk',
+        table: 'study_summary_schedule',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
+        name: 'study_summary_study_owner_fk',
+        table: 'study_summary',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'study_tag_study_owner_fk',
         table: 'study_tag',
         columns: ['owner_id', 'study_id'],

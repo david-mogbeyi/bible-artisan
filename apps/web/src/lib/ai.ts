@@ -1,4 +1,7 @@
 import {
+  type AcceptAiProposalRequest,
+  type AcceptAiProposalResponse,
+  acceptAiProposalResponseSchema,
   type AcceptAiSuggestionRequest,
   type AcceptAiSuggestionResponse,
   acceptAiSuggestionResponseSchema,
@@ -8,13 +11,24 @@ import {
   aiJobAcceptedResponseSchema,
   type AiJobResponse,
   aiJobResponseSchema,
+  type AiProposalCapability,
+  type AiProposalListResponse,
+  aiProposalListResponseSchema,
   type AiSuggestionListResponse,
   aiSuggestionListResponseSchema,
   IDEMPOTENCY_KEY_HEADER,
+  type ReasoningPathResponse,
+  reasoningPathResponseSchema,
+  type RejectAiProposalRequest,
+  type RejectAiProposalResponse,
+  rejectAiProposalResponseSchema,
   type RejectAiSuggestionRequest,
   type RejectAiSuggestionResponse,
   rejectAiSuggestionResponseSchema,
+  type RequestAiInsight,
   type RequestRelationships,
+  type StudySummaryResponse,
+  studySummaryResponseSchema,
   type UpdateAiConsentRequest,
   type UpdateAiConsentResponse,
   updateAiConsentResponseSchema,
@@ -111,5 +125,111 @@ export function rejectAiSuggestion(
       headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
       body: JSON.stringify(body),
     },
+  );
+}
+
+/* BIB-43: the living study summary. */
+
+export function studySummaryQueryKey(studyId: string) {
+  return ['studies', studyId, 'summary'] as const;
+}
+
+export function fetchStudySummary(studyId: string): Promise<StudySummaryResponse> {
+  return apiFetch(`/studies/${encodeURIComponent(studyId)}/summary`, studySummaryResponseSchema);
+}
+
+/** `POST /studies/:id/ai/summary` → 202 (a manual Generate / Regenerate). */
+export function requestStudySummary(
+  studyId: string,
+  idempotencyKey: string,
+): Promise<AiJobAcceptedResponse> {
+  return apiFetch(`${studyAiPath(studyId)}/summary`, aiJobAcceptedResponseSchema, {
+    method: 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+  });
+}
+
+/* BIB-44 / BIB-45: tensions, open questions and passages. */
+
+export type InsightCapability = 'tensions' | 'questions' | 'passages';
+
+export function requestInsight(
+  studyId: string,
+  capability: InsightCapability,
+  body: RequestAiInsight,
+  idempotencyKey: string,
+): Promise<AiJobAcceptedResponse> {
+  return apiFetch(`${studyAiPath(studyId)}/${capability}`, aiJobAcceptedResponseSchema, {
+    method: 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+    body: JSON.stringify(body),
+  });
+}
+
+export function insightQueryKey(studyId: string, capability: InsightCapability) {
+  return ['studies', studyId, 'ai-insights', capability] as const;
+}
+
+export function listTensions(studyId: string): Promise<AiSuggestionListResponse> {
+  return apiFetch(
+    `${studyAiPath(studyId)}/suggestions?capability=tensions`,
+    aiSuggestionListResponseSchema,
+  );
+}
+
+export function listProposals(
+  studyId: string,
+  capability: AiProposalCapability,
+): Promise<AiProposalListResponse> {
+  return apiFetch(
+    `${studyAiPath(studyId)}/proposals?capability=${capability}`,
+    aiProposalListResponseSchema,
+  );
+}
+
+export function acceptProposal(
+  studyId: string,
+  proposalId: string,
+  body: AcceptAiProposalRequest,
+  idempotencyKey: string,
+): Promise<AcceptAiProposalResponse> {
+  return apiFetch(
+    `${studyAiPath(studyId)}/proposals/${encodeURIComponent(proposalId)}/accept`,
+    acceptAiProposalResponseSchema,
+    {
+      method: 'POST',
+      headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export function rejectProposal(
+  studyId: string,
+  proposalId: string,
+  body: RejectAiProposalRequest,
+  idempotencyKey: string,
+): Promise<RejectAiProposalResponse> {
+  return apiFetch(
+    `${studyAiPath(studyId)}/proposals/${encodeURIComponent(proposalId)}/reject`,
+    rejectAiProposalResponseSchema,
+    {
+      method: 'POST',
+      headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+/* BIB-45: the deterministic reasoning path (no AI). */
+
+export function reasoningQueryKey(studyId: string, nodeId: string) {
+  return ['studies', studyId, 'nodes', nodeId, 'reasoning'] as const;
+}
+
+export function fetchReasoning(studyId: string, nodeId: string): Promise<ReasoningPathResponse> {
+  return apiFetch(
+    `/studies/${encodeURIComponent(studyId)}/nodes/${encodeURIComponent(nodeId)}/reasoning`,
+    reasoningPathResponseSchema,
   );
 }

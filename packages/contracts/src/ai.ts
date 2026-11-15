@@ -30,8 +30,18 @@ export const AI_CONSENT_COPY = {
     'You can turn AI off at any time, for your account or for one study. Turning it off cancels waiting requests and discards results that have not arrived yet. Content already sent to the provider cannot be recalled; it is handled under the provider terms above.',
 } as const;
 
-/** The AI capabilities that exist so far. Later tickets add tensions, passages, … */
-export const AI_CAPABILITIES = ['summary', 'relationships'] as const;
+/**
+ * The AI capabilities. BIB-43: `summary` produces the section 17 living summary. BIB-44:
+ * `tensions` (proposed tensions between two claims) and `questions` (existing open questions plus
+ * proposed new ones). BIB-45: `passages` (verified next passages to investigate).
+ */
+export const AI_CAPABILITIES = [
+  'summary',
+  'relationships',
+  'tensions',
+  'questions',
+  'passages',
+] as const;
 export type AiCapability = (typeof AI_CAPABILITIES)[number];
 
 export const AI_JOB_STATES = ['queued', 'running', 'succeeded', 'failed', 'cancelled'] as const;
@@ -206,7 +216,10 @@ export const aiContextSummarySchema = z.object({
 });
 export type AiContextSummary = z.infer<typeof aiContextSummarySchema>;
 
-/** The summary capability's output, version 0 (BIB-43 replaces it with the section 17 schema). */
+/**
+ * The summary capability's output, version 0 (BIB-39). BIB-43 replaced it with the section 17
+ * StudySummary v1 (`ai-insights.ts`); kept so results stored before then still read.
+ */
 export const summaryOutputV0Schema = z.strictObject({
   overview: z.string().min(1).max(2000),
   /** Ids of manifest entries the overview draws on. Every id must be in the manifest. */
@@ -281,13 +294,19 @@ export type AiSuggestionStatus = (typeof AI_SUGGESTION_STATUSES)[number];
 export const aiSuggestionSchema = z.object({
   id: z.uuid(),
   studyId: z.uuid(),
-  capability: z.literal('relationships'),
+  /**
+   * `relationships` (BIB-42) or `tensions` (BIB-44: a proposed tension between two claims;
+   * accepting it adds the `contradicts` or `qualifies` relationship, never a status change).
+   */
+  capability: z.enum(['relationships', 'tensions']),
   /** `expired`: a connected node changed or was removed since; it can no longer be accepted. */
   status: z.enum(AI_SUGGESTION_STATUSES),
   sourceNodeId: z.uuid(),
   targetNodeId: z.uuid(),
   type: z.enum(EDGE_TYPES),
   rationale: z.string(),
+  /** BIB-44: a tension's interpretive caveat (null for relationships). */
+  caveat: z.string().nullable(),
   evidence: z.array(z.object({ id: z.uuid(), quote: z.string().nullable() })),
   /** Revision of the suggestion, for accept/reject `expectedRevision`. */
   revision: z.number().int().positive(),
@@ -300,8 +319,14 @@ export const aiSuggestionSchema = z.object({
 });
 export type AiSuggestion = z.infer<typeof aiSuggestionSchema>;
 
-/** `GET /v1/studies/:studyId/ai/suggestions?nodeId=`: open suggestions touching that node. */
-export const listAiSuggestionsQuerySchema = z.strictObject({ nodeId: z.string().max(64) });
+/**
+ * `GET /v1/studies/:studyId/ai/suggestions?nodeId=`: open suggestions touching that node.
+ * `?capability=tensions` (BIB-44): the study's open tension suggestions.
+ */
+export const listAiSuggestionsQuerySchema = z.union([
+  z.strictObject({ nodeId: z.string().max(64) }),
+  z.strictObject({ capability: z.literal('tensions') }),
+]);
 export const aiSuggestionListResponseSchema = z.object({ items: z.array(aiSuggestionSchema) });
 export type AiSuggestionListResponse = z.infer<typeof aiSuggestionListResponseSchema>;
 
@@ -353,6 +378,30 @@ export const rejectAiSuggestionResponseSchema = z.object({
 });
 export type RejectAiSuggestionResponse = z.infer<typeof rejectAiSuggestionResponseSchema>;
 
+/**
+ * What a finished summary job reports (BIB-43): the StudySummary revision it stored, whether it
+ * became the current summary (false: its basis was no longer the study's content revision, so it
+ * is kept as a historical artifact), and how many generated items validation dropped.
+ */
+export const summaryJobOutputSchema = z.strictObject({
+  summaryId: z.uuid(),
+  current: z.boolean(),
+  droppedCount: z.number().int().nonnegative(),
+});
+export type SummaryJobOutput = z.infer<typeof summaryJobOutputSchema>;
+
+/**
+ * What a finished open-questions job reports (BIB-44): the existing open questions it pointed to
+ * (ids only; their statuses are untouched) and the proposals it stored.
+ */
+export const questionsJobOutputSchema = z.strictObject({
+  existingOpenQuestionIds: z.array(z.uuid()),
+  suggestionIds: z.array(z.uuid()),
+  suppressedCount: z.number().int().nonnegative(),
+  droppedCount: z.number().int().nonnegative(),
+});
+export type QuestionsJobOutput = z.infer<typeof questionsJobOutputSchema>;
+
 /** `GET /v1/studies/:studyId/ai/jobs/:jobId`. */
 export const aiJobResponseSchema = z.object({
   jobId: z.uuid(),
@@ -376,7 +425,12 @@ export const aiJobResponseSchema = z.object({
       id: z.uuid(),
       modelId: z.string(),
       promptVersion: z.string(),
-      output: z.union([summaryOutputV0Schema, relationshipsJobOutputSchema]),
+      output: z.union([
+        summaryJobOutputSchema,
+        relationshipsJobOutputSchema,
+        questionsJobOutputSchema,
+        summaryOutputV0Schema,
+      ]),
       createdAt: z.iso.datetime(),
     })
     .nullable(),

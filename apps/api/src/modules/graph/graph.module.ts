@@ -11,6 +11,7 @@ import { GraphController } from './graph.controller';
 import { GraphService } from './graph.service';
 import { NodesController } from './nodes.controller';
 import { NodesService } from './nodes.service';
+import { ReasoningController, ReasoningService } from './reasoning.service';
 import { ResumeController } from './resume.controller';
 import { ResumeService } from './resume.service';
 import { ThreadModule } from '../thread/thread.module';
@@ -33,7 +34,9 @@ import { ThreadModule } from '../thread/thread.module';
  * Resume (BIB-34, `GET /studies/:id/resume`, `PATCH /studies/:id/view-state`): the saved
  * workspace context on `study_view_state` and the deterministic resume card; the last visit comes
  * from Thread's `ThreadService.lastVisit`. A node converted from a note (BIB-57) checks and reads
- * that note through `NotesService`.
+ * that note through `NotesService`. The deterministic reasoning path (BIB-45, `GET
+ * /studies/:id/nodes/:nodeId/reasoning`) reads conclusion versions here and events through
+ * Thread's `ThreadReadService`.
  */
 @Module({
   imports: [MutationModule, StudyModule, BibleContentModule, ThreadModule, NotesModule],
@@ -43,8 +46,16 @@ import { ThreadModule } from '../thread/thread.module';
     GraphController,
     BranchesController,
     ResumeController,
+    ReasoningController,
   ],
-  providers: [NodesService, EdgesService, GraphService, BranchesService, ResumeService],
+  providers: [
+    NodesService,
+    EdgesService,
+    GraphService,
+    BranchesService,
+    ResumeService,
+    ReasoningService,
+  ],
   exports: [NodesService, EdgesService],
 })
 export class GraphModule {}

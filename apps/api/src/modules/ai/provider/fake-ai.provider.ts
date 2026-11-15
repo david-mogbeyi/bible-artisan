@@ -19,15 +19,148 @@ export type FakeBehaviour =
   /** Answers exactly this text (BIB-41's validation fixtures). */
   | { text: string };
 
-const ID_PATTERN = /id="([0-9a-f-]{36})"/g;
 const PAIR_PATTERN = /between node "([0-9a-f-]{36})" and node "([0-9a-f-]{36})"/;
+const TASK_PATTERN = /Task: ([a-z]+)\./;
+const BLOCK_PATTERN = /<(study|node|note|event|edge) ([^>]*)>/g;
+const ATTRIBUTE_PATTERN = /([a-z]+)="([^"]*)"/g;
+const INVENTED = '00000000-0000-4000-8000-000000000000';
+
+interface FakeBlock {
+  tag: string;
+  id: string;
+  attributes: Record<string, string>;
+}
+
+function blocksOf(prompt: string): FakeBlock[] {
+  return [...prompt.matchAll(BLOCK_PATTERN)].map((match) => {
+    const attributes = Object.fromEntries(
+      [...(match[2] ?? '').matchAll(ATTRIBUTE_PATTERN)].map((a) => [a[1] ?? '', a[2] ?? '']),
+    );
+    return { tag: match[1] ?? '', id: attributes.id ?? '', attributes };
+  });
+}
+
+/**
+ * The deterministic answer for a prompt's task (computed from the blocks alone):
+ * - relationships (BIB-42): one `related_to` between the requested pair, citing both;
+ * - summary (BIB-43): a focus, a tentative finding citing the first two nodes, a key passage per
+ *   Scripture node, an established finding per node marked established, one next direction;
+ * - tensions (BIB-44): `qualifies` between the first two observation/conclusion/thought nodes;
+ * - questions (BIB-44): every open question id, plus one proposed question;
+ * - passages (BIB-45): "Romans 8:16" and "Hezekiah 1:1" (which no corpus resolves).
+ * `invented` adds an id that is in no manifest.
+ */
+function fakeAnswer(prompt: string, invented: boolean): unknown {
+  const pair = PAIR_PATTERN.exec(prompt);
+  const nodes = blocksOf(prompt).filter((block) => block.tag === 'node');
+  if (pair) {
+    return {
+      proposals: [
+        {
+          sourceNodeId: pair[1],
+          targetNodeId: pair[2],
+          type: 'related_to',
+          rationale: 'These two items may address a shared theme.',
+          evidence: [{ id: invented ? INVENTED : pair[1] }, { id: pair[2] }],
+        },
+      ],
+    };
+  }
+  const task = TASK_PATTERN.exec(prompt)?.[1] ?? 'summary';
+  const cite = (ids: string[]) => [
+    ...ids.map((id) => ({ id })),
+    ...(invented ? [{ id: INVENTED }] : []),
+  ];
+  switch (task) {
+    case 'tensions': {
+      const claims = nodes.filter((node) =>
+        ['observation', 'conclusion', 'thought'].includes(node.attributes.type ?? ''),
+      );
+      const [first, second] = claims;
+      return {
+        tensions:
+          first && second
+            ? [
+                {
+                  firstNodeId: first.id,
+                  secondNodeId: second.id,
+                  type: 'qualifies',
+                  explanation: 'These two statements may pull in different directions.',
+                  caveat: 'This is one possible reading; the two may be compatible.',
+                  evidence: cite([first.id, second.id]),
+                },
+              ]
+            : [],
+      };
+    }
+    case 'questions':
+      return {
+        existingOpenQuestionIds: nodes
+          .filter(
+            (node) => node.attributes.type === 'question' && node.attributes.status === 'open',
+          )
+          .map((node) => node.id),
+        proposedQuestions: [
+          {
+            text: 'What does the surrounding passage add to this question?',
+            rationale: 'The study has not recorded the surrounding context yet.',
+            evidence: cite(nodes.slice(0, 1).map((node) => node.id)),
+          },
+        ],
+      };
+    case 'passages':
+      return {
+        passages: [
+          { reference: 'Romans 8:16', reason: 'This passage may speak about inner witness.' },
+          { reference: 'Hezekiah 1:1', reason: 'This reference may not exist.' },
+        ],
+      };
+    default: {
+      const scripture = nodes.filter((node) => node.attributes.type === 'scripture');
+      const established = nodes.filter((node) => node.attributes.established === 'true');
+      const firstTwo = nodes.slice(0, 2).map((node) => node.id);
+      return {
+        focus: `A study of ${nodes.length} items`,
+        keyPassages: scripture.map((node) => ({
+          text: 'A passage this study returns to.',
+          attribution: 'user_statement',
+          evidence: [{ id: node.id }],
+        })),
+        textualObservations: [],
+        establishedFindings: established.map((node) => ({
+          text: 'A finding you marked as established.',
+          attribution: 'user_statement',
+          evidence: [{ id: node.id }],
+        })),
+        tentativeFindings:
+          firstTwo.length > 0
+            ? [
+                {
+                  text: 'These items may be connected.',
+                  attribution: 'ai_synthesis',
+                  evidence: cite(firstTwo),
+                },
+              ]
+            : [],
+        tensions: [],
+        abandonedHypotheses: [],
+        nextDirections: [
+          {
+            text: 'Consider reading the surrounding chapter.',
+            attribution: 'ai_synthesis',
+            evidence: [],
+          },
+        ],
+        proposedQuestions: [],
+      };
+    }
+  }
+}
 
 /**
  * A deterministic, in-process provider for development and tests (PRD section 38: AI tests never
- * need a real provider or key). Its answer is computed from the prompt alone: a fixed overview
- * citing the first three ids in the context, so the same context always gives the same output.
- * For a relationships prompt (BIB-42) it proposes one `related_to` edge between the two requested
- * nodes, citing both.
+ * need a real provider or key). Its answer is computed from the prompt alone (`fakeAnswer`), so
+ * the same context always gives the same output.
  * Nothing leaves the process. Tests script failures with `script(...)` and observe `calls`.
  */
 export class FakeAiProvider implements AiProvider {
@@ -80,35 +213,10 @@ export class FakeAiProvider implements AiProvider {
     ) {
       throw new AiProviderError(behaviour);
     }
-    const ids = [...request.prompt.matchAll(ID_PATTERN)].map((match) => match[1] ?? '');
-    const unique = [...new Set(ids)].slice(0, 3);
-    const pair = PAIR_PATTERN.exec(request.prompt);
-    const invented = '00000000-0000-4000-8000-000000000000';
     const output =
       behaviour === 'invalid-json'
         ? 'not json'
-        : pair
-          ? JSON.stringify({
-              proposals: [
-                {
-                  sourceNodeId: pair[1],
-                  targetNodeId: pair[2],
-                  type: 'related_to',
-                  rationale: 'These two items may address a shared theme.',
-                  evidence: [
-                    { id: behaviour === 'invented-id' ? invented : pair[1] },
-                    { id: pair[2] },
-                  ],
-                },
-              ],
-            })
-          : JSON.stringify({
-              overview: `Summary of ${new Set(ids).size} study items.`,
-              citedIds:
-                behaviour === 'invented-id'
-                  ? [...unique, '00000000-0000-4000-8000-000000000000']
-                  : unique,
-            });
+        : JSON.stringify(fakeAnswer(request.prompt, behaviour === 'invented-id'));
     return {
       text: output,
       inputTokens: estimateTokens(request.system) + estimateTokens(request.prompt),

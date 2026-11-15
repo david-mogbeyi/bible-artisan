@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MutationModule } from '../../common/mutation/mutation.module';
 import { ENV } from '../../config/config.module';
 import type { Env } from '../../config/env';
+import { BibleContentModule } from '../bible-content/bible-content.module';
 import { GraphModule } from '../graph/graph.module';
 import { IdentityModule } from '../identity/identity.module';
 import { NotesModule } from '../notes/notes.module';
@@ -12,7 +13,8 @@ import { AiJobRunnerService } from './ai-job-runner.service';
 import { AiJobsService } from './ai-jobs.service';
 import { AiSettingsService } from './ai-settings.service';
 import { AiSuggestionsService } from './ai-suggestions.service';
-import { AiConsentController, StudyAiController } from './ai.controller';
+import { AiSummaryService } from './ai-summary.service';
+import { AiConsentController, StudyAiController, StudySummaryController } from './ai.controller';
 import { ContextCandidatesService } from './context/context-candidates.service';
 import {
   AI_PROVIDER,
@@ -52,8 +54,16 @@ export function providerFromEnv(env: Env): AiProvider | null {
  * worker) leases jobs and calls the provider, never inside a transaction.
  */
 @Module({
-  imports: [MutationModule, StudyModule, ThreadModule, GraphModule, NotesModule, IdentityModule],
-  controllers: [AiConsentController, StudyAiController],
+  imports: [
+    MutationModule,
+    StudyModule,
+    ThreadModule,
+    GraphModule,
+    NotesModule,
+    IdentityModule,
+    BibleContentModule,
+  ],
+  controllers: [AiConsentController, StudyAiController, StudySummaryController],
   providers: [
     { provide: AI_PROVIDER, inject: [ENV], useFactory: providerFromEnv },
     {
@@ -69,6 +79,7 @@ export function providerFromEnv(env: Env): AiProvider | null {
     AiSettingsService,
     AiJobRunnerService,
     AiSuggestionsService,
+    AiSummaryService,
     ContextCandidatesService,
   ],
   exports: [AiJobRunnerService],

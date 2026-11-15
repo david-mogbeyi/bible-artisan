@@ -84,6 +84,43 @@ export class ReferenceService {
   }
 
   /**
+   * A reference an AI model proposed (BIB-45), resolved exactly like `resolve` against the local
+   * corpus of an active edition, or null: anything that is not exactly one existing range (an
+   * invalid, ambiguous or non-reference input, an unknown edition) is excluded, never repaired to a
+   * nearby verse. The input is model text: never logged.
+   */
+  async resolveExact(
+    editionId: string,
+    input: string,
+  ): Promise<{ id: string; editionId: string; label: string } | null> {
+    try {
+      const resolved = await this.resolve(editionId, input);
+      if (resolved.outcome !== 'resolved') return null;
+      return {
+        id: resolved.reference.id,
+        editionId: resolved.reference.editionId,
+        label: resolved.reference.label,
+      };
+    } catch (error) {
+      if (error instanceof ReferenceInvalidError || error instanceof NotFoundError) return null;
+      throw error;
+    }
+  }
+
+  /** The first active edition by name (BIB-45: a study without any passage yet), or null. */
+  async defaultEditionId(): Promise<string | null> {
+    const edition = await BibleEdition.findOne({
+      attributes: ['id'],
+      where: { activatedAt: { [Op.ne]: null } },
+      order: [
+        ['name', 'ASC'],
+        ['activatedAt', 'ASC'],
+      ],
+    });
+    return edition?.id ?? null;
+  }
+
+  /**
    * A stored reference with its active edition (whose attribution and index come from the cache,
    * so the caller needs no second edition lookup). The reference fixes the edition; a given
    * `editionId` must be that edition. Unknown id, another edition, or an inactive edition: the
