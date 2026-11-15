@@ -31,7 +31,7 @@ export class StudyLock {
     readonly ownerId: string,
     readonly studyId: string,
     /** `study.content_revision` when the lock was taken. */
-    private readonly lockedContentRevision: number,
+    readonly lockedContentRevision: number,
     /** `study.last_event_sequence` when the lock was taken. */
     readonly lockedEventSequence: bigint,
     /**

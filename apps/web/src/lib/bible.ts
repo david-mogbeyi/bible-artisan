@@ -95,16 +95,28 @@ export function studyIdFromParams(params: URLSearchParams): string | null {
   return value !== null && UUID.test(value) ? value : null;
 }
 
+/** The thread event a reader visit was opened from (BIB-55), or null. */
+export function fromEventIdFromParams(params: URLSearchParams): string | null {
+  const value = params.get('from');
+  return value !== null && UUID.test(value) ? value : null;
+}
+
 /**
  * The `/bible` URL: opaque ids only. The reference fixes the edition, so a bookmark keeps opening
  * the same edition whichever editions are active; `studyId` (BIB-24) reads it in that study, with
  * its highlights. Search text, references, quotes and labels never go in the URL (PRD section 9,
  * NFR-PRIV-001).
  */
-export function bibleHref(referenceId: string | null, studyId: string | null = null): string {
+export function bibleHref(
+  referenceId: string | null,
+  studyId: string | null = null,
+  fromEventId: string | null = null,
+): string {
   const params = new URLSearchParams();
   if (referenceId) params.set('ref', referenceId);
   if (studyId) params.set('study', studyId);
+  // BIB-55: opened from an earlier thread event (an opaque id), recorded as the visit's origin.
+  if (studyId && fromEventId) params.set('from', fromEventId);
   const search = params.toString();
   return search ? `/bible?${search}` : '/bible';
 }

@@ -320,6 +320,7 @@ describe('schema (composite-key owner isolation)', () => {
       { name: 'mutation_receipt_owner_id_fkey', action: 'c' },
       { name: 'study_branch_root_node_fk', action: 'a' },
       { name: 'study_branch_study_owner_fk', action: 'c' },
+      { name: 'study_event_parent_visit_fk', action: 'a' },
       { name: 'study_event_study_owner_fk', action: 'c' },
       { name: 'study_main_question_node_fk', action: 'a' },
       { name: 'study_node_canonical_node_fk', action: 'a' },

@@ -326,6 +326,29 @@ const ROUTES: Record<string, Access> = {
       test: 'DELETE /v1/studies/:studyId/edges/:edgeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  // Study Thread (BIB-55, BIB-32): Bob's calls on Alice's study and events, absent and malformed
+  // ids, and Alice's ids inside his own study's activity.
+  'POST /v1/studies/:studyId/activity': {
+    access: 'private',
+    crossUserTest: {
+      file: 'thread.int-spec.ts',
+      test: "POST /v1/studies/:studyId/activity gives another user the same neutral 404 as an absent or malformed study, and refuses another user's node and event ids, writing nothing",
+    },
+  },
+  'GET /v1/studies/:studyId/events': {
+    access: 'private',
+    crossUserTest: {
+      file: 'thread.int-spec.ts',
+      test: "GET /v1/studies/:studyId/events lists nothing of another user's: their study is the same 404 as an absent one",
+    },
+  },
+  'GET /v1/studies/:studyId/events/:eventId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'thread.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/events/:eventId gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
   // Graph snapshot and layout (BIB-28): Bob's calls on Alice's study, absent, malformed and
   // past-window studies, and Alice's node under his own study.
   'GET /v1/studies/:studyId/graph': {

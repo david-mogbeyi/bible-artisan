@@ -62,6 +62,10 @@ export class StudyMutation {
     private readonly thread: ThreadService,
     /** True when this mutation created the study (`MutationService.create`). */
     readonly creating = false,
+    /** The request's correlation id, recorded on every event this mutation appends (BIB-55). */
+    readonly correlationId: string | null = null,
+    /** A navigation mutation (BIB-55): no revision check, never a content change. */
+    readonly navigation = false,
   ) {}
 
   get transaction(): Transaction {
@@ -173,13 +177,17 @@ export class StudyMutation {
    */
   bumpContentRevision(): void {
     this.assertWritable();
+    if (this.navigation) throw new Error('StudyMutation: navigation cannot change content');
     this.lock.bumpContentRevision();
   }
 
   /** Appends a Study Thread event for this study in this transaction; returns its sequence. */
   async appendEvent(input: AppendEventInput): Promise<AppendedEvent> {
     this.assertWritable();
-    return this.thread.appendEvent(this.lock, input);
+    return this.thread.appendEvent(this.lock, {
+      ...input,
+      correlationId: input.correlationId ?? this.correlationId,
+    });
   }
 
   /**

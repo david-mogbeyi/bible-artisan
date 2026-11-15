@@ -84,6 +84,7 @@ let passages: Map<string, Respond>;
 let resolveResponses: Respond[];
 let referenceResponses: Respond[];
 let fetchMock: ReturnType<typeof vi.fn>;
+let activityCount = 0;
 
 const envelope = (code: string, extra: Record<string, unknown> = {}) => ({
   code,
@@ -94,6 +95,7 @@ const envelope = (code: string, extra: Record<string, unknown> = {}) => ({
 });
 
 beforeEach(() => {
+  activityCount = 0;
   push.mockReset();
   replace.mockReset();
   search = '';
@@ -127,6 +129,19 @@ beforeEach(() => {
     if (path.endsWith(`/studies/${STUDY_ID}`)) return Promise.resolve(jsonResponse(200, STUDY));
     if (path.endsWith(`/studies/${STUDY_ID}/annotations`)) {
       return Promise.resolve(jsonResponse(200, { items: [] }));
+    }
+    // BIB-55: visits recorded in a study.
+    if (path.endsWith(`/studies/${STUDY_ID}/activity`)) {
+      activityCount += 1;
+      const sequence = String(activityCount);
+      return Promise.resolve(
+        jsonResponse(201, {
+          eventId: `00000000-0000-4000-8000-${sequence.padStart(12, '0')}`,
+          eventType: 'scripture_opened',
+          sequence,
+          lastEventSequence: sequence,
+        }),
+      );
     }
     const queue = path.endsWith('/bible/resolve')
       ? resolveResponses
@@ -471,5 +486,39 @@ describe('BiblePage in a study (BIB-24)', () => {
     expect(href).toBe(`/bible?ref=${PSALM_4_ID}&study=${STUDY_ID}`);
     follow(href);
     expect(await screen.findByRole('heading', { name: 'Psalms 4' })).toBeTruthy();
+  });
+
+  it('records each deliberate visit in an active study once its text loads, with its true origin and the previous visit as parent', async () => {
+    const { follow } = await renderAt(`ref=${PSALM_3_ID}&study=${STUDY_ID}`);
+    expect(await screen.findByRole('heading', { name: 'Psalms 3' })).toBeTruthy();
+    await waitFor(() => expect(bodiesTo('/activity')).toHaveLength(1));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Next chapter: Psalms 4' }));
+    const [href] = push.mock.calls.at(-1) as [string];
+    follow(href);
+    expect(await screen.findByRole('heading', { name: 'Psalms 4' })).toBeTruthy();
+    await waitFor(() => expect(bodiesTo('/activity')).toHaveLength(2));
+
+    const visit = {
+      kind: 'visit',
+      clientMutationId: expect.any(String),
+      sessionId: expect.any(String),
+      occurredAt: expect.any(String),
+    };
+    expect(bodiesTo('/activity')).toStrictEqual([
+      { ...visit, referenceId: PSALM_3_ID, origin: { kind: 'direct' }, parentVisitEventId: null },
+      {
+        ...visit,
+        referenceId: PSALM_4_ID,
+        origin: { kind: 'reader', referenceId: PSALM_3_ID },
+        parentVisitEventId: '00000000-0000-4000-8000-000000000001',
+      },
+    ]);
+  });
+
+  it('records nothing when reading outside a study', async () => {
+    await renderAt(`ref=${PSALM_3_ID}`);
+    expect(await screen.findByRole('heading', { name: 'Psalms 3' })).toBeTruthy();
+    expect(requestsTo('/activity')).toHaveLength(0);
   });
 });
