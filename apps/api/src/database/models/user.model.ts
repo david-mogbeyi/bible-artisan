@@ -28,6 +28,26 @@ export class User extends Model {
   @Column({ type: DataType.TEXT, allowNull: false, defaultValue: 'UTC' })
   declare timezone: string;
 
+  /** BIB-40: the account AI switch. True only with a recorded consent (DB CHECK). */
+  @Column({ field: 'ai_enabled', type: DataType.BOOLEAN, allowNull: false, defaultValue: false })
+  declare aiEnabled: boolean;
+
+  /** BIB-40: the consent text version the user last agreed to (`AI_CONSENT_VERSION`). */
+  @Column({ field: 'ai_consent_version', type: DataType.TEXT, allowNull: true })
+  declare aiConsentVersion: string | null;
+
+  @Column({ field: 'ai_consented_at', type: DataType.DATE, allowNull: true })
+  declare aiConsentedAt: Date | null;
+
+  /** BIB-40: revision of the account's AI settings, checked by `PUT /me/ai-consent`. */
+  @Column({
+    field: 'ai_settings_revision',
+    type: DataType.INTEGER,
+    allowNull: false,
+    defaultValue: 1,
+  })
+  declare aiSettingsRevision: number;
+
   @Column({
     field: 'created_at',
     type: DataType.DATE,

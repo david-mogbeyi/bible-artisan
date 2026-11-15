@@ -21,6 +21,6 @@ import { NotesService } from './notes.service';
   imports: [MutationModule, StudyModule, BibleContentModule],
   controllers: [NotesController, AnnotationsController],
   providers: [NotesService, NotesSearchService, AnnotationsService],
-  exports: [NotesSearchService],
+  exports: [NotesSearchService, NotesService],
 })
 export class NotesModule {}

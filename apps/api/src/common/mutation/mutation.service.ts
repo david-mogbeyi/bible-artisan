@@ -177,6 +177,24 @@ export class MutationService {
   }
 
   /**
+   * A mutation of the owner's own account, not of a study (BIB-40: `PUT /me/ai-consent`). Same
+   * transaction, receipt claim, fingerprint, replay, 422 on key reuse and COMMIT-before-reply as
+   * `execute`; there is no study lock, no StudyEvent (no study changed) and no study counter. The
+   * work locks and revision-checks its own owner-scoped row (428 / 409 as everywhere) and must not
+   * touch any study's data: anything study-scoped goes through `execute`. `ownerId` must come from
+   * the session.
+   */
+  async executeForOwner(
+    ownerId: string,
+    request: MutationRequestInfo,
+    work: (transaction: Transaction) => Promise<MutationResponse>,
+  ): Promise<MutationResult> {
+    return this.transact(ownerId, request, async (transaction) =>
+      normalized(await work(transaction)),
+    );
+  }
+
+  /**
    * Step 1 and the end of every mutation: one READ COMMITTED transaction, the receipt claimed
    * first (or the committed response replayed), and the response stored on the receipt before
    * COMMIT. `run` does everything in between.
@@ -349,7 +367,10 @@ async function runWork(
   work: StudyMutationSpec['work'],
   mutation: StudyMutation,
 ): Promise<MutationResponse> {
-  const { status, body } = await work(mutation);
+  return normalized(await work(mutation));
+}
+
+function normalized({ status, body }: MutationResponse): MutationResponse {
   if (!Number.isInteger(status) || status < 200 || status > 299) {
     throw new Error('MutationService: work must return a 2xx status');
   }

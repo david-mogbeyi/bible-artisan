@@ -381,6 +381,50 @@ const ROUTES: Record<string, Access> = {
       test: "PATCH /v1/studies/:studyId/branches/:branchId/members gives another user the same neutral 404 as an absent or malformed id, and never moves another user's node into a branch, writing nothing",
     },
   },
+  // AI consent (BIB-40): the session's own account only; another user's consent never moves.
+  'GET /v1/me/ai-consent': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-jobs.int-spec.ts',
+      test: 'GET /v1/me/ai-consent and PUT /v1/me/ai-consent touch only the signed-in user',
+    },
+  },
+  'PUT /v1/me/ai-consent': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-jobs.int-spec.ts',
+      test: 'GET /v1/me/ai-consent and PUT /v1/me/ai-consent touch only the signed-in user',
+    },
+  },
+  // Study AI switch, requests and jobs (BIB-39/40): Bob's calls on Alice's study and job.
+  'GET /v1/studies/:studyId/ai/settings': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-jobs.int-spec.ts',
+      test: "gives another user the same 404 on a study's AI settings, requests and jobs, writing nothing",
+    },
+  },
+  'PUT /v1/studies/:studyId/ai/settings': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-jobs.int-spec.ts',
+      test: "gives another user the same 404 on a study's AI settings, requests and jobs, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/summary': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-jobs.int-spec.ts',
+      test: "gives another user the same 404 on a study's AI settings, requests and jobs, writing nothing",
+    },
+  },
+  'GET /v1/studies/:studyId/ai/jobs/:jobId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-jobs.int-spec.ts',
+      test: "gives another user the same 404 on a study's AI settings, requests and jobs, writing nothing",
+    },
+  },
 };
 
 /** Test-only private routes mounted by the probe modules (never by AppModule). */

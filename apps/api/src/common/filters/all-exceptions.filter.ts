@@ -4,6 +4,9 @@ import type { ErrorEnvelope } from '@bible-artisan/contracts';
 import { STATUS_CODES } from 'node:http';
 import { ConnectionError, TimeoutError } from 'sequelize';
 import {
+  AiQuotaError,
+  AiRuleError,
+  AiUnavailableError,
   AnchorInvalidError,
   AnnotationRuleError,
   BranchRuleError,
@@ -162,7 +165,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof AnnotationRuleError ||
       exception instanceof NodeRuleError ||
       exception instanceof EdgeRuleError ||
-      exception instanceof BranchRuleError
+      exception instanceof BranchRuleError ||
+      exception instanceof AiRuleError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,
@@ -197,6 +201,31 @@ export class AllExceptionsFilter implements ExceptionFilter {
           correlationId,
         },
         retryAfterSeconds: exception.retryAfterSeconds,
+      };
+    }
+
+    if (exception instanceof AiQuotaError) {
+      return {
+        status: HttpStatus.TOO_MANY_REQUESTS,
+        envelope: {
+          code: exception.code,
+          message: exception.message,
+          retryable: true,
+          correlationId,
+        },
+        retryAfterSeconds: exception.retryAfterSeconds,
+      };
+    }
+
+    if (exception instanceof AiUnavailableError) {
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        envelope: {
+          code: exception.code,
+          message: exception.message,
+          retryable: false,
+          correlationId,
+        },
       };
     }
 

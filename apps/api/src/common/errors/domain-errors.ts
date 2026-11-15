@@ -1,4 +1,9 @@
 import {
+  AI_ERROR_MESSAGES,
+  type AI_QUOTA_EXCEEDED,
+  type AI_SPEND_CAP_REACHED,
+  AI_UNAVAILABLE,
+  type AiRuleErrorCode,
   type AnchorProblemCode,
   ANNOTATION_LIMIT_EXCEEDED,
   ANNOTATION_UNCHANGED,
@@ -368,5 +373,39 @@ export class BranchRuleError extends Error {
   constructor(readonly code: BranchErrorCode) {
     super(BRANCH_ERROR_MESSAGES[code]);
     this.name = 'BranchRuleError';
+  }
+}
+
+/**
+ * An AI request the account's or study's AI state cannot run (BIB-39/40; PRD section 24: 422): no
+ * consent to the current terms, or AI turned off for the study. Fixed messages.
+ */
+export class AiRuleError extends Error {
+  constructor(readonly code: AiRuleErrorCode) {
+    super(AI_ERROR_MESSAGES[code]);
+    this.name = 'AiRuleError';
+  }
+}
+
+/**
+ * AI is not available in this deployment: no approved provider (PRD sections 24, 38: 503, not
+ * retryable, since waiting will not help until the deployment changes).
+ */
+export class AiUnavailableError extends Error {
+  readonly code = AI_UNAVAILABLE;
+  constructor() {
+    super(AI_ERROR_MESSAGES[AI_UNAVAILABLE]);
+    this.name = 'AiUnavailableError';
+  }
+}
+
+/** An AI request limit or the spend cap was reached (PRD section 25: 429 with Retry-After). */
+export class AiQuotaError extends Error {
+  constructor(
+    readonly code: typeof AI_QUOTA_EXCEEDED | typeof AI_SPEND_CAP_REACHED,
+    readonly retryAfterSeconds: number,
+  ) {
+    super(AI_ERROR_MESSAGES[code]);
+    this.name = 'AiQuotaError';
   }
 }
