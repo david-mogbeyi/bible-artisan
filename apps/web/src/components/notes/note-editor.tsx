@@ -11,6 +11,7 @@ import {
   type NoteConflictResolution,
   noteNodeMentions,
   notePlainText,
+  type MeResponse,
   type NoteResponse,
   STUDY_ARCHIVED,
 } from '@bible-artisan/contracts';
@@ -37,6 +38,7 @@ import {
   useState,
 } from 'react';
 import { ApiError } from '@/lib/api-client';
+import { ME_QUERY_KEY } from '@/lib/auth';
 import { classifyError, REFERENCE_ERROR_COPY } from '@/lib/api-errors';
 import {
   bibleHref,
@@ -53,6 +55,7 @@ import {
   saveNote,
 } from '@/lib/notes';
 import { useNoteTabs } from '@/lib/note-tabs';
+import { claimNote, downloadDrafts, dropQueuedNote, queueNoteSave } from '@/lib/offline-queue';
 import { invalidateLibrary } from '@/lib/studies';
 import { MAKE_NODE_COPY, MakeNodeForm } from './make-node-form';
 import { MENTION_COPY, MentionNodeForm } from './mention-node-form';
@@ -72,6 +75,8 @@ export const SAVE_COPY = {
   failed: "Couldn't save. Your text is still here, and Retry won't save it twice.",
   waiting:
     "Waiting to sync: you're offline. Your text is still here and saves when you're back online.",
+  queueFull:
+    "Waiting to sync, and this browser can't keep any more offline edits, so editing is paused until you're back online. Your text is still here; download it to keep a copy.",
   signedOut:
     'Your session expired, so this edit was not saved. Your text is still here. Sign in again in another tab, then come back or choose Retry.',
   conflict:
@@ -121,6 +126,8 @@ function stateText(state: SaveState): string {
       return SAVE_COPY.failed;
     case 'waiting':
       return SAVE_COPY.waiting;
+    case 'queue_full':
+      return SAVE_COPY.queueFull;
     case 'signed_out':
       return SAVE_COPY.signedOut;
     case 'conflict':
@@ -473,8 +480,21 @@ export function NoteEditor({
           // Other tabs with this note open refetch it (ids and revision only).
           announceSaved.current(saved.revision);
         },
+        // Offline, unacknowledged work goes to the bounded offline queue (BIB-36), under the
+        // signed-in account; without an account (never here) it stays in memory.
+        persist: async (snapshot) => {
+          if (snapshot === null) {
+            await dropQueuedNote(note.id);
+            return 'queued';
+          }
+          const accountId = queryClient.getQueryData<MeResponse>(ME_QUERY_KEY)?.id;
+          if (!accountId) return 'unavailable';
+          return queueNoteSave({ accountId, studyId, noteId: note.id, ...snapshot });
+        },
       }),
   );
+  // This tab's editor owns the note's offline entry while open: background replay skips it.
+  useEffect(() => claimNote(note.id), [note.id]);
 
   // Options built once: a render never reconfigures the editor.
   const [initialContent] = useState(note.content);
@@ -579,7 +599,8 @@ export function NoteEditor({
   const stopped = state.kind === 'conflict' || state.kind === 'locked' || state.kind === 'gone';
   // Read-only once the study or note is locked or gone (the draft stays visible). No update
   // event: making the editor read-only is not an edit, and must not reach autosave.
-  const writable = !stopped || state.kind === 'conflict';
+  // A full offline queue pauses editing too (FR-SAVE-004), with the draft offered as a download.
+  const writable = (!stopped || state.kind === 'conflict') && state.kind !== 'queue_full';
   useEffect(() => {
     if (editor && editor.isEditable !== writable) editor.setEditable(writable, false);
   }, [editor, writable]);
@@ -609,6 +630,20 @@ export function NoteEditor({
   }
 
   useImperativeHandle(handle, () => ({ close }));
+
+  /** Saves the editor's text as a file (a full offline queue can't keep it; FR-SAVE-004). */
+  function downloadDraft() {
+    if (!editor) return;
+    const draft = toNoteDraft(editor.getJSON());
+    downloadDrafts([
+      {
+        studyId,
+        noteId: note.id,
+        text: editor.getText({ blockSeparator: '\n' }),
+        content: draft.ok ? draft.doc : editor.getJSON(),
+      },
+    ]);
+  }
 
   /** Explicitly leaves without saving (offered only once a close was refused). */
   function discardAndClose() {
@@ -1047,6 +1082,11 @@ export function NoteEditor({
         {state.kind === 'locked' ? (
           <button type="button" onClick={onReloadStudy} className="text-accent underline">
             Reload
+          </button>
+        ) : null}
+        {state.kind === 'queue_full' ? (
+          <button type="button" onClick={downloadDraft} className="text-accent underline">
+            Download draft
           </button>
         ) : null}
       </div>

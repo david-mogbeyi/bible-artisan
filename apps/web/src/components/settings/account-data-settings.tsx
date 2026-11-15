@@ -70,10 +70,10 @@ function DeleteAccount({ me }: { me: MeResponse }) {
   const remove = useMutation({
     mutationFn: (input: { challengeId: string; code: string }) =>
       deleteAccount(input.challengeId, input.code),
-    onSuccess: () => {
-      // Nothing private stays in this browser (PRD section 29).
+    onSuccess: async () => {
+      // Nothing private stays in this browser (PRD section 29), the offline queue included.
       queryClient.clear();
-      clearLocalAccountData();
+      await clearLocalAccountData();
       router.replace('/sign-in');
     },
   });

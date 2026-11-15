@@ -1,3 +1,4 @@
+import 'fake-indexeddb/auto';
 import {
   EMPTY_NOTE_DOCUMENT,
   type NoteDocument,
@@ -6,10 +7,17 @@ import {
 } from '@bible-artisan/contracts';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { Editor } from '@tiptap/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from 'vitest';
 import { noteQueryKey } from '@/lib/notes';
+import {
+  clearOfflineQueue,
+  listQueued,
+  OFFLINE_QUEUE_MAX_PER_STUDY,
+  queueNoteSave,
+} from '@/lib/offline-queue';
 import { TRANSLATION } from '@/test/bible-fixtures';
 import { studyQueryKey } from '@/lib/studies';
+import { captureDownloads } from '@/test/downloads';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { INVALID_COPY, SAVE_COPY } from './note-editor';
 import { NOTES_COPY, NotesPanel } from './notes-panel';
@@ -1299,5 +1307,87 @@ describe('Mentioning study nodes in a note (BIB-58)', () => {
     );
     expect(within(content).queryByRole('link', { name: /Gone one/ })).toBeNull();
     expect(textOf(content)).toContain('Gone one (deleted node)');
+  });
+});
+
+describe('NotesPanel offline queue (BIB-36)', () => {
+  const ME = {
+    id: '0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60',
+    email: 'reader@example.test',
+    displayName: null,
+    timezone: 'UTC',
+  };
+  let online: MockInstance<() => boolean>;
+  beforeEach(async () => {
+    await clearOfflineQueue();
+    online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+  });
+  afterEach(() => {
+    online.mockRestore();
+    vi.restoreAllMocks();
+  });
+
+  async function openNoteOffline() {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    const { queryClient } = renderPanel();
+    queryClient.setQueryData(['me'], ME);
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const editor = await noteEditor();
+    online.mockReturnValue(false);
+    return editor;
+  }
+
+  it('queues an offline edit saying Waiting to sync, and sends exactly one PATCH once back online', async () => {
+    const editor = await openNoteOffline();
+    typeText(editor, 'Written on the train');
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.waiting), {
+      timeout: 2000,
+    });
+    await waitFor(async () => expect(await listQueued(ME.id)).toHaveLength(1));
+    const [queued] = await listQueued(ME.id);
+    expect([queued?.draft, queued?.attempt, queued?.revision]).toStrictEqual([
+      doc('Written on the train'),
+      null,
+      1,
+    ]);
+    expect(requests.filter((r) => r.method === 'PATCH')).toHaveLength(0);
+
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation({ revision: 2 })));
+    online.mockReturnValue(true);
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
+    expect(
+      requests.filter((r) => r.method === 'PATCH').map((r) => [r.body, typeof r.key]),
+    ).toStrictEqual([[{ expectedRevision: 1, content: doc('Written on the train') }, 'string']]);
+    await waitFor(async () => expect(await listQueued(ME.id)).toStrictEqual([]));
+  });
+
+  it('blocks editing and offers the draft as a download when the local queue is full', async () => {
+    for (let n = 1; n <= OFFLINE_QUEUE_MAX_PER_STUDY; n += 1) {
+      await queueNoteSave({
+        accountId: ME.id,
+        studyId: STUDY_ID,
+        noteId: `eeeeeeee-2222-4333-8444-${String(n).padStart(12, '0')}`,
+        revision: 1,
+        attempt: null,
+        draft: doc(`other ${n}`),
+      });
+    }
+    const editor = await openNoteOffline();
+    typeText(editor, 'No room for this');
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.queueFull), {
+      timeout: 2000,
+    });
+    expect(screen.getByRole('textbox', { name: 'Note text' }).getAttribute('contenteditable')).toBe(
+      'false',
+    );
+    expect(editor.getText()).toBe('No room for this');
+    const created = captureDownloads();
+    fireEvent.click(screen.getByRole('button', { name: 'Download draft' }));
+    const file = JSON.parse(await created[0]!.text()) as { drafts: { text: string }[] };
+    expect(file.drafts.map((d) => d.text)).toStrictEqual(['No room for this']);
   });
 });
