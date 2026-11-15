@@ -570,10 +570,10 @@ export class NodesService {
    * node's. Under the study lock, in order: 404 (absent or foreign), 409, 422 `NODE_NOT_DELETED`,
    * 422 `NODE_LIMIT_EXCEEDED`; then the node comes back. A Scripture node whose passage has a live
    * canonical node returns as its duplicate (rows naming it are re-pointed first), otherwise as the
-   * canonical node. Each edge its deletion removed, oldest first, is restored under the same id when
-   * the other end is live, no identical live edge exists and the edge cap has room; otherwise it
-   * stays deleted (`endpoint_deleted` hands `deleted_with_node_id` to the other end, so restoring
-   * that one brings it back). An established conclusion left without live support loses its marker.
+   * canonical node. Each edge its deletion removed (the latest deletion's first, then oldest first;
+   * see `restoreEdges`) is restored under the same id when the other end is live, no identical
+   * live edge exists and the edge cap has room; otherwise it stays deleted (`endpoint_deleted`
+   * hands `deleted_with_node_id` to the other end, so restoring that one brings it back). An established conclusion left without live support loses its marker.
    * Never changes a status, a marker (except that clearing), the main question or branches.
    */
   async restore(
@@ -1314,11 +1314,13 @@ async function restoredCanonical(m: StudyMutation, node: StudyNode): Promise<str
 }
 
 /**
- * BIB-31: brings back the edges `nodeId`'s deletion removed (now that it is live again), oldest
- * first, under their own ids, each with its new revision. Each one is restored, or stays deleted
- * with a reason: `endpoint_deleted` (the other end is deleted; `deleted_with_node_id` is handed to
- * it so its own restore brings the edge back), `duplicate` (an identical live edge exists: the
- * user's newer edge wins) or `limit` (the study's edge cap). A `duplicate` or `limit` edge is left
+ * BIB-31: brings back the edges `nodeId`'s deletion removed (now that it is live again) under their
+ * own ids, each with its new revision. The most recently removed come first (one delete's edges
+ * share its `deleted_at`), then oldest first: an edge a previous restore skipped is retried only
+ * after the ones live just before this delete, so it never takes their place at the cap. Each one
+ * is restored, or stays deleted with a reason: `endpoint_deleted` (the other end is deleted;
+ * `deleted_with_node_id` is handed to it so its own restore brings the edge back), `duplicate` (an
+ * identical live edge exists: the user's newer edge wins) or `limit` (the study's edge cap). A `duplicate` or `limit` edge is left
  * untouched, still naming `nodeId`, so nothing becomes unreachable: the edge restore route brings it
  * back once the twin is gone or there is room, and the node's next delete and restore retries it.
  */
@@ -1327,6 +1329,7 @@ async function restoreEdges(m: StudyMutation, nodeId: string) {
   const edges = await StudyEdge.findAll({
     where: { ...scope, deletedWithNodeId: nodeId },
     order: [
+      ['deletedAt', 'DESC'],
       ['createdAt', 'ASC'],
       ['id', 'ASC'],
     ],
