@@ -447,7 +447,6 @@ function EditRelationship({
           action: {
             op: 'editEdge',
             edgeId: edge.id,
-            sourceNodeId: edge.sourceNodeId,
             body: { type, note: note.trim() ? note : null },
             inverse: { type: base.type, note: base.note },
           },
@@ -580,7 +579,7 @@ function RemoveRelationship({
       record(
         {
           label: 'Remove relationship',
-          action: { op: 'restoreEdge', edgeId: edge.id, sourceNodeId: edge.sourceNodeId },
+          action: { op: 'restoreEdge', edgeId: edge.id },
         },
         { [edgeKey(edge.id)]: result.value.revision },
       );

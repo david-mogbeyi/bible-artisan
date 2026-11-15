@@ -211,7 +211,7 @@ export function ConnectDialog({
         record(
           {
             label: 'Connect nodes',
-            action: { op: 'removeEdge', edgeId: edge.id, sourceNodeId: edge.sourceNodeId },
+            action: { op: 'removeEdge', edgeId: edge.id },
           },
           { [edgeKey(edge.id)]: edge.revision },
         );

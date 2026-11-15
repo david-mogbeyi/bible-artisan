@@ -33,7 +33,7 @@ import {
   updateNode,
 } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
-import { FORGET_EDGES, nodeCommandLabel, nodeKey, useUndoRecorder } from '@/lib/undo';
+import { nodeCommandLabel, nodeDeleteRevisions, nodeKey, useUndoRecorder } from '@/lib/undo';
 import {
   codeOf,
   isLifecycle,
@@ -387,7 +387,7 @@ export function DeleteNodeButton({
           label: nodeCommandLabel('Delete', node.type),
           action: { op: 'restoreNode', nodeId: node.id },
         },
-        { [nodeKey(node.id)]: result.value.revision, [FORGET_EDGES]: null },
+        nodeDeleteRevisions(result.value),
       );
       onDeleted(result.value, node.type, label);
       return;

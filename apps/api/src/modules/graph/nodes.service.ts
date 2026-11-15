@@ -27,6 +27,7 @@ import {
   QUESTION_STATUSES,
   type QuestionStatus,
   type ScriptureReference,
+  type EdgeRevision,
   type SkippedEdgeReason,
   type Source,
   type SourceCitation,
@@ -549,6 +550,11 @@ export class NodesService {
           type: deleted.type,
           revision: deleted.revision,
           removedEdgeCount: removed.length,
+          removedEdges: removed
+            .sort(
+              (a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id),
+            )
+            .map((edge) => ({ edgeId: edge.id, revision: edge.revision })),
           promotedCanonicalNodeId,
           mainQuestionCleared,
           establishmentClearedNodeIds: released.clearedNodeIds,
@@ -599,7 +605,8 @@ export class NodesService {
           expectedRevision,
           values: { deletedAt: null, canonicalNodeId },
         });
-        const { restoredEdgeIds, skippedEdges } = await restoreEdges(m, current.id);
+        const { restoredEdges, skippedEdges } = await restoreEdges(m, current.id);
+        const restoredEdgeIds = restoredEdges.map((edge) => edge.edgeId);
         const event = await m.appendEvent({
           eventType: NODE_EVENTS.restored,
           payload: {
@@ -625,6 +632,7 @@ export class NodesService {
           }),
           canonicalNodeId,
           restoredEdgeIds,
+          restoredEdges,
           skippedEdges,
           establishmentClearedNodeIds: released.clearedNodeIds,
         };
@@ -1307,10 +1315,12 @@ async function restoredCanonical(m: StudyMutation, node: StudyNode): Promise<str
 
 /**
  * BIB-31: brings back the edges `nodeId`'s deletion removed (now that it is live again), oldest
- * first, under their own ids. Each one is restored, or stays deleted with a reason:
- * `endpoint_deleted` (the other end is deleted; `deleted_with_node_id` is handed to it so its own
- * restore brings the edge back), `duplicate` (an identical live edge exists: the user's newer edge
- * wins) or `limit` (the study's edge cap).
+ * first, under their own ids, each with its new revision. Each one is restored, or stays deleted
+ * with a reason: `endpoint_deleted` (the other end is deleted; `deleted_with_node_id` is handed to
+ * it so its own restore brings the edge back), `duplicate` (an identical live edge exists: the
+ * user's newer edge wins) or `limit` (the study's edge cap). A `duplicate` or `limit` edge is left
+ * untouched, still naming `nodeId`, so nothing becomes unreachable: the edge restore route brings it
+ * back once the twin is gone or there is room, and the node's next delete and restore retries it.
  */
 async function restoreEdges(m: StudyMutation, nodeId: string) {
   const scope = { studyId: m.studyId, ownerId: m.ownerId };
@@ -1321,9 +1331,18 @@ async function restoreEdges(m: StudyMutation, nodeId: string) {
       ['id', 'ASC'],
     ],
   });
-  const restoredEdgeIds: string[] = [];
-  const skippedEdges: { edgeId: string; reason: SkippedEdgeReason }[] = [];
-  if (edges.length === 0) return { restoredEdgeIds, skippedEdges };
+  const restoredEdges: EdgeRevision[] = [];
+  const skippedEdges: NodeRestoreResponse['skippedEdges'] = [];
+  const skipped = (edge: StudyEdge, revision: number, reason: SkippedEdgeReason) =>
+    skippedEdges.push({
+      edgeId: edge.id,
+      revision,
+      reason,
+      sourceNodeId: edge.sourceNodeId,
+      targetNodeId: edge.targetNodeId,
+      type: edge.type,
+    });
+  if (edges.length === 0) return { restoredEdges, skippedEdges };
   const otherIds = edges.map((e) => (e.sourceNodeId === nodeId ? e.targetNodeId : e.sourceNodeId));
   const liveOthers = new Set(
     (
@@ -1352,20 +1371,25 @@ async function restoreEdges(m: StudyMutation, nodeId: string) {
       if (twin) reason = 'duplicate';
       else if (liveEdges >= MAX_EDGES_PER_STUDY) reason = 'limit';
     }
+    if (reason === 'duplicate' || reason === 'limit') {
+      skipped(edge, edge.revision, reason);
+      continue;
+    }
     const values =
       reason === null
         ? { deletedAt: null, deletedWithNodeId: null }
-        : { deletedWithNodeId: reason === 'endpoint_deleted' ? otherId : null };
-    await StudyEdge.update(
+        : { deletedWithNodeId: otherId };
+    const [, [updated]] = await StudyEdge.update(
       { ...values, revision: NEXT_REVISION },
-      { where: { ...scope, id: edge.id } },
+      { where: { ...scope, id: edge.id }, returning: true },
     );
+    const revision = (updated as StudyEdge).revision;
     if (reason === null) {
-      restoredEdgeIds.push(edge.id);
+      restoredEdges.push({ edgeId: edge.id, revision });
       liveEdges += 1;
-    } else skippedEdges.push({ edgeId: edge.id, reason });
+    } else skipped(edge, revision, reason);
   }
-  return { restoredEdgeIds, skippedEdges };
+  return { restoredEdges, skippedEdges };
 }
 
 /**

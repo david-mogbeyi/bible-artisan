@@ -9,6 +9,7 @@ import { invalidateLibrary } from '@/lib/studies';
 import {
   inverseOf,
   performUndoAction,
+  UndoRevisionUnknownError,
   UndoTargetGoneError,
   useUndo,
   useUndoStore,
@@ -19,6 +20,8 @@ export const UNDO_COPY = {
   redid: (label: string) => `Redid: ${label}.`,
   conflict: (label: string) =>
     `“${label}” can’t be undone here: it changed somewhere else since. Nothing was overwritten. Check it and change it by hand if you still want to.`,
+  untracked: (label: string) =>
+    `“${label}” can’t be undone here: this tab lost track of its version. Nothing was changed or overwritten. Check it and change it by hand if you still want to.`,
   gone: (label: string) => `“${label}” can’t be reversed: it is no longer there.`,
   refused: (label: string) => `“${label}” can’t be reversed now, so nothing changed.`,
   locked: 'This study is archived or in the trash, so nothing can be undone.',
@@ -65,7 +68,11 @@ export function UndoControls({ studyId, editable }: { studyId: string; editable:
         invalidateLibrary(queryClient),
       ]);
     } catch (error) {
-      if (!(error instanceof UndoTargetGoneError) && isRetryable(classifyError(error))) {
+      if (
+        !(error instanceof UndoTargetGoneError) &&
+        !(error instanceof UndoRevisionUnknownError) &&
+        isRetryable(classifyError(error))
+      ) {
         store.getState().keepKey(from, key);
         setOutcome({ text: UNDO_COPY.unknown, alert: true });
         return;
@@ -107,6 +114,7 @@ export function UndoControls({ studyId, editable }: { studyId: string; editable:
 
 function refusalText(error: unknown, label: string): string {
   if (error instanceof UndoTargetGoneError) return UNDO_COPY.gone(label);
+  if (error instanceof UndoRevisionUnknownError) return UNDO_COPY.untracked(label);
   if (!(error instanceof ApiError)) return UNDO_COPY.refused(label);
   if (error.status === 409) return UNDO_COPY.conflict(label);
   if (error.status === 404) return UNDO_COPY.gone(label);

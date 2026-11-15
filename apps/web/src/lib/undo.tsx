@@ -3,12 +3,14 @@
 import {
   type EdgeType,
   NODE_TYPE_NAMES,
+  type NodeDeleteResponse,
+  type NodeRestoreResponse,
   type StudyNodeType,
   type UpdateNodeRequest,
 } from '@bible-artisan/contracts';
 import { createContext, type ReactNode, useContext, useState } from 'react';
 import { createStore, type StoreApi, useStore } from 'zustand';
-import { deleteEdge, listEdges, restoreEdge, updateEdge } from './edges';
+import { deleteEdge, restoreEdge, updateEdge } from './edges';
 import { deleteNode, restoreNode, updateNode } from './nodes';
 
 /**
@@ -33,14 +35,14 @@ export interface EdgeEdit {
   note?: string | null;
 }
 
-/** One compensating (or re-applying) mutation. `sourceNodeId` finds a live edge's revision. */
+/** One compensating (or re-applying) mutation. */
 export type UndoAction =
   | { op: 'deleteNode'; nodeId: string }
   | { op: 'restoreNode'; nodeId: string }
   | { op: 'editNode'; nodeId: string; body: NodeEdit; inverse: NodeEdit }
-  | { op: 'removeEdge'; edgeId: string; sourceNodeId: string }
-  | { op: 'restoreEdge'; edgeId: string; sourceNodeId: string }
-  | { op: 'editEdge'; edgeId: string; sourceNodeId: string; body: EdgeEdit; inverse: EdgeEdit };
+  | { op: 'removeEdge'; edgeId: string }
+  | { op: 'restoreEdge'; edgeId: string }
+  | { op: 'editEdge'; edgeId: string; body: EdgeEdit; inverse: EdgeEdit };
 
 export interface UndoEntry {
   /** What the original command did, in fixed words: "Add observation". */
@@ -61,9 +63,9 @@ export function inverseOf(action: UndoAction): UndoAction {
     case 'editNode':
       return { ...action, body: action.inverse, inverse: action.body };
     case 'removeEdge':
-      return { op: 'restoreEdge', edgeId: action.edgeId, sourceNodeId: action.sourceNodeId };
+      return { op: 'restoreEdge', edgeId: action.edgeId };
     case 'restoreEdge':
-      return { op: 'removeEdge', edgeId: action.edgeId, sourceNodeId: action.sourceNodeId };
+      return { op: 'removeEdge', edgeId: action.edgeId };
     case 'editEdge':
       return { ...action, body: action.inverse, inverse: action.body };
   }
@@ -76,11 +78,25 @@ export const edgeKey = (id: string) => `edge:${id}`;
 export type RevisionUpdates = Record<string, number | null>;
 
 /**
- * A node's deletion or restore moves the revision of every live edge touching it without naming
- * them, so every edge revision this tab knows is forgotten: an edge action then reads the live
- * edge's revision instead (`liveEdgeRevision`).
+ * A node's deletion or restore also moves the revision of every relationship it removed, restored
+ * or handed on; the response names each one with its new revision, so this tab keeps tracking them
+ * (an undo of a relationship change then sends that revision, and a change made elsewhere is a 409).
  */
-export const FORGET_EDGES = '*edges';
+export function nodeDeleteRevisions(result: NodeDeleteResponse): RevisionUpdates {
+  return {
+    [nodeKey(result.id)]: result.revision,
+    ...Object.fromEntries(result.removedEdges.map((e) => [edgeKey(e.edgeId), e.revision])),
+  };
+}
+
+export function nodeRestoreRevisions(result: NodeRestoreResponse): RevisionUpdates {
+  return {
+    [nodeKey(result.id)]: result.revision,
+    ...Object.fromEntries(
+      [...result.restoredEdges, ...result.skippedEdges].map((e) => [edgeKey(e.edgeId), e.revision]),
+    ),
+  };
+}
 
 export interface UndoState {
   undo: UndoEntry[];
@@ -98,12 +114,8 @@ export interface UndoState {
 }
 
 function applyRevisions(current: Record<string, number>, updates: RevisionUpdates) {
-  const next =
-    updates[FORGET_EDGES] !== undefined
-      ? Object.fromEntries(Object.entries(current).filter(([k]) => !k.startsWith('edge:')))
-      : { ...current };
+  const next = { ...current };
   for (const [key, value] of Object.entries(updates)) {
-    if (key === FORGET_EDGES) continue;
     if (value === null) delete next[key];
     else next[key] = value;
   }
@@ -182,16 +194,20 @@ export class UndoTargetGoneError extends Error {
   }
 }
 
-async function liveEdgeRevision(studyId: string, sourceNodeId: string, edgeId: string) {
-  const { items } = await listEdges(studyId, sourceNodeId);
-  const edge = items.find((item) => item.id === edgeId);
-  if (!edge) throw new UndoTargetGoneError();
-  return edge.revision;
+/**
+ * Thrown when this tab doesn't know the revision of the entity to act on. The undo is refused
+ * rather than sent with the live revision, which would overwrite a change made in another tab.
+ */
+export class UndoRevisionUnknownError extends Error {
+  constructor() {
+    super('undo revision unknown');
+    this.name = 'UndoRevisionUnknownError';
+  }
 }
 
 /**
- * Sends one action with the revision this tab knows (or, for a live edge whose revision was
- * forgotten, the live one) and returns the revisions it acknowledged.
+ * Sends one action with the revision this tab acknowledged (never the live one, so a change made
+ * elsewhere since is a 409) and returns the revisions it acknowledged.
  */
 export async function performUndoAction(
   studyId: string,
@@ -205,9 +221,14 @@ export async function performUndoAction(
     case 'restoreNode': {
       const expectedRevision = known(nodeKey(action.nodeId));
       if (expectedRevision === undefined) throw new UndoTargetGoneError();
-      const send = action.op === 'deleteNode' ? deleteNode : restoreNode;
-      const result = await send(studyId, action.nodeId, { expectedRevision }, key);
-      return { [nodeKey(action.nodeId)]: result.revision, [FORGET_EDGES]: null };
+      if (action.op === 'deleteNode') {
+        return nodeDeleteRevisions(
+          await deleteNode(studyId, action.nodeId, { expectedRevision }, key),
+        );
+      }
+      return nodeRestoreRevisions(
+        await restoreNode(studyId, action.nodeId, { expectedRevision }, key),
+      );
     }
     case 'editNode': {
       const expectedRevision = known(nodeKey(action.nodeId));
@@ -228,9 +249,8 @@ export async function performUndoAction(
     }
     case 'removeEdge':
     case 'editEdge': {
-      const expectedRevision =
-        known(edgeKey(action.edgeId)) ??
-        (await liveEdgeRevision(studyId, action.sourceNodeId, action.edgeId));
+      const expectedRevision = known(edgeKey(action.edgeId));
+      if (expectedRevision === undefined) throw new UndoRevisionUnknownError();
       const result =
         action.op === 'removeEdge'
           ? await deleteEdge(studyId, action.edgeId, { expectedRevision }, key)

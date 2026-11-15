@@ -486,6 +486,14 @@ export const nodeStateRequestSchema = z.strictObject({ expectedRevision: expecte
 
 export type NodeStateRequest = z.input<typeof nodeStateRequestSchema>;
 
+/** A relationship a node delete or restore changed, with its new revision (for undo, BIB-63). */
+export const edgeRevisionSchema = z.object({
+  edgeId: z.uuid(),
+  revision: z.number().int().positive(),
+});
+
+export type EdgeRevision = z.infer<typeof edgeRevisionSchema>;
+
 /** 200 from a node delete: what the deletion did, ids and counts only (stored on the receipt). */
 export const nodeDeleteResponseSchema = z.object({
   id: z.uuid(),
@@ -493,6 +501,8 @@ export const nodeDeleteResponseSchema = z.object({
   type: z.enum(STUDY_NODE_TYPES),
   revision: z.number().int().positive(),
   removedEdgeCount: z.number().int().nonnegative(),
+  /** Each relationship the deletion removed, with its new revision. */
+  removedEdges: z.array(edgeRevisionSchema),
   /** The duplicate that became the passage's canonical node, when the deleted node was it. */
   promotedCanonicalNodeId: z.uuid().nullable(),
   mainQuestionCleared: z.boolean(),
@@ -512,7 +522,21 @@ export const nodeRestoreResponseSchema = nodeMutationResponseSchema.extend({
   /** The live canonical node it was restored as a duplicate of, else null. */
   canonicalNodeId: z.uuid().nullable(),
   restoredEdgeIds: z.array(z.uuid()),
-  skippedEdges: z.array(z.object({ edgeId: z.uuid(), reason: z.enum(SKIPPED_EDGE_REASONS) })),
+  /** `restoredEdgeIds` with each relationship's new revision. */
+  restoredEdges: z.array(edgeRevisionSchema),
+  /**
+   * Each relationship that stayed deleted, with its reason and current revision. A `duplicate` or
+   * `limit` one stays recoverable: `POST /edges/:edgeId/restore` brings it back once the identical
+   * live relationship is removed or there is room, and the node's next delete and restore retries it.
+   */
+  skippedEdges: z.array(
+    edgeRevisionSchema.extend({
+      reason: z.enum(SKIPPED_EDGE_REASONS),
+      sourceNodeId: z.uuid(),
+      targetNodeId: z.uuid(),
+      type: z.enum(EDGE_TYPES),
+    }),
+  ),
   establishmentClearedNodeIds: z.array(z.uuid()),
 });
 
