@@ -61,10 +61,11 @@ packages/contracts  Zod DTO schemas + inferred types shared by API and web. No D
 
 Two repository skills live in `.agents/skills/` (canonical, tool-agnostic). The Claude Code slash commands in `.claude/commands/` are thin wrappers:
 
-| Step     | Claude Code                   | Codex                     | What it does                                                                                                                                   |
-| -------- | ----------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Groom | `/bib-prepare BIB-10`         | `$prepare BIB-10`         | Rewrites the Linear ticket so it's implementation-ready: scope, out-of-scope, reuse, contract, UI states, tests, ACs. Never writes code.       |
-| 2. Build | `/bib-do-ticket <linear url>` | `$do-ticket <linear url>` | Plans, branches (Linear's `gitBranchName`), implements, runs local checks, commits, opens the PR, moves the ticket to In Review. Never merges. |
+| Step           | Claude Code                             | Codex                               | What it does                                                                                                                                              |
+| -------------- | --------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Groom       | `/bib-prepare BIB-10`                   | `$prepare BIB-10`                   | Rewrites the Linear ticket so it's implementation-ready: scope, out-of-scope, reuse, contract, UI states, tests, ACs. Never writes code.                  |
+| 2. Build       | `/bib-do-ticket <linear url>`           | `$do-ticket <linear url>`           | Plans, branches (Linear's `gitBranchName`), implements, runs local checks, commits, opens the PR, moves the ticket to In Review. Never merges.            |
+| 2b. Build fast | `/bib-do-ticket-fast BIB-a [BIB-b ...]` | `$do-ticket-fast BIB-a [BIB-b ...]` | Lean build: one PR for one ticket or a small batch, proportionate tests, merges on green CI. Non-negotiable rules still apply; a per-epic review follows. |
 
 The Claude commands are prefixed `bib-` because a user-level `do-ticket` skill (the chop-awoof one) would otherwise shadow a project skill with the same name.
 
