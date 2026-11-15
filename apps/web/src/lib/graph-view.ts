@@ -543,7 +543,8 @@ export function arrange(
 }
 
 /**
- * Where a study with more than `FOCUSED_VIEW_NODE_THRESHOLD` live nodes opens (PRD section 12):
+ * Where a study with `FOCUSED_VIEW_NODE_THRESHOLD` or more live nodes opens (PRD section 12: "At 500
+ * nodes default to the saved focused branch or List View"):
  * focused on its main question node, else its oldest branch's root, else its oldest node. Null
  * for a smaller study, which opens in full.
  */
@@ -551,7 +552,7 @@ export function focusStart(
   graph: Omit<GraphContent, 'edges'>,
   mainQuestionNodeId: string | null,
 ): string | null {
-  if (graph.nodes.length <= FOCUSED_VIEW_NODE_THRESHOLD) return null;
+  if (graph.nodes.length < FOCUSED_VIEW_NODE_THRESHOLD) return null;
   const live = new Set(graph.nodes.map((node) => node.id));
   if (mainQuestionNodeId && live.has(mainQuestionNodeId)) return mainQuestionNodeId;
   const root = graph.branches.find((branch) => live.has(branch.rootNodeId));

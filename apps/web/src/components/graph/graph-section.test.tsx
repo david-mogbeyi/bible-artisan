@@ -801,8 +801,8 @@ describe('GraphSection (BIB-28)', () => {
     );
   });
 
-  it('opens a study of more than 500 nodes focused on its main question, with Show all', async () => {
-    const many = Array.from({ length: 501 }, (_, i) =>
+  it('opens a study of 500 nodes focused on its main question, with Show all', async () => {
+    const many = Array.from({ length: 500 }, (_, i) =>
       summary(
         `${String(i).padStart(8, '0')}-1111-4111-8111-111111111111`,
         'thought',
@@ -827,10 +827,10 @@ describe('GraphSection (BIB-28)', () => {
         positions: [],
       },
     );
-    expect(screen.getByText('This study has 501 nodes. Showing a focused view.')).toBeTruthy();
-    await waitFor(() => expect(textOf(status())).toContain('Showing 1 of 501 nodes'));
+    expect(screen.getByText('This study has 500 nodes. Showing a focused view.')).toBeTruthy();
+    await waitFor(() => expect(textOf(status())).toContain('Showing 1 of 500 nodes'));
     fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
-    expect(textOf(status())).toContain('Showing 501 of 501 nodes');
+    expect(textOf(status())).toContain('Showing 500 of 500 nodes');
   });
 
   it('gives every viewport action a native button', async () => {

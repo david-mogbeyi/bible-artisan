@@ -20,7 +20,7 @@ import {
 } from '@/lib/add-node';
 import { invalidateGraph } from '@/lib/graph';
 import { useGraphView, useGraphViewStore } from '@/lib/graph-store';
-import { listNodes, nodeStateText, nodesQueryKey } from '@/lib/nodes';
+import { listNodes, nodeStateText, nodesQueryKey, notAboutNodes } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { AddNodeForm } from './add-node-form';
 import {
@@ -87,11 +87,17 @@ export function NodesSection({
   study,
   onReload,
   initialNodeId = null,
+  restoredNodeId = null,
 }: {
   study: StudyResponse;
   onReload: () => Promise<unknown>;
   /** From the page URL's `?node=`: untrusted, selected only if it is one of the listed nodes. */
   initialNodeId?: string | null;
+  /**
+   * The selection saved in the study's view state (BIB-34), restored on a plain visit (no
+   * `?node=`) once the list has it: selected quietly, without taking focus or moving the canvas.
+   */
+  restoredNodeId?: string | null;
 }) {
   const queryClient = useQueryClient();
   const headingId = useId();
@@ -140,18 +146,24 @@ export function NodesSection({
     queryFn: () => listNodes(study.id),
   });
 
-  // The `?node=` node becomes the shared selection once the list has it, unless something was
-  // picked first. Only once: clearing the selection later never brings it back.
+  // The `?node=` node (else the saved selection) becomes the shared selection once the list has
+  // it, unless something was picked first. Only once: clearing the selection later never brings
+  // it back.
   const initialApplied = useRef(false);
   useEffect(() => {
-    if (initialApplied.current || !initialNodeId || !nodes.data) return;
+    const pick = initialNodeId ?? restoredNodeId;
+    if (initialApplied.current || !pick || !nodes.data) return;
     initialApplied.current = true;
     if (graphView.getState().selectedNodeIds.length > 0) return;
-    if (nodes.data.items.some((node) => node.id === initialNodeId)) {
+    if (!nodes.data.items.some((node) => node.id === pick)) return;
+    if (initialNodeId) {
       // Its heading takes focus when it opens (the user came to see it).
       graphView.getState().select([initialNodeId], 'list', { focusDetail: true });
+    } else {
+      // A restore, like a canvas pick: no focus move, and the restored viewport stays as saved.
+      graphView.getState().select([pick], 'canvas');
     }
-  }, [graphView, initialNodeId, nodes.data]);
+  }, [graphView, initialNodeId, nodes.data, restoredNodeId]);
 
   useEffect(() => {
     if (adding || !returnToAdd.current) return;
@@ -419,7 +431,10 @@ export function NodesSection({
               label,
               text: deletedText(type, label, result.establishmentClearedNodeIds.length),
             });
-            void queryClient.invalidateQueries({ queryKey: studyQueryKey(study.id) });
+            void queryClient.invalidateQueries({
+              queryKey: studyQueryKey(study.id),
+              predicate: notAboutNodes([result.id]),
+            });
             void invalidateLibrary(queryClient);
           }}
         />

@@ -103,9 +103,24 @@ export interface ThreadCard {
   events: StudyEventItem[];
 }
 
+/** The event that records the user accepting an AI suggestion (FR-AI-013). */
+const AI_ACCEPTED = 'ai_suggestion_accepted';
+
+/**
+ * Whether `item` names its action's card rather than `current`: an accepted AI suggestion always
+ * does, so the card says the content came from an AI suggestion the user accepted (FR-AI-013,
+ * AGENTS.md rule 7) instead of reading as the user's own; otherwise the earliest sequence does.
+ */
+function namesAction(item: StudyEventItem, current: StudyEventItem): boolean {
+  const accepted = item.type === AI_ACCEPTED;
+  if (accepted !== (current.type === AI_ACCEPTED)) return accepted;
+  return BigInt(item.sequence) < BigInt(current.sequence);
+}
+
 /**
  * Groups adjacent events of one action (same correlation id) into one card (FR-THREAD-006). The
- * card reads as the action's first recorded event; every raw event stays in `events`.
+ * card reads as the action's first recorded event, or as its AI acceptance when the action
+ * accepted an AI suggestion; every raw event stays in `events`.
  */
 export function groupThreadCards(items: readonly StudyEventItem[]): ThreadCard[] {
   const cards: ThreadCard[] = [];
@@ -113,8 +128,7 @@ export function groupThreadCards(items: readonly StudyEventItem[]): ThreadCard[]
     const last = cards.at(-1);
     if (last && item.correlationId !== null && last.primary.correlationId === item.correlationId) {
       last.events.push(item);
-      // The earliest sequence names the action.
-      if (BigInt(item.sequence) < BigInt(last.primary.sequence)) last.primary = item;
+      if (namesAction(item, last.primary)) last.primary = item;
       continue;
     }
     cards.push({ key: item.id, primary: item, events: [item] });

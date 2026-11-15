@@ -20,10 +20,12 @@ import { ENV } from '../src/config/config.module';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
 import { BibleEdition } from '../src/database/models/bible-edition.model';
+import { AiJob } from '../src/database/models/ai-job.model';
 import { BibleVerse } from '../src/database/models/bible-verse.model';
 import { ExportFile } from '../src/database/models/export-file.model';
 import { StudyEdge } from '../src/database/models/study-edge.model';
 import { StudyNode } from '../src/database/models/study-node.model';
+import { StudySummary } from '../src/database/models/study-summary.model';
 import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
@@ -329,6 +331,87 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
       Array.from({ length: Number(study.lastEventSequence) }, (_, i) => String(i + 1)),
     );
     expect(document.events[0]?.eventType).toBe('study_created');
+  });
+
+  it('exports the study AI summary in its own field, labelled AI-generated with its basis and staleness (FR-EXPORT-001)', async () => {
+    const created = await send(alice, 'post', STUDIES, { question: 'Who is my neighbor?' });
+    expect(created.status).toBe(201);
+    const { studyId } = created.body as CreateStudyResponse;
+    const scope = { ownerId: alice.user.id, studyId };
+    const basis = (await Study.findByPk(studyId, { rejectOnEmpty: true })).contentRevision;
+    const content = (id: string, basisContentRevision: number) => ({
+      contractVersion: 1 as const,
+      id,
+      studyId,
+      basisContentRevision,
+      generatedAt: '2026-11-15T10:00:00.000Z',
+      promptVersion: 'summary-v1',
+      modelId: 'fake-model-1',
+      contextManifestId: randomUUID(),
+      focus: 'Who is my neighbor?',
+      originalQuestionId: null,
+      currentQuestionId: null,
+      keyPassages: [],
+      textualObservations: [],
+      establishedFindings: [],
+      tentativeFindings: [
+        {
+          id: randomUUID(),
+          text: 'Neighbor may be defined by mercy shown.',
+          attribution: 'ai_synthesis' as const,
+          evidenceRefs: [],
+          supportingNodeVersions: [],
+        },
+      ],
+      tensions: [],
+      openQuestions: [],
+      conclusions: [],
+      abandonedHypotheses: [],
+      nextDirections: [],
+      proposedQuestions: [],
+      coverageWarnings: [],
+    });
+    const summary = async (publishedCurrent: boolean, basisContentRevision: number) => {
+      const job = await AiJob.create({
+        ...scope,
+        capability: 'summary',
+        requestKey: `test:${randomUUID()}`,
+        basisRevision: basisContentRevision,
+        consentVersion: 'v1',
+      });
+      const id = randomUUID();
+      const summaryJson = content(id, basisContentRevision);
+      await StudySummary.create({
+        id,
+        ...scope,
+        jobId: job.id,
+        basisContentRevision,
+        publishedCurrent,
+        summaryJson,
+        modelId: 'fake-model-1',
+        promptVersion: 'summary-v1',
+        schemaVersion: 'v1',
+      });
+      return summaryJson;
+    };
+    const current = await summary(true, basis);
+    // A later summary whose basis was already out of date is historical: never the one exported.
+    await summary(false, basis);
+    // The study changes after the summary's basis: the export says the summary is stale.
+    await createNode(alice, studyId, { type: 'thought', text: 'Samaritans' });
+
+    const file = await downloaded(alice, await exportOf(alice, studyExportsPath(studyId), 'json'));
+    const document = studyExportDocumentSchema.parse(JSON.parse(file.text));
+    expect(document.summary).toStrictEqual({
+      generatedBy: 'ai',
+      stale: true,
+      content: current,
+    });
+    const markdown = (
+      await downloaded(alice, await exportOf(alice, studyExportsPath(studyId), 'markdown'))
+    ).text;
+    expect(markdown).toContain('## AI summary (AI-generated)');
+    expect(markdown).toContain('- Neighbor may be defined by mercy shown.');
   });
 
   it('exports readable Markdown with Scripture attribution, statuses, links and unavailable-evidence labels', async () => {

@@ -161,6 +161,13 @@ function StudyDetails({
     retry: false,
   });
   const viewState = saved.data?.viewState ?? null;
+  // A plain visit (no `?node=`) restores the saved selection too (PRD section 11): the one saved
+  // when the page opened, never one this page saves later.
+  const [restoredFrom, setRestoredFrom] = useState<string | null | undefined>(undefined);
+  if (restoredFrom === undefined && !saved.isPending) {
+    setRestoredFrom(nodeParam ? null : (viewState?.selectedNodeId ?? null));
+  }
+  const restoredNodeId = restoredFrom ?? null;
   // A link to a node, or a tab opened on this page, wins over the saved pane.
   const tab: WorkspaceTab = openedTab ?? savedTab(viewState?.panes ?? null) ?? 'reader';
   // BIB-33: leaving the study ends this tab's session in it at once.
@@ -254,7 +261,7 @@ function StudyDetails({
         <ViewStateSaver
           studyId={study.id}
           active={study.lifecycle === 'active'}
-          openedNodeId={uuidOrNull(nodeParam)}
+          openedNodeId={uuidOrNull(nodeParam) ?? restoredNodeId}
           openedBranchId={branchParam}
           openPane={pickedTab && isPaneName(pickedTab) ? pickedTab : null}
         />
@@ -276,7 +283,12 @@ function StudyDetails({
         <WorkspacePanel {...panel} tab="notes">
           {/* BIB-25: the study's typed nodes, readable in every state. Its Add node form is the
               canvas-free way to capture a question or thought (BIB-38). */}
-          <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
+          <NodesSection
+            study={study}
+            onReload={onReload}
+            initialNodeId={nodeParam}
+            restoredNodeId={restoredNodeId}
+          />
           <NotesPanel
             study={study}
             onReload={onReload}

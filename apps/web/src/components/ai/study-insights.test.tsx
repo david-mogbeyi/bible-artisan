@@ -401,7 +401,10 @@ describe('ReasoningPath (BIB-45)', () => {
         'version 1 (created, tentative) “Conscience may be fallible”',
       ),
     );
-    expect(textOf(region)).toContain('No supporting evidence was recorded with this version.');
+    // The gap names its version, so it never reads as being about the current one.
+    expect(textOf(region)).toContain(
+      'Version 1: No supporting evidence was recorded with this version.',
+    );
     await expectNoA11yViolations(document.body);
   });
 });

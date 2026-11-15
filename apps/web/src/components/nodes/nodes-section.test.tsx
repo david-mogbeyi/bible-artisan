@@ -572,6 +572,50 @@ describe('NodesSection', () => {
     expect(requests.filter((r) => r.path.startsWith(`${NODES}/`))).toHaveLength(1);
   });
 
+  it('restores the saved selection on a plain visit without taking focus, and never over a ?node= link', async () => {
+    const existing = summary({
+      id: SCRIPTURE_ID,
+      type: 'scripture',
+      origin: 'scripture',
+      label: 'Romans 9:1',
+      referenceId: REFERENCE_ID,
+    });
+    reply(`GET ${NODES}`, jsonResponse(200, { items: [existing] }));
+    reply(
+      `GET ${NODES}/${SCRIPTURE_ID}`,
+      jsonResponse(200, {
+        type: 'scripture',
+        ...common({ id: SCRIPTURE_ID, origin: 'scripture' }),
+        reference: ROMANS,
+      }),
+    );
+    const onReload = vi.fn(() => Promise.resolve());
+    const { unmount } = renderWithQuery(
+      <NodesSection study={STUDY} onReload={onReload} restoredNodeId={SCRIPTURE_ID} />,
+    );
+    const region = await screen.findByRole('region', { name: 'Scripture' });
+    expect(
+      screen
+        .getByRole('button', { name: 'Scripture · Scripture Text Romans 9:1' })
+        .getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(region.contains(document.activeElement)).toBe(false);
+    unmount();
+
+    // A ?node= link wins: a saved selection it does not list is not restored instead.
+    reply(`GET ${NODES}`, jsonResponse(200, { items: [existing] }));
+    renderWithQuery(
+      <NodesSection
+        study={STUDY}
+        onReload={onReload}
+        initialNodeId="not-a-listed-node"
+        restoredNodeId={SCRIPTURE_ID}
+      />,
+    );
+    await screen.findByRole('button', { name: 'Scripture · Scripture Text Romans 9:1' });
+    expect(screen.queryByRole('region', { name: 'Scripture' })).toBeNull();
+  });
+
   it('keeps the draft on a 409 and asks to press Create again; Retry after an unknown outcome resends the same key and body', async () => {
     reply(
       `GET ${NODES}`,

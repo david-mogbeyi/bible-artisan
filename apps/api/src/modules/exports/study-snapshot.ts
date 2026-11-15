@@ -10,6 +10,7 @@ import { StudyBranch } from '../../database/models/study-branch.model';
 import { StudyEdge } from '../../database/models/study-edge.model';
 import { StudyEvent } from '../../database/models/study-event.model';
 import { StudyNode } from '../../database/models/study-node.model';
+import { StudySummary } from '../../database/models/study-summary.model';
 import { StudyTag } from '../../database/models/study-tag.model';
 import type { Study } from '../../database/models/study.model';
 import { Tag } from '../../database/models/tag.model';
@@ -30,7 +31,8 @@ const byCreation: [string, string][] = [
  * describes one committed moment.
  *
  * Soft-deleted nodes, edges, notes and highlights are included and marked (`deletedAt`), so
- * evidence that pointed at them stays explainable. Fixed number of statements per study.
+ * evidence that pointed at them stays explainable. The AI summary goes in its own labelled field,
+ * never mixed into the user's content. Fixed number of statements per study.
  */
 export async function readStudyExport(
   study: Study,
@@ -72,6 +74,16 @@ export async function readStudyExport(
   });
   const highlights = await Annotation.findAll({ where: scope, order: byCreation });
   const events = await StudyEvent.findAll({ where: scope, order: [['sequence', 'ASC']] });
+  // The AI summary the study page shows (AiSummaryService.get): the current one, else the latest.
+  const newestFirst: [string, string][] = [
+    ['createdAt', 'DESC'],
+    ['id', 'DESC'],
+  ];
+  const summary =
+    (await StudySummary.findOne({
+      where: { ...scope, publishedCurrent: true },
+      order: newestFirst,
+    })) ?? (await StudySummary.findOne({ where: scope, order: newestFirst }));
   const tagLinks = await StudyTag.findAll({ where: scope, attributes: ['tagId'] });
   const tags =
     tagLinks.length === 0
@@ -138,7 +150,13 @@ export async function readStudyExport(
       contentRevision: study.contentRevision,
       lastEventSequence: String(study.lastEventSequence),
     },
-    summary: null,
+    summary: summary
+      ? {
+          generatedBy: 'ai',
+          stale: summary.basisContentRevision < study.contentRevision,
+          content: summary.summaryJson,
+        }
+      : null,
     scripture: await scripture.passages(referenceIds),
     nodes: nodes.map((node) => ({
       id: node.id,

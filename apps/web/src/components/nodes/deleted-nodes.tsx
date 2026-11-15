@@ -74,12 +74,17 @@ const SKIP_REASONS: Record<SkippedEdgeReason, string> = {
 };
 
 /** "Deleted Observation: Paul appeals…." with the conclusions whose marker went. */
+/** A label ending a sentence: no second period when it already ends with one (or ! ? …). */
+function ended(label: string): string {
+  return /[.!?…]["'”’)]*$/.test(label.trimEnd()) ? label : `${label}.`;
+}
+
 export function deletedText(type: StudyNodeType, label: string, clearedCount: number): string {
   const cleared =
     clearedCount > 0
       ? ` 'Established by me' was cleared on ${count(clearedCount, 'conclusion', 'conclusions')} that lost their last evidence.`
       : '';
-  return `Deleted ${NODE_TYPE_NAMES[type]}: ${label}.${cleared}`;
+  return `Deleted ${NODE_TYPE_NAMES[type]}: ${ended(label)}${cleared}`;
 }
 
 /** What a restore did, as sentences (counts per reason, a duplicate, a cleared marker). */
@@ -89,7 +94,7 @@ export function restoredText(
   labelOf: (id: string) => string | null,
 ): string {
   const parts = [
-    `Restored ${NODE_TYPE_NAMES[result.type]}: ${label}. ${count(result.restoredEdgeIds.length, 'relationship', 'relationships')} restored.`,
+    `Restored ${NODE_TYPE_NAMES[result.type]}: ${ended(label)} ${count(result.restoredEdgeIds.length, 'relationship', 'relationships')} restored.`,
   ];
   if (result.skippedEdges.length > 0) {
     const reasons = (Object.keys(SKIP_REASONS) as SkippedEdgeReason[]).flatMap((reason) => {

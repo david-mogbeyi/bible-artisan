@@ -21,7 +21,7 @@ export const MAX_POSITIONS_PER_REQUEST = 100;
 /** Canvas units. A database CHECK enforces the same bound. */
 export const MAX_POSITION_COORDINATE = 1_000_000;
 
-/** Above this many live nodes the canvas opens in a focused view (PRD section 12). */
+/** At this many live nodes or more the canvas opens in a focused view (PRD section 12). */
 export const FOCUSED_VIEW_NODE_THRESHOLD = 500;
 
 /** The view revision of a study that has never saved a position. */

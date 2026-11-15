@@ -35,7 +35,10 @@ export function ViewStateSaver({
 }: {
   studyId: string;
   active: boolean;
-  /** The page URL's `?node=` and `?branch=`: what the page opened with (a restore). */
+  /**
+   * The page URL's `?node=` (else the saved selection, known once the view state loads) and
+   * `?branch=`: what the page opened with (a restore).
+   */
   openedNodeId: string | null;
   openedBranchId: string | null;
   /** The pane the user opened (null until they pick one): saved as the only open pane. */
@@ -47,6 +50,12 @@ export function ViewStateSaver({
   const viewport = useGraphView((state) => state.viewport);
   const opened = useRef({ selectedNodeId: openedNodeId, soloBranchId: openedBranchId });
   const contextChanged = useRef(false);
+  // The saved selection arrives after the first render: until the user changes the context,
+  // restoring it is still opening, not a change to save.
+  useEffect(() => {
+    if (!contextChanged.current)
+      opened.current = { ...opened.current, selectedNodeId: openedNodeId };
+  }, [openedNodeId]);
   const pending = useRef<Patch>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 

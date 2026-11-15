@@ -5,6 +5,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { ApiError } from '@/lib/api-client';
 import { classifyError, isRetryable } from '@/lib/api-errors';
+import { useGraphViewStore } from '@/lib/graph-store';
+import { notAboutNodes } from '@/lib/nodes';
 import { invalidateLibrary } from '@/lib/studies';
 import {
   inverseOf,
@@ -38,6 +40,7 @@ type Outcome = { text: string; alert: boolean };
  */
 export function UndoControls({ studyId, editable }: { studyId: string; editable: boolean }) {
   const store = useUndoStore();
+  const graphView = useGraphViewStore();
   const queryClient = useQueryClient();
   const nextUndo = useUndo((s) => s.undo.at(-1) ?? null);
   const nextRedo = useUndo((s) => s.redo.at(-1) ?? null);
@@ -63,8 +66,21 @@ export function UndoControls({ studyId, editable }: { studyId: string; editable:
         text: from === 'undo' ? UNDO_COPY.undid(entry.label) : UNDO_COPY.redid(entry.label),
         alert: false,
       });
+      // A node this removed (an add undone, a restore undone) leaves the selection, so its detail
+      // closes instead of refetching and saying it isn't available.
+      const removed = entry.action.op === 'deleteNode' ? [entry.action.nodeId] : [];
+      const { selectedNodeIds, select } = graphView.getState();
+      if (selectedNodeIds.some((id) => removed.includes(id))) {
+        select(
+          selectedNodeIds.filter((id) => !removed.includes(id)),
+          'list',
+        );
+      }
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['studies', studyId] }),
+        queryClient.invalidateQueries({
+          queryKey: ['studies', studyId],
+          predicate: notAboutNodes(removed),
+        }),
         invalidateLibrary(queryClient),
       ]);
     } catch (error) {

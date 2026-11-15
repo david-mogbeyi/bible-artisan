@@ -1,6 +1,9 @@
+import { useQuery } from '@tanstack/react-query';
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useGraphView, useGraphViewStore } from '@/lib/graph-store';
+import { fetchNode, nodeQueryKey } from '@/lib/nodes';
 import {
   createUndoStore,
   edgeKey,
@@ -144,6 +147,41 @@ describe('UndoControls (BIB-63)', () => {
       },
     ]);
     expect(screen.getByRole('button', { name: 'Undo: Add observation' })).toBeTruthy();
+  });
+
+  it('undoing the add of the selected node clears the selection and never refetches the removed node', async () => {
+    reply(`GET /studies/${STUDY_ID}/nodes/${OBS}`, jsonResponse(200, nodeBody(1)));
+    reply(`DELETE /studies/${STUDY_ID}/nodes/${OBS}`, jsonResponse(200, deleted(2)));
+    /** Stands in for the open node detail: selects the new node and reads it while selected. */
+    function SelectedDetail() {
+      const store = useGraphViewStore();
+      const selected = useGraphView((s) => s.selectedNodeIds);
+      useEffect(() => store.getState().select([OBS], 'list'), [store]);
+      return selected.includes(OBS) ? <Detail /> : <p>Nothing selected</p>;
+    }
+    function Detail() {
+      const node = useQuery({
+        queryKey: nodeQueryKey(STUDY_ID, OBS),
+        queryFn: () => fetchNode(STUDY_ID, OBS),
+      });
+      return <p>{node.isError ? "This node isn't available." : 'Detail open'}</p>;
+    }
+    renderWithQuery(
+      <>
+        <RecordAdd />
+        <SelectedDetail />
+        <UndoControls studyId={STUDY_ID} editable />
+      </>,
+    );
+    expect(await screen.findByText('Detail open')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Undo: Add observation' }));
+    expect(await screen.findByText(UNDO_COPY.undid('Add observation'))).toBeTruthy();
+    expect(screen.getByText('Nothing selected')).toBeTruthy();
+    expect(screen.queryByText("This node isn't available.")).toBeNull();
+    expect(requests.map((r) => `${r.method} ${r.path}`)).toStrictEqual([
+      `GET /studies/${STUDY_ID}/nodes/${OBS}`,
+      `DELETE /studies/${STUDY_ID}/nodes/${OBS}`,
+    ]);
   });
 
   it('never overwrites a change made elsewhere: a 409 drops the command and asks the user to resolve it', async () => {

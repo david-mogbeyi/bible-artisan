@@ -268,6 +268,49 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     expect([states.at(-1), snapshots.at(-1), sent.length]).toStrictEqual(['saved', null, 3]);
   });
 
+  it('writes a new request into a queued entry before sending it, so closing the tab mid-send replays the same key (no false conflict)', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    const snapshots: (OfflineSnapshot | null)[] = [];
+    let sentAtWrite = -1;
+    const saver = new NoteAutosave({
+      revision: 1,
+      content: doc('base'),
+      send: (body, key) =>
+        new Promise<NoteMutationResponse>((resolve, reject) => {
+          sent.push({ body, key, resolve, reject });
+        }),
+      onState: (state) => states.push(state.kind),
+      onSaved: () => undefined,
+      newKey: () => `key-${(keys += 1)}`,
+      persist: (snapshot) => {
+        snapshots.push(snapshot);
+        sentAtWrite = sent.length;
+        return Promise.resolve('queued');
+      },
+    });
+    // The queue held a draft typed offline in an editor that closed (no request yet).
+    expect(
+      saver.adopt({ revision: 1, attempt: null, draft: doc('base, typed offline') }),
+    ).toStrictEqual(doc('base, typed offline'));
+    saver.flush();
+    await settle();
+    expect(snapshots).toStrictEqual([
+      {
+        revision: 1,
+        attempt: {
+          key: 'key-1',
+          body: { expectedRevision: 1, content: doc('base, typed offline') },
+        },
+        draft: null,
+      },
+    ]);
+    // Written before the request went out.
+    expect([sentAtWrite, sent.length, sent[0]?.key]).toStrictEqual([0, 1, 'key-1']);
+    sent[0]?.resolve(response(2));
+    await settle();
+    expect([states.at(-1), snapshots.at(-1)]).toStrictEqual(['saved', null]);
+  });
+
   it('blocks editing with queue_full when the offline queue refuses the draft, and sends once back online (BIB-36)', async () => {
     const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     const saver = new NoteAutosave({
@@ -289,6 +332,8 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     expect(sent.length).toBe(0);
     online.mockReturnValue(true);
     saver.reconnected();
+    // A queued note's new request is written to the queue before it is sent.
+    await settle();
     expect(sent[0]?.body).toStrictEqual({ expectedRevision: 1, content: doc('no room') });
   });
 

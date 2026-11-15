@@ -52,6 +52,16 @@ export function nodeQueryKey(studyId: string, nodeId: string) {
   return ['studies', studyId, 'nodes', 'detail', nodeId] as const;
 }
 
+/**
+ * A query filter for refreshing a study after these nodes were removed (deleted, or an add
+ * undone): every query except the ones about a removed node (its detail, versions, relationships,
+ * suggestions, reasoning), which could only 404 now. The open detail unmounts with the selection.
+ */
+export function notAboutNodes(nodeIds: readonly string[]) {
+  return (query: { queryKey: readonly unknown[] }) =>
+    !query.queryKey.slice(2).some((part) => typeof part === 'string' && nodeIds.includes(part));
+}
+
 /** A conclusion's version history (BIB-30), under the study's key like every node query. */
 export function nodeVersionsQueryKey(studyId: string, nodeId: string) {
   return ['studies', studyId, 'nodes', 'versions', nodeId] as const;
