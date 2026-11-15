@@ -107,6 +107,8 @@ const SIMPLE: Record<string, (input: DisplayInput) => string> = {
     `Dismissed an AI-suggested relationship between ${name(i.origin, 'a node')} and ${name(i.target, 'a node')}`,
   edge_removed: (i) =>
     `Removed the relationship from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`,
+  edge_restored: (i) =>
+    `Restored the relationship from ${name(i.origin, 'a node')} to ${name(i.target, 'a node')}`,
   branch_created: (i) => `Started a branch at ${name(i.target, 'a node')}`,
   branch_members_changed: () => 'Changed which nodes are in a branch',
   note_created: () => 'Wrote a note',

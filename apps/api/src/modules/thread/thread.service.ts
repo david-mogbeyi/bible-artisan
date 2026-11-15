@@ -78,6 +78,7 @@ export function derivedRefs(
       break;
     case 'node_connected':
     case 'edge_removed':
+    case 'edge_restored':
       nodeId = uuidOf(payload, 'targetNodeId');
       fromNodeId = uuidOf(payload, 'sourceNodeId');
       break;

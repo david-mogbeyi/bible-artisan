@@ -866,6 +866,23 @@ describe('buildOpenApiDocument', () => {
             'EdgeStateRequest',
           ),
         },
+        '/studies/{studyId}/edges/{edgeId}/restore': {
+          post: noteOperation(
+            [
+              'own id',
+              'EDGE_NOT_REMOVED',
+              'EDGE_ENDPOINT_DELETED',
+              'EDGE_EXISTS',
+              'edge_restored',
+              ...MUTATION,
+            ],
+            [idempotencyHeader, studyId, uuidParam('edgeId')],
+            200,
+            'The restored edge',
+            'EdgeMutationResponse',
+            'EdgeStateRequest',
+          ),
+        },
         '/studies/{studyId}/branches': {
           post: noteOperation(
             [

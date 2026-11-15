@@ -8,6 +8,7 @@ import { useParams, useSearchParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { ExportControls } from '@/components/exports/export-controls';
 import { GraphSection } from '@/components/graph/graph-section';
+import { UndoControls } from '@/components/graph/undo-controls';
 import { NodesSection } from '@/components/nodes/nodes-section';
 import { NotesPanel } from '@/components/notes/notes-panel';
 import { RequireAuth } from '@/components/require-auth';
@@ -186,6 +187,9 @@ function StudyDetails({
           openedNodeId={uuidOrNull(nodeParam)}
           openedBranchId={branchParam}
         />
+        {/* BIB-63: undo / redo recent graph and content changes, outside the canvas so it stays
+            reachable when the graph is empty or shown as List View. */}
+        <UndoControls studyId={study.id} editable={study.lifecycle === 'active'} />
         {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide.
             BIB-29: or the same graph as List View (the default below 900 px). */}
         <div className="w-[min(72rem,calc(100vw-2rem))] self-center">

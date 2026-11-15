@@ -2,8 +2,10 @@ import { Injectable } from '@nestjs/common';
 import {
   createEdgeRequestSchema,
   type CreateEdgeResponse,
+  EDGE_ENDPOINT_DELETED,
   EDGE_EXISTS,
   EDGE_LIMIT_EXCEEDED,
+  EDGE_NOT_REMOVED,
   EDGE_TARGET_NOT_QUESTION,
   EDGE_TYPE_CHANGE_NOT_ALLOWED,
   EDGE_UNCHANGED,
@@ -46,6 +48,8 @@ export const EDGE_EVENTS = {
   connected: 'node_connected',
   updated: 'edge_updated',
   removed: 'edge_removed',
+  /** BIB-63: a removed edge brought back under its own id (undo of a removal). */
+  restored: 'edge_restored',
 } as const;
 
 /** What to connect. Ids are lower-case uuids (as `createEdgeRequestSchema` outputs them). */
@@ -453,6 +457,75 @@ export class EdgesService {
             lost.clearedNodeIds,
           ),
         };
+      },
+    });
+  }
+
+  /**
+   * `POST /studies/:studyId/edges/:edgeId/restore` (BIB-63): brings a removed edge back under its
+   * own id, with its type and note, so conclusion version snapshots naming it read live again.
+   * `expectedRevision` is the removed edge's. Under the study lock, in order: 404 (absent or
+   * foreign), 409, 422 `EDGE_NOT_REMOVED`, `EDGE_ENDPOINT_DELETED` (an edge removed with a node
+   * comes back with that node's restore), `EDGE_EXISTS` (an identical live edge: the newer one
+   * wins), `EDGE_LIMIT_EXCEEDED`. One `edge_restored` event. Never sets a conclusion's marker
+   * (BIB-30: only an explicit user action does), so `establishmentClearedNodeIds` is empty.
+   */
+  async restore(
+    ownerId: string,
+    studyId: string,
+    edgeId: string,
+    mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    parseBody(edgeStateRequestSchema, mutation.body);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: true,
+      work: async (m) => {
+        if (!isResourceId(edgeId)) throw new NotFoundError();
+        const scope = { studyId: m.studyId, ownerId: m.ownerId };
+        const current = await StudyEdge.findOne({ where: { ...scope, id: edgeId } });
+        if (!current) throw new NotFoundError();
+        if (current.revision !== expectedRevision) {
+          throw new RevisionConflictError(current.revision);
+        }
+        if (current.deletedAt === null) throw new EdgeRuleError(EDGE_NOT_REMOVED);
+        const liveEnds = await StudyNode.count({
+          where: {
+            ...scope,
+            id: [current.sourceNodeId, current.targetNodeId],
+            deletedAt: null,
+          },
+        });
+        if (liveEnds < 2) throw new EdgeRuleError(EDGE_ENDPOINT_DELETED);
+        const twin = await StudyEdge.findOne({
+          where: {
+            ...scope,
+            sourceNodeId: current.sourceNodeId,
+            targetNodeId: current.targetNodeId,
+            type: current.type,
+            deletedAt: null,
+          },
+          attributes: ['id'],
+        });
+        if (twin) throw new EdgeRuleError(EDGE_EXISTS);
+        const live = await StudyEdge.count({ where: { ...scope, deletedAt: null } });
+        if (live >= MAX_EDGES_PER_STUDY) throw new EdgeRuleError(EDGE_LIMIT_EXCEEDED);
+        const restored = await m.updateWithExpectedRevision(StudyEdge, {
+          id: current.id,
+          expectedRevision,
+          values: { deletedAt: null, deletedWithNodeId: null },
+        });
+        const event = await m.appendEvent({
+          eventType: EDGE_EVENTS.restored,
+          payload: {
+            edgeId: restored.id,
+            sourceNodeId: restored.sourceNodeId,
+            targetNodeId: restored.targetNodeId,
+            edgeType: restored.type,
+          },
+        });
+        return { status: 200, body: mutationBody(restored, event.sequence, []) };
       },
     });
   }

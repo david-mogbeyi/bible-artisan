@@ -134,6 +134,10 @@ export const EDGE_LIMIT_EXCEEDED = 'EDGE_LIMIT_EXCEEDED';
 export const EDGE_TYPE_CHANGE_NOT_ALLOWED = 'EDGE_TYPE_CHANGE_NOT_ALLOWED';
 export const EDGE_EXISTS = 'EDGE_EXISTS';
 export const EDGE_UNCHANGED = 'EDGE_UNCHANGED';
+/** BIB-63: restoring an edge that is live. */
+export const EDGE_NOT_REMOVED = 'EDGE_NOT_REMOVED';
+/** BIB-63: restoring an edge whose source or target node is deleted. */
+export const EDGE_ENDPOINT_DELETED = 'EDGE_ENDPOINT_DELETED';
 
 export const EDGE_ERROR_CODES = [
   EDGE_TARGET_NOT_QUESTION,
@@ -141,6 +145,8 @@ export const EDGE_ERROR_CODES = [
   EDGE_TYPE_CHANGE_NOT_ALLOWED,
   EDGE_EXISTS,
   EDGE_UNCHANGED,
+  EDGE_NOT_REMOVED,
+  EDGE_ENDPOINT_DELETED,
 ] as const;
 export type EdgeErrorCode = (typeof EDGE_ERROR_CODES)[number];
 
@@ -152,6 +158,8 @@ export const EDGE_ERROR_MESSAGES: Record<EdgeErrorCode, string> = {
     'A relationship can only change to a type with the same direction. Remove it and connect again',
   [EDGE_EXISTS]: 'These nodes already have this relationship',
   [EDGE_UNCHANGED]: 'The relationship already has these values',
+  [EDGE_NOT_REMOVED]: 'This relationship has not been removed',
+  [EDGE_ENDPOINT_DELETED]: 'One of these nodes is deleted. Restore it first',
 };
 
 /** Field-error copy (400). */

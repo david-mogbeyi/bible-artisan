@@ -11,6 +11,7 @@ import {
   stepBack,
   stepForward,
 } from './selection-history';
+import { UndoProvider } from './undo';
 
 /** Where a selection change came from (see `GraphViewState.selectionSource`). */
 export type SelectionSource = 'canvas' | 'graph' | 'list';
@@ -217,7 +218,12 @@ export function GraphViewProvider({
   initialSoloBranchId?: string | null;
 }) {
   const [store] = useState(() => createGraphViewStore({ soloBranchId: initialSoloBranchId }));
-  return <GraphViewContext.Provider value={store}>{children}</GraphViewContext.Provider>;
+  // BIB-63: the page's undo / redo stack lives and ends with this store.
+  return (
+    <GraphViewContext.Provider value={store}>
+      <UndoProvider>{children}</UndoProvider>
+    </GraphViewContext.Provider>
+  );
 }
 
 export function useGraphViewStore(): GraphViewStore {

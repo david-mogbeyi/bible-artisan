@@ -33,6 +33,7 @@ import {
   updateNode,
 } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
+import { FORGET_EDGES, nodeCommandLabel, nodeKey, useUndoRecorder } from '@/lib/undo';
 import {
   codeOf,
   isLifecycle,
@@ -189,6 +190,7 @@ export function DuplicateButton({
 }) {
   const queryClient = useQueryClient();
   const [problem, setProblem] = useState<Problem | null>(null);
+  const record = useUndoRecorder();
   const request = useFrozenRequest((body: { expectedRevision: number }, key: string) =>
     duplicateNode(studyId, node.id, body, key),
   );
@@ -200,6 +202,13 @@ export function DuplicateButton({
     const result = await attempt;
     if (result.ok) {
       const copy: DuplicateNodeResponse = result.value;
+      record(
+        {
+          label: nodeCommandLabel('Duplicate', node.type),
+          action: { op: 'deleteNode', nodeId: copy.id },
+        },
+        { [nodeKey(copy.id)]: copy.revision },
+      );
       onCopied(copy.id, copy.studyRevision, duplicatedText(node.type, established));
       return;
     }
@@ -344,6 +353,7 @@ export function DeleteNodeButton({
     queryFn: () => fetchGraph(studyId),
     enabled: open,
   });
+  const record = useUndoRecorder();
   const request = useFrozenRequest((body: NodeStateRequest, key: string) =>
     deleteNode(studyId, node.id, body, key),
   );
@@ -372,6 +382,13 @@ export function DeleteNodeButton({
     if (result.ok) {
       dialogRef.current?.close();
       setOpen(false);
+      record(
+        {
+          label: nodeCommandLabel('Delete', node.type),
+          action: { op: 'restoreNode', nodeId: node.id },
+        },
+        { [nodeKey(node.id)]: result.value.revision, [FORGET_EDGES]: null },
+      );
       onDeleted(result.value, node.type, label);
       return;
     }

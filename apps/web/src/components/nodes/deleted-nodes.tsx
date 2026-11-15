@@ -14,6 +14,7 @@ import { useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { deletedNodesQueryKey, formatNodeTime, listDeletedNodes, restoreNode } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
+import { FORGET_EDGES, nodeCommandLabel, nodeKey, useUndoRecorder } from '@/lib/undo';
 import {
   codeOf,
   isLifecycle,
@@ -105,6 +106,7 @@ export function useNodeRestore({
   const queryClient = useQueryClient();
   const [problem, setProblem] = useState<Problem | null>(null);
   const [label, setLabel] = useState('');
+  const record = useUndoRecorder();
   const request = useFrozenRequest((body: NodeStateRequest & { nodeId: string }, key: string) =>
     restoreNode(studyId, body.nodeId, { expectedRevision: body.expectedRevision }, key),
   );
@@ -114,6 +116,13 @@ export function useNodeRestore({
     setProblem(null);
     const result = await attempt;
     if (result.ok) {
+      record(
+        {
+          label: nodeCommandLabel('Restore', result.value.type),
+          action: { op: 'deleteNode', nodeId: result.value.id },
+        },
+        { [nodeKey(result.value.id)]: result.value.revision, [FORGET_EDGES]: null },
+      );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: studyQueryKey(studyId) }),
         invalidateLibrary(queryClient),

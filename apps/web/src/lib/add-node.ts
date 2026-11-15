@@ -13,6 +13,7 @@ import { useRef, useState } from 'react';
 import { ApiError } from './api-client';
 import { classifyError, isRetryable } from './api-errors';
 import { createNode } from './nodes';
+import { nodeCommandLabel, nodeKey, useUndoRecorder } from './undo';
 
 /**
  * Adding a node, and in particular a Scripture node with a duplicate policy (BIB-25/26), shared by
@@ -154,6 +155,7 @@ export function useAddNode<M = null>(studyId: string) {
   const frozen = useRef<Frozen<M> | null>(null);
   const inFlight = useRef(false);
   const [pending, setPending] = useState(false);
+  const record = useUndoRecorder();
 
   async function run(attempt: Frozen<M>): Promise<AddResult<M>> {
     inFlight.current = true;
@@ -161,6 +163,16 @@ export function useAddNode<M = null>(studyId: string) {
     try {
       const node = await createNode(studyId, attempt.body, attempt.key);
       frozen.current = null;
+      // BIB-63: an added node can be undone (deleted); a revisit added nothing.
+      if (node.outcome !== 'focused_existing') {
+        record(
+          {
+            label: nodeCommandLabel('Add', node.type),
+            action: { op: 'deleteNode', nodeId: node.id },
+          },
+          { [nodeKey(node.id)]: node.revision },
+        );
+      }
       return { ok: true, node, meta: attempt.meta };
     } catch (error) {
       const problem = addProblemOf(error);
