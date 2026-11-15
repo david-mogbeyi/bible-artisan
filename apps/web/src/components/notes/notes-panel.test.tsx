@@ -1386,8 +1386,11 @@ describe('NotesPanel offline queue (BIB-36)', () => {
     await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.queueFull), {
       timeout: 2000,
     });
-    expect(screen.getByRole('textbox', { name: 'Note text' }).getAttribute('contenteditable')).toBe(
-      'false',
+    // The editor turns read-only in an effect after the status renders, so wait for it under load.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('textbox', { name: 'Note text' }).getAttribute('contenteditable'),
+      ).toBe('false'),
     );
     expect(editor.getText()).toBe('No room for this');
     const created = captureDownloads();
