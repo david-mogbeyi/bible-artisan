@@ -9,8 +9,13 @@ import { withinRecoveryWindow, withinRecoveryWindowSql } from './study-lifecycle
 export interface StudyAccessOptions {
   /** Run the lookup inside this transaction (required with `lock`). */
   transaction?: Transaction;
-  /** `SELECT ... FOR UPDATE`, for a write that must hold the row until commit. */
-  lock?: boolean;
+  /**
+   * `true`: `SELECT ... FOR UPDATE`, for a write that must hold the row until commit. `'share'`:
+   * `SELECT ... FOR SHARE`, for a write elsewhere that depends on the study's state (e.g. an AI
+   * result published only while the study is not trashed): a concurrent lifecycle change, which
+   * locks the row `FOR UPDATE`, either committed first (seen here) or waits for this commit.
+   */
+  lock?: boolean | 'share';
 }
 
 /**
@@ -145,6 +150,10 @@ function queryOptions({
   if (lock && !transaction) throw new Error('StudyAccessService: lock requires a transaction');
   return {
     ...(transaction ? { transaction } : {}),
-    ...(lock ? { lock: Transaction.LOCK.UPDATE } : {}),
+    ...(lock === 'share'
+      ? { lock: Transaction.LOCK.SHARE }
+      : lock
+        ? { lock: Transaction.LOCK.UPDATE }
+        : {}),
   };
 }

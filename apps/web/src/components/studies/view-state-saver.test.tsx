@@ -96,6 +96,44 @@ describe('ViewStateSaver (BIB-34)', () => {
     );
   });
 
+  it('merges a selection and a viewport change into one save, sent at once with keepalive when the page goes', async () => {
+    replies.push(jsonResponse(200, viewState(2)));
+    function ViewportButton() {
+      const store = useGraphViewStore();
+      return (
+        <button
+          type="button"
+          onClick={() => store.getState().setViewport({ x: 10, y: -20, zoom: 1.5 })}
+        >
+          Pan
+        </button>
+      );
+    }
+    renderWithQuery(
+      <>
+        <ViewStateSaver studyId={STUDY_ID} active openedNodeId={null} openedBranchId={null} />
+        <SelectButton />
+        <ViewportButton />
+      </>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Pan' }));
+    // Before the debounce: leaving sends what is waiting now.
+    window.dispatchEvent(new Event('pagehide'));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(bodies()).toStrictEqual([
+      {
+        expectedRevision: 1,
+        selectedNodeId: NODE_ID,
+        activeBranchId: null,
+        viewport: { x: 10, y: -20, zoom: 1.5 },
+      },
+    ]);
+    expect((fetchMock.mock.calls[0] as [string, RequestInit])[1].keepalive).toBe(true);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 900)));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('saves nothing for an archived study', async () => {
     renderWithQuery(
       <>

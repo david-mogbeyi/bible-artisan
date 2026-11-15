@@ -13,6 +13,7 @@ import { classifyError, isRetryable } from '@/lib/api-errors';
 import { fetchGraph, graphQueryKey, savePositions } from '@/lib/graph';
 import { useGraphViewStore } from '@/lib/graph-store';
 import type { XY } from '@/lib/graph-view';
+import { currentViewRevision, inViewLane, noteViewRevision } from '@/lib/view-revision';
 
 /** PRD section 27: drag positions save 300 ms after the movement ends. */
 export const POSITION_SAVE_DEBOUNCE_MS = 300;
@@ -38,6 +39,11 @@ const UNSAVED_STATES = new Set<LayoutSaveStatus['state']>(['saving', 'failed', '
 interface Frozen {
   body: SavePositionsRequest & { positions: NodePosition[] };
   key: string;
+  /**
+   * Not sent yet: `expectedRevision` is read when the request leaves the study's view lane
+   * (after any view-state save ahead of it), then the request is frozen as sent.
+   */
+  fresh?: boolean;
 }
 
 interface SendOptions {
@@ -68,7 +74,7 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
   const frozen = useRef<Frozen | null>(null);
 
   const viewRevision = useCallback(
-    () => queryClient.getQueryData<GraphResponse>(graphQueryKey(studyId))?.viewRevision ?? 1,
+    () => currentViewRevision(queryClient, studyId),
     [queryClient, studyId],
   );
 
@@ -84,6 +90,7 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
 
   const acknowledge = useCallback(
     (revision: number, saved: readonly NodePosition[]) => {
+      noteViewRevision(queryClient, studyId, revision);
       queryClient.setQueryData<GraphResponse>(graphQueryKey(studyId), (old) => {
         if (!old) return old;
         const next = new Map(old.positions.map((p) => [p.nodeId, p]));
@@ -121,8 +128,18 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
         for (;;) {
           setStatus({ state: 'saving' });
           try {
-            const response = await savePositions(studyId, request.body, request.key, { keepalive });
-            acknowledge(response.viewRevision, request.body.positions);
+            // In the study's view lane, so a view-state save sent meanwhile can't make it stale.
+            await inViewLane(studyId, async () => {
+              if (request.fresh) {
+                request = {
+                  body: { ...request.body, expectedRevision: viewRevision() },
+                  key: request.key,
+                };
+              }
+              const sent = request;
+              const response = await savePositions(studyId, sent.body, sent.key, { keepalive });
+              acknowledge(response.viewRevision, sent.body.positions);
+            });
             inFlight.current = false;
             if (store.getState().pendingIds.size > 0) await flushRef.current();
             else setStatus({ state: 'saved' });
@@ -148,6 +165,7 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
               request = {
                 body: { expectedRevision: viewRevision(), positions },
                 key: crypto.randomUUID(),
+                fresh: true,
               };
               conflictRetried = true;
               continue;
@@ -206,7 +224,11 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
       });
       if (positions.length === 0) return;
       await send(
-        { body: { expectedRevision: viewRevision(), positions }, key: crypto.randomUUID() },
+        {
+          body: { expectedRevision: viewRevision(), positions },
+          key: crypto.randomUUID(),
+          fresh: true,
+        },
         options,
       );
     },

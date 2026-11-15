@@ -115,7 +115,9 @@ export class ResumeService {
         }
         if (body.viewport !== undefined) values.viewport = body.viewport;
         if (body.panes !== undefined) values.paneState = body.panes;
-        const contextFields = ['selectedNodeId', 'activeBranchId', 'readerReferenceId'] as const;
+        // The reader's passage is where to reopen the reader, not a newer resume context: the
+        // reader saves it right after recording the visit, which must stay the newer of the two.
+        const contextFields = ['selectedNodeId', 'activeBranchId'] as const;
         if (contextFields.some((field) => body[field] !== undefined)) {
           values.contextSavedAt = new Date();
         }

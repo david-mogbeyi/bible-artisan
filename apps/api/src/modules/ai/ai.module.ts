@@ -84,6 +84,6 @@ export function providerFromEnv(env: Env): AiProvider | null {
     AiSummaryService,
     ContextCandidatesService,
   ],
-  exports: [AiJobRunnerService, AiOperationsService],
+  exports: [AiJobRunnerService, AiJobsService, AiOperationsService],
 })
 export class AiModule {}

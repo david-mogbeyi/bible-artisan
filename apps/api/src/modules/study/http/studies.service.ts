@@ -30,6 +30,7 @@ import { ENV } from '../../../config/config.module';
 import { cursorSecret, type Env } from '../../../config/env';
 import { StudyNode } from '../../../database/models/study-node.model';
 import { Study } from '../../../database/models/study.model';
+import { AiJobsService } from '../../ai/ai-jobs.service';
 import type { AppendEventInput } from '../../thread/thread.service';
 import { ReferenceService } from '../../bible-content/reference/reference.service';
 import { NotesSearchService } from '../../notes/notes-search.service';
@@ -91,6 +92,7 @@ export class StudiesService {
     private readonly references: ReferenceService,
     private readonly notesSearch: NotesSearchService,
     private readonly graph: StudyGraphService,
+    private readonly aiJobs: AiJobsService,
     @Inject(ENV) env: Env,
   ) {
     this.cursorKey = libraryCursorKey(cursorSecret(env));
@@ -410,6 +412,11 @@ export class StudiesService {
           expectedRevision,
           values,
         });
+        // A trashed study gets no AI work: its queued and running jobs end in this transaction,
+        // rather than waiting for the worker to notice (none of its content is sent afterwards).
+        if (transition === 'trash') {
+          await this.aiJobs.cancelForTrashedStudy(m.ownerId, m.studyId, m.transaction);
+        }
         const event = await m.appendEvent({
           eventType: STUDY_LIFECYCLE_EVENTS[transition],
           ...(transition === 'restore' ? { payload: { restoredTo: updated.lifecycle } } : {}),

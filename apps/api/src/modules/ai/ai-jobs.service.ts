@@ -237,7 +237,10 @@ export class AiJobsService {
    */
   async cancelActive(
     scope: { ownerId: string; studyId?: string },
-    reason: Extract<AiJobErrorCode, 'CONSENT_REVOKED' | 'AI_DISABLED_FOR_STUDY'>,
+    reason: Extract<
+      AiJobErrorCode,
+      'CONSENT_REVOKED' | 'AI_DISABLED_FOR_STUDY' | 'STUDY_UNAVAILABLE'
+    >,
     transaction: Transaction,
   ): Promise<number> {
     const [affected] = await AiJob.update(
@@ -259,6 +262,21 @@ export class AiJobsService {
       },
     );
     return affected;
+  }
+
+  /**
+   * Trashing a study (Study's lifecycle mutation, under its study lock): its waiting and running
+   * jobs are cancelled as `STUDY_UNAVAILABLE` in the trash's own transaction, so none of them is
+   * leased afterwards and a running one's result is discarded at publish (its job is no longer
+   * `running`). Restoring the study does not bring them back; the user asks again. Returns the
+   * number cancelled.
+   */
+  cancelForTrashedStudy(
+    ownerId: string,
+    studyId: string,
+    transaction: Transaction,
+  ): Promise<number> {
+    return this.cancelActive({ ownerId, studyId }, 'STUDY_UNAVAILABLE', transaction);
   }
 
   /**

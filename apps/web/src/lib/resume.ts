@@ -32,9 +32,11 @@ export function saveViewState(
   studyId: string,
   body: SaveViewStateRequest,
   idempotencyKey: string,
+  { keepalive = false }: { keepalive?: boolean } = {},
 ): Promise<SaveViewStateResponse> {
   return apiFetch(`${studyPath(studyId)}/view-state`, saveViewStateResponseSchema, {
     method: 'PATCH',
+    keepalive,
     headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
     body: JSON.stringify(body),
   });

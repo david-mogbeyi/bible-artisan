@@ -219,6 +219,31 @@ describe('deterministic resume (BIB-34)', () => {
     });
   });
 
+  it("keeps resuming at a visited passage when the reader then saves where it is (the reader's passage is not a newer context)", async () => {
+    const { studyId, questionNodeId } = await createStudy(alice);
+    await saveView(studyId, { selectedNodeId: questionNodeId });
+    const savedAt = (await resume(studyId)).viewState.contextSavedAt;
+    await visit(studyId, john.id);
+    // The reader saves its passage right after recording the visit.
+    await saveView(studyId, { readerReferenceId: john.id });
+    const resumed = await resume(studyId);
+    expect({
+      target: resumed.target,
+      readerReferenceId: resumed.viewState.readerReferenceId,
+      contextSavedAt: resumed.viewState.contextSavedAt,
+    }).toStrictEqual({
+      target: {
+        kind: 'passage',
+        nodeId: null,
+        referenceId: john.id,
+        branchId: null,
+        fallback: false,
+      },
+      readerReferenceId: john.id,
+      contextSavedAt: savedAt,
+    });
+  });
+
   it('falls back from a deleted node to the surviving branch root, then the starting passage, then the study', async () => {
     const { studyId, questionNodeId, rootNodeId, branchId } = await createStudy(alice);
     const thoughtId = await addNode(studyId, 'thought', 'A passing thought');

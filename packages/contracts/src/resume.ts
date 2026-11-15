@@ -25,7 +25,8 @@ export const viewportSchema = z.strictObject({
 });
 export type Viewport = z.infer<typeof viewportSchema>;
 
-export const PANE_NAMES = ['graph', 'nodes', 'notes', 'thread', 'reader'] as const;
+/** `summary` is the narrow layout's Summary tab (BIB-38); the web saves which tab is open. */
+export const PANE_NAMES = ['graph', 'nodes', 'notes', 'thread', 'reader', 'summary'] as const;
 export type PaneName = (typeof PANE_NAMES)[number];
 /** Which panes are open (true) or collapsed (false). Names only, never content. */
 export const paneStateSchema = z.partialRecord(z.enum(PANE_NAMES), z.boolean());
@@ -59,7 +60,10 @@ export const viewStateSchema = z.object({
   readerReferenceId: z.uuid().nullable(),
   viewport: viewportSchema.nullable(),
   panes: paneStateSchema.nullable(),
-  /** When the context (selection, branch, passage) was last saved; null when never. */
+  /**
+   * When the context (selection, branch) was last saved; null when never. A reader passage save
+   * does not move it: the deliberate visit (a `scripture_opened` event) is what resume compares.
+   */
   contextSavedAt: z.iso.datetime().nullable(),
 });
 export type ViewState = z.infer<typeof viewStateSchema>;

@@ -17,7 +17,9 @@ import {
   TRANSLATIONS_QUERY_KEY,
 } from '@/lib/bible';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
+import { useEndSessionOnLeave } from '@/lib/study-session';
 import { invalidateThread, recordActivity } from '@/lib/thread';
+import { patchViewState } from '@/lib/view-revision';
 import { BibleReader, type FocusRequest, usePassage } from './bible-reader';
 import { type Navigation, ReferenceSearch } from './bible-search';
 import { ProblemAlert } from './problem-alert';
@@ -118,10 +120,13 @@ function BibleWorkspace() {
   // BIB-55: record the pending deliberate visit once its passage text has loaded.
   const loaded = passage.isSuccess && !passage.isPlaceholderData;
   const studyActive = study.data?.lifecycle === 'active';
+  // BIB-33: leaving the study (not just for its own page) ends this tab's session in it.
+  useEndSessionOnLeave(studyId, studyActive);
   useEffect(() => {
     if (!pendingVisit || sentVisit.current === pendingVisit) return;
     if (!studyId || !studyActive || !loaded || pendingVisit.referenceId !== referenceId) return;
     sentVisit.current = pendingVisit;
+    const visited = pendingVisit.referenceId;
     recordActivity(studyId, {
       kind: 'visit',
       clientMutationId: crypto.randomUUID(),
@@ -133,6 +138,8 @@ function BibleWorkspace() {
       (recorded) => {
         lastVisitEventId.current = recorded.eventId;
         void invalidateThread(queryClient, studyId);
+        // BIB-34: where to reopen the reader in this study, saved after the visit (best effort).
+        patchViewState(queryClient, studyId, { readerReferenceId: visited }).catch(() => undefined);
       },
       // Capture is best effort: a failed visit never blocks reading (the offline queue, BIB-36,
       // will retry it).
