@@ -871,6 +871,47 @@ describe('node lifecycle: establish observations, duplicate, delete and restore'
       });
     });
 
+    it('gives the relationships the latest delete removed priority over older skipped ones, so a restore brings back the graph as it was just before the delete', async () => {
+      const { studyId } = await createStudy(alice);
+      const x = await thought(alice, studyId, 'X');
+      const y = await thought(alice, studyId, 'Y');
+      const z = await thought(alice, studyId, 'Z');
+      const xy = await connect(alice, studyId, x, y, 'explains');
+      await send(alice, 'delete', deletePath(studyId, x), { expectedRevision: 1 });
+      await db.query(
+        `INSERT INTO study_node (study_id, owner_id, type, origin, body)
+         SELECT $1, $2, 'thought', 'user', 'Filler' FROM generate_series(1, 80)`,
+        { bind: [studyId, alice.user.id] },
+      );
+      await db.query(
+        `INSERT INTO study_edge (study_id, owner_id, source_node_id, target_node_id, type, origin)
+         SELECT $1, $2, s.id, t.id, 'supports', 'user'
+           FROM study_node s JOIN study_node t ON s.id <> t.id
+          WHERE s.study_id = $1 AND t.study_id = $1 AND s.body = 'Filler' AND t.body = 'Filler'
+          LIMIT 6000`,
+        { bind: [studyId, alice.user.id] },
+      );
+      // At the cap, xy stays deleted (still naming x).
+      const first = await send(alice, 'post', restorePath(studyId, x), { expectedRevision: 2 });
+      expect(first.body).toMatchObject({ skippedEdges: [{ edgeId: xy, reason: 'limit' }] });
+      // One slot frees up and the user spends it on a new relationship xz, which is live when x
+      // is deleted again: the restore must bring xz back, not the older xy.
+      await db.query(
+        `UPDATE study_edge SET deleted_at = now() WHERE id = (
+           SELECT id FROM study_edge WHERE study_id = $1 AND deleted_at IS NULL LIMIT 1)`,
+        { bind: [studyId] },
+      );
+      const xz = await connect(alice, studyId, x, z, 'references');
+      await send(alice, 'delete', deletePath(studyId, x), { expectedRevision: 3 });
+      const again = await send(alice, 'post', restorePath(studyId, x), { expectedRevision: 4 });
+      expect(again.body).toMatchObject({
+        restoredEdgeIds: [xz],
+        skippedEdges: [{ edgeId: xy, reason: 'limit' }],
+      });
+      const kept = await StudyEdge.findByPk(xy, { rejectOnEmpty: true });
+      expect([kept.deletedAt !== null, kept.deletedWithNodeId]).toStrictEqual([true, x]);
+    });
+
     it('promotes the oldest live duplicate when a canonical passage is deleted, and restores the old canonical as its duplicate, never two live canonicals', async () => {
       const { studyId } = await createStudy(alice);
       const canonical = await createNode(alice, studyId, {
