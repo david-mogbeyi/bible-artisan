@@ -143,6 +143,36 @@ describe('ThreadPanel', () => {
     expect(screen.queryByRole('button', { name: 'Load more events' })).toBeNull();
   });
 
+  it('names an action that accepted an AI suggestion by its acceptance, so the card shows the AI origin (FR-AI-013)', async () => {
+    const accepted = 'eeeeeeee-2222-4333-8444-555555555555';
+    pages.set('all|', {
+      items: [
+        event(6, {
+          type: 'ai_suggestion_accepted',
+          displayText: 'Added the AI-suggested question “What does the passage add?”',
+          correlationId: accepted,
+          targetRef: null,
+          originRef: null,
+        }),
+        event(5, {
+          type: 'question_created',
+          displayText: 'Asked “What does the passage add?”',
+          correlationId: accepted,
+          targetRef: null,
+          originRef: null,
+        }),
+      ],
+      nextCursor: null,
+    });
+    renderWithQuery(<ThreadPanel study={STUDY} />);
+    const list = await screen.findByRole('list', { name: 'Thread events' });
+    expect(
+      within(list)
+        .getAllByRole('article')
+        .map((card) => textOf(card.querySelector('p'))),
+    ).toStrictEqual(['Added the AI-suggested question “What does the passage add?”']);
+  });
+
   it('filters the thread and explains an empty one', async () => {
     pages.set('all|', { items: [event(1)], nextCursor: null });
     pages.set('conclusions|', { items: [], nextCursor: null });

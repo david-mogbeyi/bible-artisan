@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReasoningStep } from '@bible-artisan/contracts';
+import type { ReasoningPathResponse, ReasoningStep } from '@bible-artisan/contracts';
 import { useQuery } from '@tanstack/react-query';
 import { useId, useState } from 'react';
 import { fetchReasoning, reasoningQueryKey } from '@/lib/ai';
@@ -77,7 +77,7 @@ function ReasoningPanel({ id, studyId, nodeId }: { id: string; studyId: string; 
               <ul className="list-disc pl-5 text-sm">
                 {path.data.gaps.map((gap, index) => (
                   <li key={`${gap.code}-${gap.versionId ?? ''}-${gap.edgeId ?? ''}-${index}`}>
-                    {gap.message}
+                    {gapText(gap, path.data.steps)}
                   </li>
                 ))}
               </ul>
@@ -87,6 +87,14 @@ function ReasoningPanel({ id, studyId, nodeId }: { id: string; studyId: string; 
       ) : null}
     </section>
   );
+}
+
+/** A gap about one version names that version, so it never reads as being about the latest. */
+function gapText(gap: ReasoningPathResponse['gaps'][number], steps: ReasoningStep[]): string {
+  const version = steps.find((step) => step.kind === 'version' && step.versionId === gap.versionId);
+  return version?.kind === 'version'
+    ? `Version ${version.versionNumber}: ${gap.message}`
+    : gap.message;
 }
 
 function stepText(step: ReasoningStep): string {

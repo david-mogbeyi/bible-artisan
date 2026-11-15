@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TRANSLATION } from '@/test/bible-fixtures';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
-import { SKIPPED_EDGES_COPY } from './deleted-nodes';
+import { deletedText, restoredText, SKIPPED_EDGES_COPY } from './deleted-nodes';
 import { NODE_ACTION_COPY } from './node-actions';
 import { NodesSection } from './nodes-section';
 
@@ -304,6 +304,26 @@ describe('node detail actions', () => {
       body: { expectedRevision: 2 },
       key: expect.stringMatching(/^[0-9a-f-]{36}$/),
     });
+  });
+
+  it('never doubles the period when the node label already ends a sentence', () => {
+    expect(deletedText('observation', 'Temporary observation.', 0)).toBe(
+      'Deleted Observation: Temporary observation.',
+    );
+    expect(deletedText('question', 'Who is my neighbor?', 0)).toBe(
+      'Deleted Question: Who is my neighbor?',
+    );
+    expect(deletedText('thought', 'No period', 0)).toBe('Deleted Thought: No period.');
+    const result = {
+      type: 'observation',
+      restoredEdgeIds: [],
+      skippedEdges: [],
+      canonicalNodeId: null,
+      establishmentClearedNodeIds: [],
+    } as unknown as Parameters<typeof restoredText>[0];
+    expect(restoredText(result, 'Temporary observation.', () => null)).toBe(
+      'Restored Observation: Temporary observation. 0 relationships restored.',
+    );
   });
 
   it('lists a relationship the restore skipped at the limit and restores it on its own through the edge restore route with the reported revision', async () => {

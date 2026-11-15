@@ -1,3 +1,4 @@
+import { QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { graphQueryKey } from '@/lib/graph';
@@ -94,6 +95,34 @@ describe('ViewStateSaver (BIB-34)', () => {
           .viewRevision,
       ).toBe(6),
     );
+  });
+
+  it('saves nothing when the saved selection, known only once the view state loads, is restored', async () => {
+    replies.push(jsonResponse(200, viewState(4)));
+    function Restore() {
+      const store = useGraphViewStore();
+      return (
+        <button type="button" onClick={() => store.getState().select([NODE_ID], 'canvas')}>
+          Restore
+        </button>
+      );
+    }
+    const { queryClient, rerender } = renderWithQuery(
+      <>
+        <ViewStateSaver studyId={STUDY_ID} active openedNodeId={null} openedBranchId={null} />
+        <Restore />
+      </>,
+    );
+    queryClient.setQueryData(graphQueryKey(STUDY_ID), { viewRevision: 3 });
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <ViewStateSaver studyId={STUDY_ID} active openedNodeId={NODE_ID} openedBranchId={null} />
+        <Restore />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 900)));
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('merges a selection and a viewport change into one save, sent at once with keepalive when the page goes', async () => {

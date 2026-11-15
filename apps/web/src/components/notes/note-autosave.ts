@@ -347,14 +347,26 @@ export class NoteAutosave {
       this.checkpointWanted = false;
       this.resolutionWanted = null;
     }
+    const created = attempt !== this.frozen;
     this.inFlight = attempt;
     this.frozen = attempt;
     this.setState({ kind: 'saving' });
     const sent = attempt;
-    this.options.send(sent.body, sent.key).then(
-      (response) => this.succeeded(sent, response),
-      (error: unknown) => this.failed(sent, error),
-    );
+    const send = () =>
+      this.options.send(sent.body, sent.key).then(
+        (response) => this.succeeded(sent, response),
+        (error: unknown) => this.failed(sent, error),
+      );
+    if (created && this.persisted) {
+      // The offline queue holds this note's work: it gets the new request, with its key, before
+      // the request goes out. If the tab closes before the answer, the replay then resends this
+      // key (the server replays the commit) instead of a new request that would read as a
+      // conflict with this one.
+      this.persistOffline();
+      void this.persistChain.then(send);
+      return;
+    }
+    void send();
   }
 
   /**

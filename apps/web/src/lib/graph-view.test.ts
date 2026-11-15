@@ -450,9 +450,9 @@ describe('branch view options (BIB-60)', () => {
 });
 
 describe('focusStart', () => {
-  const many = Array.from({ length: 501 }, (_, i) => node(i + 1, i === 9 ? 'question' : 'thought'));
+  const many = Array.from({ length: 500 }, (_, i) => node(i + 1, i === 9 ? 'question' : 'thought'));
 
-  it('opens a study over 500 nodes on the main question, else the oldest branch root, else the oldest node', () => {
+  it('opens a study of 500 or more nodes on the main question, else the oldest branch root, else the oldest node', () => {
     const branches = [
       {
         id: id(800),
@@ -465,6 +465,6 @@ describe('focusStart', () => {
     expect(focusStart(graph({ nodes: many, branches }), id(10))).toBe(id(10));
     expect(focusStart(graph({ nodes: many, branches }), null)).toBe(id(20));
     expect(focusStart(graph({ nodes: many }), id(77777))).toBe(id(60));
-    expect(focusStart(graph({ nodes: many.slice(0, 500) }), id(10))).toBeNull();
+    expect(focusStart(graph({ nodes: many.slice(0, 499) }), id(10))).toBeNull();
   });
 });

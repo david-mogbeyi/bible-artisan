@@ -1,3 +1,5 @@
+import { NODE_STATUS_NAMES } from '@bible-artisan/contracts';
+
 /**
  * Deterministic, human-readable thread copy (BIB-32; PRD section 13). Built only from what the
  * event recorded and the current labels of the things it names: it never states a motive that
@@ -90,7 +92,20 @@ const SIMPLE: Record<string, (input: DisplayInput) => string> = {
   source_created: (i) => `Added the source ${name(i.target, 'a source')}`,
   source_updated: (i) => `Edited the source ${name(i.target, 'a source')}`,
   conclusion_created: (i) => `Drafted the conclusion ${name(i.target, 'a conclusion')}`,
-  conclusion_updated: (i) => `Revised the conclusion ${name(i.target, 'a conclusion')}`,
+  conclusion_updated: (i) => {
+    const conclusion = name(i.target, 'a conclusion');
+    const status = i.payload.status;
+    // Only a new statement is a revision; a status-only change says what it was marked.
+    if (i.payload.statementChanged !== false || typeof status !== 'string') {
+      return `Revised the conclusion ${conclusion}`;
+    }
+    const named = (NODE_STATUS_NAMES as Record<string, string | undefined>)[status] ?? status;
+    const cleared =
+      i.payload.previousEstablished === true && i.payload.established === false
+        ? ' (“Established by me” cleared)'
+        : '';
+    return `Marked the conclusion ${conclusion} ${named}${cleared}`;
+  },
   conclusion_challenged: (i) => `Challenged the conclusion ${name(i.target, 'a conclusion')}`,
   conclusion_established: (i) => `Established the conclusion ${name(i.target, 'a conclusion')}`,
   conclusion_abandoned: (i) => `Abandoned the conclusion ${name(i.target, 'a conclusion')}`,
