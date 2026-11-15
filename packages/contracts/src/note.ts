@@ -43,6 +43,10 @@ export const MAX_ORDERED_LIST_START = 10_000;
 export const MAX_NOTE_REFERENCES = 500;
 /** Longest reference label a `scriptureReference` node may carry (canonical labels are shorter). */
 export const MAX_NOTE_REFERENCE_LABEL_LENGTH = 200;
+/** Most node mentions (`nodeMention` nodes) in one note (BIB-58). */
+export const MAX_NOTE_MENTIONS = 500;
+/** Longest label a `nodeMention` may carry: a node label is at most 160 code points. */
+export const MAX_NOTE_MENTION_LABEL_LENGTH = 200;
 /** Version of the document schema stored with each note and version. */
 export const NOTE_SCHEMA_VERSION = 1;
 
@@ -63,6 +67,11 @@ export const NOTE_NOT_TRASHED = 'NOTE_NOT_TRASHED';
  * edition, or carries a label that is not exactly that reference's canonical label.
  */
 export const NOTE_REFERENCE_INVALID = 'NOTE_REFERENCE_INVALID';
+/**
+ * 422 (BIB-58): a new or changed `nodeMention` names a node that is not a live node of this study,
+ * or carries a label that is not that node's current label.
+ */
+export const NOTE_MENTION_INVALID = 'NOTE_MENTION_INVALID';
 
 export const NOTE_ERROR_CODES = [
   NOTE_TARGET_NOT_FOUND,
@@ -71,6 +80,7 @@ export const NOTE_ERROR_CODES = [
   NOTE_TRASHED,
   NOTE_NOT_TRASHED,
   NOTE_REFERENCE_INVALID,
+  NOTE_MENTION_INVALID,
 ] as const;
 export type NoteErrorCode = (typeof NOTE_ERROR_CODES)[number];
 
@@ -81,6 +91,7 @@ export const NOTE_TEXT_INVALID = 'Remove control or invalid characters';
 export const NOTE_MARK_REPEATED = 'Each formatting mark may appear once per text run';
 export const NOTE_EDIT_EMPTY = 'Send new content or ask for a checkpoint';
 export const NOTE_TOO_MANY_REFERENCES = `A note can have at most ${MAX_NOTE_REFERENCES} Bible reference links`;
+export const NOTE_TOO_MANY_MENTIONS = `A note can mention at most ${MAX_NOTE_MENTIONS} nodes`;
 export const NOTE_RESOLUTION_NEEDS_CONTENT = 'Send the content that resolves the conflict';
 
 /**
@@ -119,7 +130,19 @@ export interface NoteScriptureReference {
   attrs: { referenceId: string; label: string };
 }
 
-export type NoteInline = NoteText | NoteHardBreak | NoteScriptureReference;
+/**
+ * A mention of a node of the same study (BIB-58): its opaque id and its label when mentioned. The
+ * server checks a new or changed mention (live node of this study, exactly its current label); a
+ * mention kept from the stored note is not re-checked, so a node edited or deleted later never
+ * blocks a save. Readers show a deleted node's mention as such (never repaired). An inline atom: no
+ * text runs, no marks. It never creates a node or edge.
+ */
+export interface NoteNodeMention {
+  type: 'nodeMention';
+  attrs: { nodeId: string; label: string };
+}
+
+export type NoteInline = NoteText | NoteHardBreak | NoteScriptureReference | NoteNodeMention;
 
 export interface NoteParagraph {
   type: 'paragraph';
@@ -210,6 +233,17 @@ const noteInlineSchema = z.discriminatedUnion('type', [
         .refine((text) => !FORBIDDEN_NOTE_TEXT.test(text), { message: NOTE_TEXT_INVALID }),
     }),
   }),
+  z.strictObject({
+    type: z.literal('nodeMention'),
+    attrs: z.strictObject({
+      nodeId: z.uuid(),
+      label: z
+        .string()
+        .min(1)
+        .max(MAX_NOTE_MENTION_LABEL_LENGTH)
+        .refine((text) => !FORBIDDEN_NOTE_TEXT.test(text), { message: NOTE_TEXT_INVALID }),
+    }),
+  }),
 ]);
 
 const noteParagraphSchema = z.strictObject({
@@ -280,35 +314,44 @@ function rawBoundsProblem(value: unknown): string | null {
 }
 
 /**
- * The deepest nesting level, the number of document nodes (`doc` included) and of
- * `scriptureReference` nodes.
+ * The deepest nesting level, the number of document nodes (`doc` included), of
+ * `scriptureReference` nodes and of `nodeMention` nodes.
  */
-function measure(doc: NoteDocument): { depth: number; nodes: number; references: number } {
+function measure(doc: NoteDocument): {
+  depth: number;
+  nodes: number;
+  references: number;
+  mentions: number;
+} {
   let depth = 0;
   let nodes = 0;
   let references = 0;
+  let mentions = 0;
   const stack: [{ type?: string; content?: readonly unknown[] }, number][] = [[doc, 1]];
   while (stack.length > 0) {
     const [node, level] = stack.pop() as [{ type?: string; content?: readonly unknown[] }, number];
     nodes += 1;
     if (node.type === 'scriptureReference') references += 1;
+    if (node.type === 'nodeMention') mentions += 1;
     depth = Math.max(depth, level);
     for (const child of node.content ?? []) {
       stack.push([child as { content?: readonly unknown[] }, level + 1]);
     }
   }
-  return { depth, nodes, references };
+  return { depth, nodes, references, mentions };
 }
 
 const noteDocumentShapeSchema = z
   .strictObject({ type: z.literal('doc'), content: z.array(noteBlockSchema).min(1) })
   .superRefine((doc, ctx) => {
-    const { depth, nodes, references } = measure(doc);
+    const { depth, nodes, references, mentions } = measure(doc);
     if (depth > MAX_NOTE_DEPTH) ctx.addIssue({ code: 'custom', message: NOTE_TOO_DEEP });
     else if (nodes > MAX_NOTE_NODES) {
       ctx.addIssue({ code: 'custom', message: NOTE_TOO_MANY_NODES });
     } else if (references > MAX_NOTE_REFERENCES) {
       ctx.addIssue({ code: 'custom', message: NOTE_TOO_MANY_REFERENCES });
+    } else if (mentions > MAX_NOTE_MENTIONS) {
+      ctx.addIssue({ code: 'custom', message: NOTE_TOO_MANY_MENTIONS });
     }
   });
 
@@ -336,7 +379,7 @@ function inlineText(content: readonly NoteInline[] | undefined): string {
     .map((node) =>
       node.type === 'text'
         ? node.text
-        : node.type === 'scriptureReference'
+        : node.type === 'scriptureReference' || node.type === 'nodeMention'
           ? node.attrs.label
           : '\n',
     )
@@ -358,6 +401,20 @@ export function noteReferenceLinks(doc: NoteDocument): NoteScriptureReference['a
     }
   }
   return links;
+}
+
+/** Every `nodeMention` node's attributes, in document order (BIB-58). */
+export function noteNodeMentions(doc: NoteDocument): NoteNodeMention['attrs'][] {
+  const mentions: NoteNodeMention['attrs'][] = [];
+  const stack: unknown[] = [...doc.content].reverse();
+  while (stack.length > 0) {
+    const node = stack.pop() as NoteBlock | NoteListItem | NoteInline;
+    if (node.type === 'nodeMention') mentions.push(node.attrs);
+    if ('content' in node && node.content) {
+      for (const child of [...node.content].reverse()) stack.push(child);
+    }
+  }
+  return mentions;
 }
 
 function blocksText(blocks: readonly NoteBlock[]): string {
@@ -519,6 +576,11 @@ export const noteResponseSchema = z.object({
   updatedAt: z.iso.datetime(),
   /** When the note was moved to the trash; null for a live note. */
   deletedAt: z.iso.datetime().nullable(),
+  /**
+   * BIB-58: the nodes this note mentions that are no longer live nodes of the study (deleted), in
+   * first-mention order, so readers can say so instead of linking. Ids only.
+   */
+  deletedMentionNodeIds: z.array(z.uuid()),
 });
 
 export type NoteResponse = z.infer<typeof noteResponseSchema>;

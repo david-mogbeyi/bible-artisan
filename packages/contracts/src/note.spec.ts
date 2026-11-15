@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createNoteRequestSchema,
   MAX_NOTE_DEPTH,
+  MAX_NOTE_MENTIONS,
   MAX_NOTE_NODES,
   MAX_NOTE_REFERENCES,
   NOTE_EDIT_EMPTY,
@@ -9,12 +10,14 @@ import {
   NOTE_TARGET_EXCLUSIVE,
   NOTE_TEXT_INVALID,
   NOTE_TOO_DEEP,
+  NOTE_TOO_MANY_MENTIONS,
   NOTE_TOO_MANY_NODES,
   NOTE_TOO_MANY_REFERENCES,
   type NoteParagraph,
   noteCharacterCount,
   type NoteDocument,
   noteDocumentSchema,
+  noteNodeMentions,
   notePlainText,
   notePreview,
   noteReferenceLinks,
@@ -343,6 +346,43 @@ describe('verified reference links and Scripture targets (BIB-24)', () => {
     });
     expect(both.error?.issues.map((i) => [i.path, i.message])).toStrictEqual([
       [['targetAnchor'], NOTE_TARGET_EXCLUSIVE],
+    ]);
+  });
+});
+
+describe('node mentions (BIB-58)', () => {
+  const NODE = '2b0f7d9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f';
+  const mention = (attrs: object): unknown => ({ type: 'nodeMention', attrs });
+  const withMention = (...inline: unknown[]): unknown =>
+    doc({ type: 'paragraph', content: inline });
+
+  it('accepts a nodeMention with exactly an id and a label, and derives its label as text', () => {
+    const parsed = noteDocumentSchema.parse(
+      withMention({ type: 'text', text: 'See ' }, mention({ nodeId: NODE, label: 'A thought' })),
+    );
+    expect(notePlainText(parsed)).toBe('See A thought');
+    expect(noteNodeMentions(parsed)).toStrictEqual([{ nodeId: NODE, label: 'A thought' }]);
+  });
+
+  it('refuses extra attributes, marks, a malformed id or an unsafe label', () => {
+    for (const bad of [
+      mention({ nodeId: NODE, label: 'A', href: 'https://example.test' }),
+      { ...(mention({ nodeId: NODE, label: 'A' }) as object), marks: [{ type: 'bold' }] },
+      mention({ nodeId: 'node-1', label: 'A' }),
+      mention({ nodeId: NODE, label: '' }),
+      mention({ nodeId: NODE, label: 'A\nB' }),
+    ]) {
+      expect(noteDocumentSchema.safeParse(withMention(bad)).success).toBe(false);
+    }
+  });
+
+  it(`accepts ${MAX_NOTE_MENTIONS} mentions and refuses one more`, () => {
+    const many = (n: number) =>
+      withMention(...Array.from({ length: n }, () => mention({ nodeId: NODE, label: 'A' })));
+    expect(noteDocumentSchema.safeParse(many(MAX_NOTE_MENTIONS)).success).toBe(true);
+    const refused = noteDocumentSchema.safeParse(many(MAX_NOTE_MENTIONS + 1));
+    expect(refused.error?.issues.map((issue) => issue.message)).toStrictEqual([
+      NOTE_TOO_MANY_MENTIONS,
     ]);
   });
 });

@@ -373,7 +373,12 @@ export function NotesPanel({
             />
           ) : (
             <div className="flex flex-col gap-2 rounded border border-muted p-3">
-              <NoteContent doc={open.data.content} label="Note" studyId={study.id} />
+              <NoteContent
+                doc={open.data.content}
+                label="Note"
+                studyId={study.id}
+                deletedNodeIds={open.data.deletedMentionNodeIds}
+              />
               <button type="button" onClick={closeNote} className="self-start underline">
                 Close note
               </button>

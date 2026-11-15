@@ -9,6 +9,7 @@ import {
   type NoteDocument,
   type NoteMutationResponse,
   type NoteConflictResolution,
+  noteNodeMentions,
   notePlainText,
   type NoteResponse,
   STUDY_ARCHIVED,
@@ -54,6 +55,7 @@ import {
 import { useNoteTabs } from '@/lib/note-tabs';
 import { invalidateLibrary } from '@/lib/studies';
 import { MAKE_NODE_COPY, MakeNodeForm } from './make-node-form';
+import { MENTION_COPY, MentionNodeForm } from './mention-node-form';
 import { NOTE_LINK_REL, NOTE_LINK_TARGET } from './note-content';
 import { characterCount, NoteAutosave, type SaveState } from './note-autosave';
 import { cleanNoteText, type NoteContentProblem, toNoteDraft } from './note-document';
@@ -102,6 +104,8 @@ export const INVALID_COPY: Record<NoteContentProblem, string> = {
     'This note has too many paragraphs, list items or line breaks to save. Try splitting it into two notes. Your text is still here.',
   reference:
     "A Bible reference link in this note couldn't be verified, so this can't be saved. Remove it, or resolve the reference again. Your text is still here.",
+  mention:
+    "A node mentioned in this note isn't part of this study any more, so this can't be saved. Remove the mention, or mention the node again. Your text is still here.",
   structure: SAVE_COPY.invalid,
 };
 
@@ -159,6 +163,8 @@ const RESOLVE_COPY = {
  * unsavable. After any mark step, this takes them off again; `toNoteDraft` also drops any that
  * arrive another way.
  */
+const ATOM_LINKS = new Set(['scriptureReference', 'nodeMention']);
+
 const referenceWithoutMarks = new Plugin({
   key: new PluginKey('scriptureReferenceWithoutMarks'),
   appendTransaction(transactions, _old, state) {
@@ -166,7 +172,7 @@ const referenceWithoutMarks = new Plugin({
     if (!marked) return null;
     let tr: Transaction | null = null;
     state.doc.descendants((node, pos) => {
-      if (node.type.name === 'scriptureReference' && node.marks.length > 0) {
+      if (ATOM_LINKS.has(node.type.name) && node.marks.length > 0) {
         tr = (tr ?? state.tr).setNodeMarkup(pos, undefined, node.attrs, []);
       }
     });
@@ -218,6 +224,51 @@ const ScriptureReferenceNode = TiptapNode.create({
 });
 
 /**
+ * A mention of a node of this study (BIB-58): an inline atom holding the node's id and its label
+ * when mentioned, inserted only from "Mention node…" (a live node from the node list). The server
+ * checks a new mention against the node on save (422 `NOTE_MENTION_INVALID`). Its link is
+ * relative (`?node=`), so it opens the node on the study page it is shown on. Marks are stripped
+ * like a reference link's.
+ */
+const NodeMentionNode = TiptapNode.create({
+  name: 'nodeMention',
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return { nodeId: { default: null }, label: { default: '' } };
+  },
+  parseHTML() {
+    return [
+      {
+        tag: 'a[data-node-mention]',
+        getAttrs: (element) => ({
+          nodeId: element.getAttribute('data-node-mention'),
+          label: element.textContent ?? '',
+        }),
+      },
+    ];
+  },
+  renderHTML({ node }) {
+    const nodeId = String(node.attrs.nodeId ?? '');
+    return [
+      'a',
+      { 'data-node-mention': nodeId, href: `?node=${encodeURIComponent(nodeId)}` },
+      String(node.attrs.label ?? ''),
+    ];
+  },
+  renderText({ node }) {
+    return String(node.attrs.label ?? '');
+  },
+});
+
+/** The text an inline atom stands for in plain text: a link's label, else a line break. */
+function leafText(leaf: ProseMirrorNode): string {
+  return ATOM_LINKS.has(leaf.type.name) ? String(leaf.attrs.label ?? '') : '\n';
+}
+
+/**
  * The selection without the whitespace (or block boundaries) at either end, so "Resolve
  * reference" replaces exactly the reference and keeps the spaces around it.
  */
@@ -240,6 +291,7 @@ export function trimmedRange(
  */
 const NOTE_EXTENSIONS = [
   ScriptureReferenceNode,
+  NodeMentionNode,
   StarterKit.configure({
     code: false,
     codeBlock: false,
@@ -288,8 +340,6 @@ function editorCharacters(editor: Editor): number {
   const known = counted.get(doc);
   if (known !== undefined) return known;
   let count = 0;
-  const leafText = (leaf: ProseMirrorNode) =>
-    leaf.type.name === 'scriptureReference' ? String(leaf.attrs.label ?? '') : '\n';
   for (const _ of doc.textBetween(0, doc.content.size, '\n', leafText)) count += 1;
   counted.set(doc, count);
   return count;
@@ -363,8 +413,11 @@ export function NoteEditor({
   const [reloadProblem, setReloadProblem] = useState(false);
   // "Make node…" (BIB-57): the selected text it opened with, and the outcome it announced.
   const [makeNode, setMakeNode] = useState<{ text: string } | null>(null);
-  const [makeNodeMessage, setMakeNodeMessage] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
   const makeNodeButton = useRef<HTMLButtonElement>(null);
+  // "Mention node…" (BIB-58): whether its picker is open, and where focus returns.
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const mentionButton = useRef<HTMLButtonElement>(null);
   // "Resolve reference" (BIB-24): the selection it was asked for, and what came back.
   const [resolving, setResolving] = useState(false);
   const [resolveMessage, setResolveMessage] = useState<string | null>(null);
@@ -697,20 +750,33 @@ export function NoteEditor({
    */
   function openMakeNode() {
     if (!editor || !writable) return;
-    setMakeNodeMessage(null);
-    if (unsaved) return setMakeNodeMessage(MAKE_NODE_COPY.unsaved);
+    setActionMessage(null);
+    if (unsaved) return setActionMessage(MAKE_NODE_COPY.unsaved);
     const { from, to } = trimmedRange(editor.state.doc, editor.state.selection);
-    const leafText = (leaf: ProseMirrorNode) =>
-      leaf.type.name === 'scriptureReference' ? String(leaf.attrs.label ?? '') : '\n';
     const text = editor.state.doc.textBetween(from, to, '\n', leafText);
-    if (text.trim() === '') return setMakeNodeMessage(MAKE_NODE_COPY.noSelection);
+    if (text.trim() === '') return setActionMessage(MAKE_NODE_COPY.noSelection);
     setMakeNode({ text });
   }
 
   function closeMakeNode(message: string | null) {
     setMakeNode(null);
-    setMakeNodeMessage(message);
+    setActionMessage(message);
     makeNodeButton.current?.focus();
+  }
+
+  /** Inserts a mention of the chosen node at the selection (replacing any selected text). */
+  function insertMention(node: { id: string; label: string }) {
+    if (!editor || !writable) return;
+    const { from, to } = editor.state.selection;
+    editor
+      .chain()
+      .focus()
+      .insertContentAt({ from, to }, [
+        { type: 'nodeMention', attrs: { nodeId: node.id, label: node.label } },
+      ])
+      .run();
+    setMentionOpen(false);
+    setActionMessage(MENTION_COPY.inserted);
   }
 
   function removeLink() {
@@ -760,6 +826,18 @@ export function NoteEditor({
       {label}
     </button>
   );
+
+  // BIB-58: mentions of nodes deleted since (as the note was loaded), named by their labels.
+  const deletedMentions = useMemo(() => {
+    const deleted = new Set(note.deletedMentionNodeIds);
+    const labels = new Map<string, string>();
+    for (const mention of noteNodeMentions(note.content)) {
+      if (deleted.has(mention.nodeId) && !labels.has(mention.nodeId)) {
+        labels.set(mention.nodeId, mention.label);
+      }
+    }
+    return [...labels.values()];
+  }, [note.content, note.deletedMentionNodeIds]);
 
   const canSaveVersion =
     !stopped && state.kind !== 'too_long' && state.kind !== 'too_large' && state.kind !== 'invalid';
@@ -826,6 +904,20 @@ export function NoteEditor({
           {MAKE_NODE_COPY.button}
         </button>
         <button
+          ref={mentionButton}
+          type="button"
+          aria-disabled={!writable ? true : undefined}
+          aria-expanded={mentionOpen}
+          onClick={() => {
+            if (!writable) return;
+            setActionMessage(null);
+            setMentionOpen((open) => !open);
+          }}
+          className="rounded border border-muted px-2 py-1 text-sm aria-disabled:opacity-60"
+        >
+          {MENTION_COPY.button}
+        </button>
+        <button
           type="button"
           aria-disabled={!active?.canUndo}
           aria-keyshortcuts="Control+Z"
@@ -844,6 +936,16 @@ export function NoteEditor({
           Redo
         </button>
       </div>
+      {mentionOpen ? (
+        <MentionNodeForm
+          studyId={studyId}
+          onInsert={insertMention}
+          onCancel={() => {
+            setMentionOpen(false);
+            mentionButton.current?.focus();
+          }}
+        />
+      ) : null}
       {makeNode ? (
         <MakeNodeForm
           studyId={studyId}
@@ -900,6 +1002,11 @@ export function NoteEditor({
       ) : null}
 
       <EditorContent editor={editor} />
+      {deletedMentions.length > 0 ? (
+        <p className="text-sm">
+          {`This note mentions ${deletedMentions.length === 1 ? 'a node' : 'nodes'} deleted since: ${deletedMentions.join(', ')}.`}
+        </p>
+      ) : null}
 
       <p
         id={ids.counter}
@@ -1014,9 +1121,9 @@ export function NoteEditor({
       <p role="status" aria-live="polite" className={resolveMessage ? 'text-sm' : 'sr-only'}>
         {resolving ? 'Checking the reference…' : (resolveMessage ?? '')}
       </p>
-      {/* Polite: the outcome of Make node (fixed copy, never the excerpt). */}
-      <p role="status" aria-live="polite" className={makeNodeMessage ? 'text-sm' : 'sr-only'}>
-        {makeNodeMessage ?? ''}
+      {/* Polite: the outcome of Make node or Mention node (fixed copy, never the excerpt). */}
+      <p role="status" aria-live="polite" className={actionMessage ? 'text-sm' : 'sr-only'}>
+        {actionMessage ?? ''}
       </p>
       {candidates ? (
         <div role="group" aria-label="Choose the book" className="flex flex-col gap-2">

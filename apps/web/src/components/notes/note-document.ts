@@ -29,6 +29,8 @@ export type NoteContentProblem =
   | 'too_many_parts'
   /** A Bible reference link the server could not verify (BIB-24, 422 NOTE_REFERENCE_INVALID). */
   | 'reference'
+  /** A node mention the server refused (BIB-58, 422 NOTE_MENTION_INVALID). */
+  | 'mention'
   | 'structure';
 
 /** The editor's content as the API takes it, or why it can't be saved. */
@@ -76,6 +78,9 @@ function keptAttrs(type: string, attrs: Record<string, unknown> | undefined) {
     case 'scriptureReference':
       // Exactly what the allowlist carries; the server verifies both against the corpus.
       return { referenceId: attrs.referenceId, label: attrs.label };
+    case 'nodeMention':
+      // BIB-58: the node's id and its label; the server checks a new mention against the node.
+      return { nodeId: attrs.nodeId, label: attrs.label };
     default:
       return undefined;
   }
@@ -99,7 +104,10 @@ function normalize(node: EditorNode): EditorNode | null {
     ...(text !== undefined ? { text } : {}),
     // A reference link carries no marks (the allowlist refuses them); its editor node allows
     // none, and any that arrive anyway are dropped rather than making the note unsavable.
-    ...(node.marks && node.marks.length > 0 && type !== 'scriptureReference'
+    ...(node.marks &&
+    node.marks.length > 0 &&
+    type !== 'scriptureReference' &&
+    type !== 'nodeMention'
       ? {
           marks: node.marks.map((mark) => {
             const markAttrs = keptAttrs(mark.type, mark.attrs);

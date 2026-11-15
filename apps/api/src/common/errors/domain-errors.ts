@@ -22,6 +22,7 @@ import {
   NOTE_LIMIT_EXCEEDED,
   NOTE_NOT_TRASHED,
   NOTE_REFERENCE_INVALID,
+  NOTE_MENTION_INVALID,
   NOTE_TARGET_NOT_FOUND,
   NOTE_TOO_LONG,
   NOTE_TRASHED,
@@ -293,6 +294,7 @@ const NOTE_MESSAGES: Record<NoteErrorCode, string> = {
   [NOTE_TRASHED]: 'This note is in the trash. Restore it to make changes',
   [NOTE_NOT_TRASHED]: 'This note is not in the trash',
   [NOTE_REFERENCE_INVALID]: 'A Bible reference link in this note could not be verified',
+  [NOTE_MENTION_INVALID]: 'A node mentioned in this note is not part of this study',
 };
 
 /**

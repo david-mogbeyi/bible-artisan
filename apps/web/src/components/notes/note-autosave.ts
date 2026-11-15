@@ -3,6 +3,7 @@ import {
   NOTE_TOO_LONG,
   NOTE_TRASHED,
   NOTE_UNCHANGED,
+  NOTE_MENTION_INVALID,
   NOTE_REFERENCE_INVALID,
   type NoteConflictResolution,
   noteCharacterCount,
@@ -423,6 +424,9 @@ export class NoteAutosave {
       }
       if (code === NOTE_REFERENCE_INVALID) {
         return this.setState({ kind: 'invalid', problem: 'reference' });
+      }
+      if (code === NOTE_MENTION_INVALID) {
+        return this.setState({ kind: 'invalid', problem: 'mention' });
       }
       if (code === NOTE_UNCHANGED) {
         // The server already holds what was sent (at this revision, or the request would have

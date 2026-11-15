@@ -98,6 +98,7 @@ const note = (overrides: Record<string, unknown> = {}) => ({
   createdAt: T,
   updatedAt: T,
   deletedAt: null,
+  deletedMentionNodeIds: [],
   ...overrides,
 });
 const mutation = (overrides: Record<string, unknown> = {}) => ({
@@ -428,6 +429,7 @@ describe('NotesPanel (BIB-23)', () => {
       'Link',
       'Resolve reference',
       'Make node…',
+      'Mention node…',
       'Undo',
       'Redo',
     ]);
@@ -1180,5 +1182,122 @@ describe('Make node from a note excerpt (BIB-57)', () => {
     fireEvent.keyDown(screen.getByLabelText('Node text'), { key: 'Escape' });
     expect(screen.queryByLabelText('Node text')).toBeNull();
     expect(document.activeElement).toBe(makeNodeButton());
+  });
+});
+
+describe('Mentioning study nodes in a note (BIB-58)', () => {
+  async function openNote(content: NoteDocument, overrides: Record<string, unknown> = {}) {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note({ content, ...overrides })));
+    renderPanel();
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    return noteEditor();
+  }
+  const mentioned = (before: string): NoteDocument => ({
+    type: 'doc',
+    content: [
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: before },
+          { type: 'nodeMention', attrs: { nodeId: QUESTION_ID, label: 'What is conscience?' } },
+        ],
+      },
+    ],
+  });
+
+  it('inserts a mention of a node picked from the list, saves it as a nodeMention and announces it', async () => {
+    reply(`PATCH ${NOTE}`, jsonResponse(200, mutation()));
+    const editor = await openNote(doc('See '));
+    act(() => {
+      editor.commands.setTextSelection(5);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Mention node…' }));
+    const picker = await screen.findByRole('form', { name: 'Mention a node' });
+    const select = await within(picker).findByLabelText('Node');
+    expect(document.activeElement).toBe(select);
+    fireEvent.change(select, { target: { value: QUESTION_ID } });
+    fireEvent.click(within(picker).getByRole('button', { name: 'Insert mention' }));
+
+    await waitFor(() =>
+      expect(
+        textOf(
+          within(screen.getByRole('region', { name: 'Note editor' })).getAllByRole('status')[2],
+        ),
+      ).toBe('Mention added.'),
+    );
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved), {
+      timeout: 3000,
+    });
+    expect(
+      requests.filter((r) => r.method !== 'GET').map((r) => [r.method, r.path, r.body]),
+    ).toStrictEqual([['PATCH', NOTE, { expectedRevision: 1, content: mentioned('See ') }]]);
+  });
+
+  it('asks to choose a node before inserting, and Escape closes the picker', async () => {
+    await openNote(doc('See '));
+    fireEvent.click(screen.getByRole('button', { name: 'Mention node…' }));
+    const picker = await screen.findByRole('form', { name: 'Mention a node' });
+    await within(picker).findByLabelText('Node');
+    fireEvent.click(within(picker).getByRole('button', { name: 'Insert mention' }));
+    expect(textOf(within(picker).getByRole('alert'))).toBe('Choose a node to mention.');
+    fireEvent.keyDown(within(picker).getByLabelText('Node'), { key: 'Escape' });
+    expect(screen.queryByRole('form', { name: 'Mention a node' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Mention node…' }));
+  });
+
+  it('says when a mentioned node was deleted, and a refused mention keeps the draft', async () => {
+    reply(
+      `PATCH ${NOTE}`,
+      jsonResponse(422, {
+        code: 'NOTE_MENTION_INVALID',
+        message: 'A node mentioned in this note is not part of this study',
+        retryable: false,
+        correlationId: 'c',
+      }),
+    );
+    const editor = await openNote(mentioned('See '), { deletedMentionNodeIds: [QUESTION_ID] });
+    expect(
+      screen.getByText('This note mentions a node deleted since: What is conscience?.'),
+    ).toBeTruthy();
+    typeText(editor, 'Changed');
+    await waitFor(() => expect(textOf(saveStatus())).toBe(INVALID_COPY.mention), {
+      timeout: 3000,
+    });
+    expect(editor.getText()).toBe('Changed');
+  });
+
+  it('renders a mention read-only as a link to the node, and a deleted one as text that says so', async () => {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(
+      `GET ${NOTE}`,
+      jsonResponse(
+        200,
+        note({
+          content: {
+            type: 'doc',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  { type: 'nodeMention', attrs: { nodeId: QUESTION_ID, label: 'Live one' } },
+                  { type: 'text', text: ' and ' },
+                  { type: 'nodeMention', attrs: { nodeId: THOUGHT_ID, label: 'Gone one' } },
+                ],
+              },
+            ],
+          },
+          deletedMentionNodeIds: [THOUGHT_ID],
+        }),
+      ),
+    );
+    renderPanel({ ...STUDY, lifecycle: 'archived' });
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    const content = await screen.findByRole('document', { name: 'Note' });
+    expect(within(content).getByRole('link', { name: 'Live one' }).getAttribute('href')).toBe(
+      `/studies/${STUDY_ID}?node=${QUESTION_ID}`,
+    );
+    expect(within(content).queryByRole('link', { name: /Gone one/ })).toBeNull();
+    expect(textOf(content)).toContain('Gone one (deleted node)');
   });
 });

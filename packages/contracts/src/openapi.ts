@@ -42,6 +42,7 @@ import {
   createNoteRequestSchema,
   createNoteResponseSchema,
   MAX_NOTE_CHARACTERS,
+  MAX_NOTE_MENTIONS,
   MAX_NOTE_REFERENCES,
   MAX_NOTE_VERSIONS,
   MAX_NOTES_PER_STUDY,
@@ -250,7 +251,7 @@ const BRANCH_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 wit
 const NODE_MUTATION_RULES = `Missing expectedRevision is 428, stale is 409 with currentRevision. The change and its StudyEvent commit in one transaction; an archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED, with nothing written. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NODE_OWNERSHIP}`;
 
 /** The note document rules (NFR-SEC-002), for the routes that take one. */
-const NOTE_DOCUMENT_RULES = `content is a Tiptap/ProseMirror document checked against an allowlist: paragraph, heading (level 1-3), bulletList, orderedList (start), listItem, blockquote, text, hardBreak and scriptureReference (referenceId and label, at most ${MAX_NOTE_REFERENCES} per note) nodes; bold, italic and link (href only, http or https, no credentials) marks. A scriptureReference must name a reference of an active edition and carry exactly its canonical label, else 422 NOTE_REFERENCE_INVALID; it never creates a node. Anything else (another node, mark or attribute, HTML, an unsafe link, nesting deeper than 12 levels, more than 20,000 nodes) is 400 and nothing is stored. The server derives the plain text; more than ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters of it is 413 NOTE_TOO_LONG, and a body over 1 MiB is 413.`;
+const NOTE_DOCUMENT_RULES = `content is a Tiptap/ProseMirror document checked against an allowlist: paragraph, heading (level 1-3), bulletList, orderedList (start), listItem, blockquote, text, hardBreak, scriptureReference (referenceId and label, at most ${MAX_NOTE_REFERENCES} per note) and nodeMention (nodeId and label, at most ${MAX_NOTE_MENTIONS} per note, BIB-58) nodes; bold, italic and link (href only, http or https, no credentials) marks. A scriptureReference must name a reference of an active edition and carry exactly its canonical label, else 422 NOTE_REFERENCE_INVALID; it never creates a node. A new or changed nodeMention must name a live node of this study and carry exactly its current label (as the node list shows it), else 422 NOTE_MENTION_INVALID; a mention kept from the stored note is not re-checked, and the note detail lists mentioned nodes deleted since in deletedMentionNodeIds. Anything else (another node, mark or attribute, HTML, an unsafe link, nesting deeper than 12 levels, more than 20,000 nodes) is 400 and nothing is stored. The server derives the plain text; more than ${MAX_NOTE_CHARACTERS.toLocaleString('en-US')} characters of it is 413 NOTE_TOO_LONG, and a body over 1 MiB is 413.`;
 
 /** What every lifecycle route (BIB-22) shares after its own first sentence. */
 const LIFECYCLE_RULES =
