@@ -128,44 +128,46 @@ export function BranchesMenu({
                   <p className="break-words text-sm">
                     {name} ({nodesText(size)}){state ? ` · ${state}` : ''}
                   </p>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      aria-pressed={collapsed}
-                      onClick={() => store.getState().toggleCollapsed(branch.id)}
-                      className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent"
-                    >
-                      Collapse <span className="sr-only">{name}</span>
-                    </button>
-                    <button
-                      type="button"
-                      aria-pressed={solo}
-                      onClick={() => store.getState().setSoloBranch(solo ? null : branch.id)}
-                      className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent"
-                    >
-                      Show only <span className="sr-only">{name}</span>
-                    </button>
-                    {movable ? (
-                      <>
-                        <button
-                          type="button"
-                          disabled={arrangeBlocked || tooMany}
-                          aria-describedby={
-                            tooMany ? rowLimitId : arrangeInList ? listReasonId : undefined
-                          }
-                          onClick={(event) => onArrange(branch, event.currentTarget)}
-                          className="rounded border border-muted px-2 py-1 disabled:opacity-50"
-                        >
-                          Arrange <span className="sr-only">{name}</span>
-                        </button>
-                        {tooMany ? (
-                          <span id={rowLimitId} className="text-sm">
-                            Arrange works on up to {MAX_ARRANGE_NODES} nodes.
-                          </span>
-                        ) : null}
-                      </>
-                    ) : null}
-                  </div>
+                  {live.has(branch.rootNodeId) ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        aria-pressed={collapsed}
+                        onClick={() => store.getState().toggleCollapsed(branch.id)}
+                        className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent"
+                      >
+                        Collapse <span className="sr-only">{name}</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={solo}
+                        onClick={() => store.getState().setSoloBranch(solo ? null : branch.id)}
+                        className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent"
+                      >
+                        Show only <span className="sr-only">{name}</span>
+                      </button>
+                      {movable ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={arrangeBlocked || tooMany}
+                            aria-describedby={
+                              tooMany ? rowLimitId : arrangeInList ? listReasonId : undefined
+                            }
+                            onClick={(event) => onArrange(branch, event.currentTarget)}
+                            className="rounded border border-muted px-2 py-1 disabled:opacity-50"
+                          >
+                            Arrange <span className="sr-only">{name}</span>
+                          </button>
+                          {tooMany ? (
+                            <span id={rowLimitId} className="text-sm">
+                              Arrange works on up to {MAX_ARRANGE_NODES} nodes.
+                            </span>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </li>
               );
             })}

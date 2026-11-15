@@ -286,6 +286,29 @@ const ROUTES: Record<string, Access> = {
       test: 'PATCH /v1/studies/:studyId/nodes/:nodeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  // Node delete, restore (BIB-31) and duplicate (BIB-61): Bob's calls on Alice's node, absent and
+  // malformed ids, Alice's node under his own study, and under another of her studies.
+  'DELETE /v1/studies/:studyId/nodes/:nodeId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'node-lifecycle.int-spec.ts',
+      test: 'DELETE /v1/studies/:studyId/nodes/:nodeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'POST /v1/studies/:studyId/nodes/:nodeId/restore': {
+    access: 'private',
+    crossUserTest: {
+      file: 'node-lifecycle.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/nodes/:nodeId/restore gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
+  'POST /v1/studies/:studyId/nodes/:nodeId/duplicate': {
+    access: 'private',
+    crossUserTest: {
+      file: 'node-lifecycle.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/nodes/:nodeId/duplicate gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
   // Conclusion versions (BIB-30): Bob's calls on Alice's conclusion's history, absent and malformed
   // ids, Alice's node under his own study, and under another of her studies.
   'GET /v1/studies/:studyId/nodes/:nodeId/versions': {

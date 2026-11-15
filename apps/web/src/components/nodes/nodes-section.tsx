@@ -22,7 +22,16 @@ import { useGraphView, useGraphViewStore } from '@/lib/graph-store';
 import { listNodes, nodeStateText, nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { AddNodeForm } from './add-node-form';
+import { DeletedNodes, deletedText, restoredText, useNodeRestore } from './deleted-nodes';
 import { NodeDetail } from './node-detail';
+
+/** The status after a delete (BIB-31): what was deleted, with Restore. */
+interface DeletedStatus {
+  nodeId: string;
+  revision: number;
+  label: string;
+  text: string;
+}
 
 export const NODES_COPY = {
   loading: 'Loading nodes…',
@@ -92,6 +101,8 @@ export function NodesSection({
   const [revisit, setRevisit] = useState<Revisit | null>(null);
   /** The open detail's edit holds unsaved changes (NodeDetail's `onUnsavedChange`). */
   const [detailUnsaved, setDetailUnsaved] = useState(false);
+  const [deletedStatus, setDeletedStatus] = useState<DeletedStatus | null>(null);
+  const deletedStatusRef = useRef<HTMLDivElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const returnToAdd = useRef(false);
   const lockedAlert = useRef<HTMLDivElement>(null);
@@ -182,6 +193,34 @@ export function NodesSection({
         : `${NODE_TYPE_NAMES[node.type]} added`,
     );
   }
+
+  /** A copy was made (BIB-61, or a Scripture duplicate from node detail): select and announce it. */
+  function copied(id: string, studyRevision: number, text: string) {
+    queryClient.setQueryData<StudyResponse>(studyQueryKey(study.id), (old) =>
+      old && studyRevision > old.revision ? { ...old, revision: studyRevision } : old,
+    );
+    void queryClient.invalidateQueries({ queryKey: nodesQueryKey(study.id) });
+    void invalidateGraph(queryClient, study.id);
+    void invalidateLibrary(queryClient);
+    setRevisit(null);
+    setDeletedStatus(null);
+    select(id, true);
+    setAnnouncement(text);
+  }
+
+  useEffect(() => {
+    if (deletedStatus) deletedStatusRef.current?.focus();
+  }, [deletedStatus]);
+
+  const restore = useNodeRestore({
+    studyId: study.id,
+    onLocked: lockAndAlert,
+    onRestored: (result, label) => {
+      setDeletedStatus(null);
+      select(result.id, true);
+      setAnnouncement(restoredText(result, label, labelOf));
+    },
+  });
 
   const items = nodes.data?.items ?? [];
   // The open detail follows the selection, except that a selection change in the Graph section
@@ -292,6 +331,31 @@ export function NodesSection({
         </ul>
       )}
 
+      <DeletedNodes studyId={study.id} editable={editable} restore={restore} />
+
+      {deletedStatus ? (
+        <div
+          role="status"
+          ref={deletedStatusRef}
+          tabIndex={-1}
+          className="flex flex-wrap items-center gap-3"
+        >
+          <p className="break-words">{deletedStatus.text}</p>
+          {editable ? (
+            <button
+              type="button"
+              aria-disabled={restore.pending ? true : undefined}
+              onClick={() =>
+                restore.restore(deletedStatus.nodeId, deletedStatus.revision, deletedStatus.label)
+              }
+              className="rounded border border-accent px-3 py-1 text-accent aria-disabled:opacity-60"
+            >
+              Restore
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {held ? (
         <p role="status" className="text-sm">
           {NODES_COPY.held}
@@ -309,13 +373,31 @@ export function NodesSection({
             !held && focusDetail && (selectedId === null || selectionSource !== 'canvas')
           }
           onFocused={onFocused}
-          onSaved={() => setAnnouncement('Saved')}
+          onSaved={(text) => setAnnouncement(text ?? 'Saved')}
           onLocked={lockAndAlert}
           labelOf={labelOf}
           onShowNode={(nodeId) => select(nodeId, true)}
           nodes={items}
           studyRevision={study.revision}
           onUnsavedChange={setDetailUnsaved}
+          mainQuestionNodeId={study.mainQuestion?.nodeId ?? null}
+          onAnnounce={setAnnouncement}
+          onCopied={copied}
+          onReload={() => void onReload()}
+          hideScriptureCopy={editable && revisit?.nodeId === shownId}
+          onDeleted={(result, type, label) => {
+            graphView.getState().select([], 'list');
+            setRevisit(null);
+            setAnnouncement('');
+            setDeletedStatus({
+              nodeId: result.id,
+              revision: result.revision,
+              label,
+              text: deletedText(type, label, result.establishmentClearedNodeIds.length),
+            });
+            void queryClient.invalidateQueries({ queryKey: studyQueryKey(study.id) });
+            void invalidateLibrary(queryClient);
+          }}
         />
       ) : null}
     </section>

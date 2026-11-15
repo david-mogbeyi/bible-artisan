@@ -694,7 +694,7 @@ describe('conclusion versions and explicit status actions (BIB-30)', () => {
       });
       const after = async (id: string) => {
         const node = await detail(alice, studyId, id);
-        return 'establishedAt' in node
+        return node.type === 'conclusion'
           ? [node.status, node.establishedAt, node.evidenceIncomplete, node.liveEvidenceCount]
           : null;
       };
@@ -819,7 +819,7 @@ describe('conclusion versions and explicit status actions (BIB-30)', () => {
       const answers = [
         await patch(alice, studyId, c, { observationKind: 'interpretation' }),
         await patch(alice, studyId, obs, { status: 'supported' }),
-        await patch(alice, studyId, obs, { establishment: 'set' }),
+        await patch(alice, studyId, obs, { status: 'tentative' }),
         await patch(alice, studyId, obs, { changeReason: 'why', text: 'x' }),
         await patch(alice, studyId, c, { text: 'x'.repeat(4001), changeReason: 'r' }),
         await patch(alice, studyId, c, { status: 'revised' }),

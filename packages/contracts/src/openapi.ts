@@ -58,11 +58,18 @@ import {
 import {
   createNodeRequestSchema,
   createNodeResponseSchema,
+  deletedNodeListResponseSchema,
+  duplicateNodeRequestSchema,
+  duplicateNodeResponseSchema,
   MAX_NODE_TEXT_LENGTH,
   MAX_NODES_PER_STUDY,
+  NODE_LIST_STATES,
+  nodeDeleteResponseSchema,
   nodeListResponseSchema,
   nodeMutationResponseSchema,
   nodeResponseSchema,
+  nodeRestoreResponseSchema,
+  nodeStateRequestSchema,
   nodeVersionListResponseSchema,
   updateNodeRequestSchema,
 } from './node';
@@ -683,11 +690,41 @@ function buildDocument(): OpenApiDocument {
           },
         },
         get: {
-          description: `Lists every live node of the study, oldest first, unpaginated and never truncated, each with its type, origin, status or observation kind and a label (at most 160 characters of its statement, text or source title; a Scripture node's reference label). Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
+          description: `Lists every live node of the study (state=live, the default), oldest first, unpaginated and never truncated, each with its type, origin, status or observation kind and a label (at most 160 characters of its statement, text or source title; a Scripture node's reference label). state=deleted (BIB-31) lists the deleted nodes instead, newest deletion first, each with deletedAt (DeletedNodeListResponse). Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
           security: sessionCookie,
-          parameters: [studyIdParam],
+          parameters: [
+            studyIdParam,
+            queryParam('state', false, { type: 'string', enum: [...NODE_LIST_STATES] }),
+          ],
           responses: {
-            200: jsonResponse("The study's nodes", 'NodeListResponse'),
+            200: jsonResponse(
+              "The study's nodes (DeletedNodeListResponse for state=deleted)",
+              'NodeListResponse',
+            ),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/nodes/{nodeId}/duplicate': {
+        post: {
+          description: `Duplicates an Observation, Thought, Question, Conclusion or Source (BIB-61; PRD section 12) into a new node of the same type with the source's current content and origin, and nothing else: no relationships, notes, position, branch membership or "Established by me". A Question copy starts open; a Conclusion copy starts tentative with its own version 1. A Scripture node is 422 NODE_NOT_DUPLICABLE (use POST /nodes with duplicatePolicy explicit_duplicate). A duplicate is a study change: expectedRevision is the study's revision (studyRevision in the response); contentRevision moves; the node cap applies (422 NODE_LIMIT_EXCEEDED). One created event (observation_created, thought_created, question_created, conclusion_created or source_created) with duplicateOfNodeId. The response carries no text. ${NODE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('nodeId')],
+          requestBody: jsonBody('DuplicateNodeRequest'),
+          responses: {
+            201: jsonResponse('The new node, without its text', 'DuplicateNodeResponse'),
+            default: errorResponse,
+          },
+        },
+      },
+      '/studies/{studyId}/nodes/{nodeId}/restore': {
+        post: {
+          description: `Restores a deleted node (BIB-31) with the relationships its deletion removed, under their original ids, when the other end is live, no identical live relationship exists and the study is under the relationship cap; each one not restored is reported in skippedEdges with its reason. A Scripture node whose passage already has a live canonical node comes back as its duplicate (canonicalNodeId). An established conclusion left without live support loses "Established by me" (establishmentClearedNodeIds); restore never sets a marker, a status or the main question. expectedRevision is the deleted node's. A live node is 422 NODE_NOT_DELETED; a study at the node cap 422 NODE_LIMIT_EXCEEDED. contentRevision moves. node_restored. ${NODE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('nodeId')],
+          requestBody: jsonBody('NodeStateRequest'),
+          responses: {
+            200: jsonResponse('The restored node, without its text', 'NodeRestoreResponse'),
             default: errorResponse,
           },
         },
@@ -703,12 +740,22 @@ function buildDocument(): OpenApiDocument {
           },
         },
         patch: {
-          description: `Edits or acts on a node. Observation: text and/or observationKind; thought: text; source: source (replaced whole); one observation_updated, thought_updated or source_updated event. Question (BIB-30): status (open, partially_answered, answered, deferred) is the only change, and only this explicit request ever changes it (an answers relationship never does); one question_status_changed event. Conclusion: text revises the statement (status becomes revised, marker cleared, changeReason required); status (tentative, supported, challenged, abandoned; abandoned needs changeReason); establishment set or clear marks it "Established by me" (needs live supporting evidence: an incoming supports or an outgoing inference_from relationship, else 422 CONCLUSION_EVIDENCE_REQUIRED; not supported 422 CONCLUSION_NOT_SUPPORTED). Challenging, revising, abandoning or setting tentative clears the marker (warnings: establishment_cleared). Every conclusion change writes one immutable version (statement, status, marker, reason, and a server-computed snapshot of the live evidence relationships; the client never sends evidence ids) and one event: conclusion_updated, conclusion_challenged, conclusion_abandoned or conclusion_established (ids and enums only), with versionId and previousVersionId in the response. expectedRevision is the node's. A node's type never changes (type is not accepted, 400). Checked in order: an archived or trashed study is 422 STUDY_ARCHIVED or STUDY_TRASHED (before the node is looked up), then an absent node is 404, a stale revision 409, a Scripture node or a field of another type 422 NODE_NOT_EDITABLE (a status of the wrong kind or a conclusion statement over 4,000 characters is 400), nothing to change 422 NODE_UNCHANGED, then the evidence rules. contentRevision moves. The response carries no text or reason. ${NODE_MUTATION_RULES}`,
+          description: `Edits or acts on a node. Observation: text and/or observationKind, or (BIB-62) establishment set or clear sent alone (no evidence needed; with an edit it is 400; set on an established one or clear on one that is not is 422 NODE_UNCHANGED; observation_established on set). Editing an established observation clears its marker in the same write (warnings: establishment_cleared); thought: text; source: source (replaced whole); one observation_updated, thought_updated or source_updated event. Question (BIB-30): status (open, partially_answered, answered, deferred) is the only change, and only this explicit request ever changes it (an answers relationship never does); one question_status_changed event. Conclusion: text revises the statement (status becomes revised, marker cleared, changeReason required); status (tentative, supported, challenged, abandoned; abandoned needs changeReason); establishment set or clear marks it "Established by me" (needs live supporting evidence: an incoming supports or an outgoing inference_from relationship, else 422 CONCLUSION_EVIDENCE_REQUIRED; not supported 422 CONCLUSION_NOT_SUPPORTED). Challenging, revising, abandoning or setting tentative clears the marker (warnings: establishment_cleared). Every conclusion change writes one immutable version (statement, status, marker, reason, and a server-computed snapshot of the live evidence relationships; the client never sends evidence ids) and one event: conclusion_updated, conclusion_challenged, conclusion_abandoned or conclusion_established (ids and enums only), with versionId and previousVersionId in the response. expectedRevision is the node's. A node's type never changes (type is not accepted, 400). Checked in order: an archived or trashed study is 422 STUDY_ARCHIVED or STUDY_TRASHED (before the node is looked up), then an absent node is 404, a stale revision 409, a Scripture node or a field of another type 422 NODE_NOT_EDITABLE (a status of the wrong kind or a conclusion statement over 4,000 characters is 400), nothing to change 422 NODE_UNCHANGED, then the evidence rules. contentRevision moves. The response carries no text or reason. ${NODE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('nodeId')],
           requestBody: jsonBody('UpdateNodeRequest'),
           responses: {
             200: jsonResponse('The node as saved, without its text', 'NodeMutationResponse'),
+            default: errorResponse,
+          },
+        },
+        delete: {
+          description: `Deletes a node of any type (BIB-31; soft delete) with every live relationship touching it, in one transaction. A canonical Scripture node's oldest live duplicate becomes canonical (promotedCanonicalNodeId); the main question pointer is cleared (mainQuestionCleared); an established conclusion left without live supporting evidence loses "Established by me" (its status is kept; establishmentClearedNodeIds). Notes, positions, branches, versions and events stay. expectedRevision is the node's. contentRevision moves. node_deleted. ${NODE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('nodeId')],
+          requestBody: jsonBody('NodeStateRequest'),
+          responses: {
+            200: jsonResponse('What the deletion did', 'NodeDeleteResponse'),
             default: errorResponse,
           },
         },
@@ -900,6 +947,12 @@ function buildDocument(): OpenApiDocument {
         NodeListResponse: toSchema(nodeListResponseSchema),
         NodeResponse: toSchema(nodeResponseSchema),
         NodeVersionListResponse: toSchema(nodeVersionListResponseSchema),
+        DuplicateNodeRequest: toSchema(duplicateNodeRequestSchema),
+        DuplicateNodeResponse: toSchema(duplicateNodeResponseSchema),
+        NodeStateRequest: toSchema(nodeStateRequestSchema),
+        NodeDeleteResponse: toSchema(nodeDeleteResponseSchema),
+        NodeRestoreResponse: toSchema(nodeRestoreResponseSchema),
+        DeletedNodeListResponse: toSchema(deletedNodeListResponseSchema),
         CreateEdgeRequest: toInputSchema(createEdgeRequestSchema),
         CreateEdgeResponse: toSchema(createEdgeResponseSchema),
         UpdateEdgeRequest: toInputSchema(updateEdgeRequestSchema),

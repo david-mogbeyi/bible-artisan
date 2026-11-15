@@ -65,7 +65,7 @@ export function branchLabel(
   nodesById: ReadonlyMap<string, NodeSummary>,
 ): string {
   const root = nodesById.get(branch.rootNodeId);
-  return `Branch: ${root ? nodeOptionText(root) : 'a node no longer in this study'}`;
+  return root ? `Branch: ${nodeOptionText(root)}` : 'Branch (root deleted)';
 }
 
 /** Whether `nodeId` is in `branch` (its root or a member). */

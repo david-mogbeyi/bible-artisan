@@ -120,7 +120,12 @@ beforeEach(() => {
           ...(node?.type === 'question'
             ? { type: 'question', text: node.label, status: 'open' }
             : node?.type === 'observation'
-              ? { type: 'observation', text: node.label, observationKind: 'textual_observation' }
+              ? {
+                  type: 'observation',
+                  text: node.label,
+                  observationKind: 'textual_observation',
+                  establishedAt: null,
+                }
               : {
                   type: 'source',
                   source: { title: node?.label, url: 'https://example.test/c' },
