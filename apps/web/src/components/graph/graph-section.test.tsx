@@ -289,6 +289,37 @@ describe('GraphSection (BIB-28)', () => {
     ]);
   });
 
+  it('describes nodes and edges as this canvas works (no Delete), announces a move without stale coordinates, and draws arrowheads in the muted token (BIB-53)', async () => {
+    patchReplies.push(jsonResponse(200, { viewRevision: 6, lastEventSequence: '9' }));
+    await openGraph();
+    const described = (element: Element) =>
+      (element.getAttribute('aria-describedby') ?? '')
+        .split(' ')
+        .map((idRef) => document.getElementById(idRef)?.textContent ?? '')
+        .join(' ');
+    const node = canvasNode('Question: What is conscience?, Open');
+    expect(described(node)).toBe(
+      'Enter or Space selects this node and opens it in the Nodes list. Arrow keys then move it. Escape clears the selection.',
+    );
+    const edge = canvas().querySelector('.react-flow__edge');
+    expect(edge && described(edge)).toBe(
+      'A relationship. Change or remove it from either node in the Nodes list.',
+    );
+    expect(canvas().textContent).not.toMatch(/delete/i);
+    node.focus();
+    fireEvent.keyDown(node, { key: 'Enter' });
+    await waitFor(() =>
+      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
+    );
+    fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowRight' });
+    const live = canvas().querySelector('[aria-live="assertive"]');
+    await waitFor(() => expect(live?.textContent).toBe('Moved right.'));
+    // React Flow writes the arrowhead colour inline; its default is #b1b1b7 (2:1 on the canvas).
+    const arrowhead = canvas().querySelector('marker polyline');
+    expect(arrowhead?.getAttribute('style')).toContain('var(--color-muted)');
+    await screen.findByText('Layout saved');
+  });
+
   it('after a stale view revision refetches the graph and resends the same positions once with the new revision and a new key', async () => {
     patchReplies.push(
       jsonResponse(409, {

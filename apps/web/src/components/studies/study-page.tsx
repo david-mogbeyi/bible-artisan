@@ -170,6 +170,12 @@ function StudyDetails({
   if (unsavedNote) unsavedTabs.add('notes');
   const panel = { idBase, narrow, selected: tab };
   const openNotes = useCallback(() => setTab('notes'), []);
+  // BIB-53: a note cited by the summary opens in the Notes panel (a new object per request).
+  const [noteRequest, setNoteRequest] = useState<{ noteId: string } | null>(null);
+  const openCitedNote = useCallback((noteId: string) => {
+    setTab('notes');
+    setNoteRequest({ noteId });
+  }, []);
   return (
     <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
       <h1 className="font-serif text-4xl break-words">{study.title}</h1>
@@ -271,18 +277,28 @@ function StudyDetails({
           {/* BIB-25: the study's typed nodes, readable in every state. Its Add node form is the
               canvas-free way to capture a question or thought (BIB-38). */}
           <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
-          <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
+          <NotesPanel
+            study={study}
+            onReload={onReload}
+            onUnsavedChange={setUnsavedNote}
+            openRequest={noteRequest}
+          />
+        </WorkspacePanel>
+        <WorkspacePanel {...panel} tab="thread">
+          {/* BIB-32: what happened in this study, newest first. */}
+          <ThreadPanel study={study} />
+        </WorkspacePanel>
+        <WorkspacePanel {...panel} tab="summary">
+          {/* BIB-43: the living summary; BIB-44/45: study-wide AI suggestions (collapsed). Inside
+              the graph view store, so a cited node opens its detail (BIB-53). */}
+          <StudySummaryPanel
+            studyId={study.id}
+            active={study.lifecycle !== 'trashed'}
+            onOpenNote={openCitedNote}
+          />
+          <StudyInsights studyId={study.id} active={study.lifecycle === 'active'} />
         </WorkspacePanel>
       </GraphViewProvider>
-      <WorkspacePanel {...panel} tab="thread">
-        {/* BIB-32: what happened in this study, newest first. */}
-        <ThreadPanel study={study} />
-      </WorkspacePanel>
-      <WorkspacePanel {...panel} tab="summary">
-        {/* BIB-43: the living summary; BIB-44/45: study-wide AI suggestions (collapsed). */}
-        <StudySummaryPanel studyId={study.id} active={study.lifecycle !== 'trashed'} />
-        <StudyInsights studyId={study.id} active={study.lifecycle === 'active'} />
-      </WorkspacePanel>
       <nav aria-label="Study" className="flex flex-wrap gap-4">
         {/* BIB-24: the reader with this study's highlights (opaque ids only in the URL). */}
         <Link

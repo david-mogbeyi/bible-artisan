@@ -61,3 +61,12 @@ body {
   stroke: var(--color-accent);
   stroke-width: 3;
 }
+
+/* React Flow's attribution link is #999 at 10px (2.8:1 on its panel). It stays, in muted ink on a
+   canvas-coloured panel (6.6:1, 1.4.3). */
+.react-flow .react-flow__attribution {
+  background: var(--color-canvas);
+}
+.react-flow .react-flow__attribution a {
+  color: var(--color-muted);
+}
