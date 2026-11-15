@@ -43,6 +43,11 @@ export type SaveState =
    */
   | { kind: 'waiting' }
   /**
+   * BIB-36: offline, and the local queue is full (FR-SAVE-004): editing is blocked and the draft
+   * can be downloaded. Back online, the draft is sent as usual.
+   */
+  | { kind: 'queue_full' }
+  /**
    * BIB-37: the session expired (401). Autosave pauses and the draft stays in this tab; after the
    * user signs in again (in another tab) the identical request is resent.
    */
@@ -68,6 +73,16 @@ interface Attempt {
   body: UpdateNoteRequest;
 }
 
+/**
+ * What survives a reload while offline (BIB-36): the frozen request, if any, and later content
+ * not yet in a request (sent from the revision that request returns, else from `revision`).
+ */
+export interface OfflineSnapshot {
+  revision: number;
+  attempt: { key: string; body: UpdateNoteRequest } | null;
+  draft: NoteDocument | null;
+}
+
 export interface NoteAutosaveOptions {
   /** The note as last loaded: its revision and content are the starting point. */
   revision: number;
@@ -86,6 +101,11 @@ export interface NoteAutosaveOptions {
    */
   read?: () => NoteDraft;
   newKey?: () => string;
+  /**
+   * BIB-36: keeps unacknowledged work in the offline queue while waiting to sync (`null` once it
+   * is acknowledged). `full` blocks editing (`queue_full`); `unavailable` keeps it in memory only.
+   */
+  persist?: (snapshot: OfflineSnapshot | null) => Promise<'queued' | 'full' | 'unavailable'>;
 }
 
 /** JSON with object keys sorted, so documents compare by value whatever built them. */
@@ -106,6 +126,7 @@ const sameContent = (a: NoteDocument, b: NoteDocument): boolean => canonical(a) 
 const CLOSE_BLOCKING: ReadonlySet<SaveState['kind']> = new Set([
   'conflict',
   'waiting',
+  'queue_full',
   'signed_out',
   'locked',
   'gone',
@@ -122,7 +143,8 @@ export const characterCount = (doc: NoteDocument): number => noteCharacterCount(
  * Idempotency-Key until its outcome is known: after an unknown outcome the identical request is
  * resent first (on Retry, or on the next save), so a save that committed but lost its response is
  * replayed rather than applied twice or refused with 409. A definite refusal (4xx) discards it.
- * Nothing is ever kept in browser storage (offline queueing is BIB-36).
+ * Offline, the unacknowledged work also goes to the offline queue (`persist`, BIB-36) so a reload
+ * doesn't lose it; the same frozen request, with the same key, is what gets replayed.
  */
 export class NoteAutosave {
   private revision: number;
@@ -143,6 +165,10 @@ export class NoteAutosave {
   private retries = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  /** The offline queue holds an entry for this note (written by `persistOffline`). */
+  private persisted = false;
+  /** Queue writes run in order, so a later snapshot always lands last. */
+  private persistChain: Promise<unknown> = Promise.resolve();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
   private state: SaveState = { kind: 'saved' };
@@ -211,6 +237,7 @@ export class NoteAutosave {
     this.frozen = null;
     this.dirty = false;
     this.latest = { ok: true, doc: this.acknowledged };
+    this.unpersist();
   }
 
   /** The editor changed to `doc` (already converted; null when it can't be saved). */
@@ -273,7 +300,10 @@ export class NoteAutosave {
     if (this.stopped || this.inFlight !== null) return;
     if (!this.isOnline()) {
       // Offline (PRD section 27): wait for the connection rather than fail; `reconnected` sends.
-      if (this.unsaved || this.checkpointWanted) this.setState({ kind: 'waiting' });
+      if (this.unsaved || this.checkpointWanted) {
+        this.setState({ kind: 'waiting' });
+        this.persistOffline();
+      }
       return;
     }
     let attempt = this.frozen;
@@ -330,7 +360,9 @@ export class NoteAutosave {
    * focus): resend what waits. Does nothing in any other state.
    */
   reconnected(): void {
-    if (this.state.kind !== 'waiting' && this.state.kind !== 'signed_out') return;
+    const kind = this.state.kind;
+    if (kind !== 'waiting' && kind !== 'signed_out' && kind !== 'queue_full') return;
+    if (kind === 'queue_full' && !this.isOnline()) return;
     this.stopped = false;
     this.flush();
   }
@@ -350,6 +382,7 @@ export class NoteAutosave {
     this.stopped = false;
     this.checkpointWanted = false;
     this.resolutionWanted = null;
+    this.unpersist();
     this.setState({ kind: 'saved' });
   }
 
@@ -380,15 +413,17 @@ export class NoteAutosave {
     this.revision = response.revision;
     if (attempt.body.content) this.acknowledged = attempt.body.content;
     this.options.onSaved(response, this.acknowledged);
-    if (this.checkpointWanted || this.unsaved) this.flush();
-    else this.setState({ kind: 'saved' });
+    if (this.checkpointWanted || this.unsaved) return this.flush();
+    this.unpersist();
+    this.setState({ kind: 'saved' });
   }
 
   private failed(attempt: Attempt, error: unknown): void {
     this.inFlight = null;
     if (!(error instanceof ApiError) && !this.isOnline()) {
       // The connection dropped: the outcome is unknown, so the request stays frozen for replay.
-      return this.setState({ kind: 'waiting' });
+      this.setState({ kind: 'waiting' });
+      return this.persistOffline();
     }
     if (error instanceof ApiError && error.status === 401) {
       // Not committed, but resending the identical request after sign-in is harmless; the draft
@@ -441,6 +476,43 @@ export class NoteAutosave {
     // Any other refusal (400): the content cannot be saved as it is; say which kind.
     const body = error.body as { fieldErrors?: unknown } | null;
     this.setState({ kind: 'invalid', problem: classifyNoteFieldErrors(body?.fieldErrors) });
+  }
+
+  /**
+   * Writes what is unacknowledged to the offline queue (BIB-36): the frozen request as sent, and
+   * the editor's later content when it differs. A full queue blocks editing until back online.
+   */
+  private persistOffline(): void {
+    const persist = this.options.persist;
+    if (!persist) return;
+    const draft = this.readLatest();
+    const sent = this.frozen?.body.content ?? this.acknowledged;
+    const later = draft.ok && !sameContent(draft.doc, sent) ? draft.doc : null;
+    if (this.frozen === null && later === null) return;
+    const snapshot: OfflineSnapshot = {
+      revision: this.revision,
+      attempt: this.frozen,
+      draft: later,
+    };
+    // Marked at once, so an acknowledgement that lands before the write still removes it.
+    this.persisted = true;
+    this.persistChain = this.persistChain
+      .then(() => persist(snapshot))
+      .then((result) => {
+        if (result === 'full' && this.state.kind === 'waiting') {
+          this.clearTimers();
+          this.setState({ kind: 'queue_full' });
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  /** Everything is acknowledged (or deliberately dropped): the queued entry goes. */
+  private unpersist(): void {
+    const persist = this.options.persist;
+    if (!persist || !this.persisted) return;
+    this.persisted = false;
+    this.persistChain = this.persistChain.then(() => persist(null)).catch(() => undefined);
   }
 
   private setState(state: SaveState): void {

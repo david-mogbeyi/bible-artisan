@@ -10,6 +10,7 @@ import {
   AUTOSAVE_MAX_DELAY_MS,
   AUTOSAVE_RETRY_DELAYS_MS,
   NoteAutosave,
+  type OfflineSnapshot,
   type SaveState,
 } from './note-autosave';
 import type { NoteDraft } from './note-document';
@@ -224,6 +225,71 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     sent[2]?.resolve(response(3));
     await settle();
     expect([states.at(-1), saver.unsaved]).toStrictEqual(['saved', false]);
+  });
+
+  it('queues the frozen request and later text offline, replays it once with the same key, then drops the entry (BIB-36)', async () => {
+    const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    const snapshots: (OfflineSnapshot | null)[] = [];
+    const saver = new NoteAutosave({
+      revision: 1,
+      content: doc(''),
+      send: (body, key) =>
+        new Promise<NoteMutationResponse>((resolve, reject) => {
+          sent.push({ body, key, resolve, reject });
+        }),
+      onState: (state) => states.push(state.kind),
+      onSaved: () => undefined,
+      newKey: () => `key-${(keys += 1)}`,
+      persist: (snapshot) => {
+        snapshots.push(snapshot);
+        return Promise.resolve('queued');
+      },
+    });
+    saver.edited(doc('offline edit'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    online.mockReturnValue(false);
+    sent[0]?.reject(new TypeError('Failed to fetch'));
+    await settle();
+    saver.edited(doc('offline edit, more'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    expect(snapshots.at(-1)).toStrictEqual({
+      revision: 1,
+      attempt: { key: 'key-1', body: { expectedRevision: 1, content: doc('offline edit') } },
+      draft: doc('offline edit, more'),
+    });
+    expect(states.at(-1)).toBe('waiting');
+    online.mockReturnValue(true);
+    saver.reconnected();
+    expect([sent.length, sent[1]?.key]).toStrictEqual([2, 'key-1']);
+    sent[1]?.resolve(response(2));
+    await settle();
+    sent[2]?.resolve(response(3));
+    await settle();
+    expect([states.at(-1), snapshots.at(-1), sent.length]).toStrictEqual(['saved', null, 3]);
+  });
+
+  it('blocks editing with queue_full when the offline queue refuses the draft, and sends once back online (BIB-36)', async () => {
+    const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    const saver = new NoteAutosave({
+      revision: 1,
+      content: doc(''),
+      send: (body, key) =>
+        new Promise<NoteMutationResponse>((resolve, reject) => {
+          sent.push({ body, key, resolve, reject });
+        }),
+      onState: (state) => states.push(state.kind),
+      onSaved: () => undefined,
+      newKey: () => `key-${(keys += 1)}`,
+      persist: () => Promise.resolve('full'),
+    });
+    saver.edited(doc('no room'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    expect([states.at(-1), sent.length, saver.unsaved]).toStrictEqual(['queue_full', 0, true]);
+    saver.reconnected();
+    expect(sent.length).toBe(0);
+    online.mockReturnValue(true);
+    saver.reconnected();
+    expect(sent[0]?.body).toStrictEqual({ expectedRevision: 1, content: doc('no room') });
   });
 
   it('pauses on 401 with the draft kept, and resends the identical request once reconnected (BIB-37)', async () => {

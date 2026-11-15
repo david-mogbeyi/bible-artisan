@@ -7,6 +7,7 @@ import {
   IDEMPOTENCY_KEY_HEADER,
 } from '@bible-artisan/contracts';
 import { apiFetch, apiHref } from './api-client';
+import { clearOfflineQueue } from './offline-queue';
 
 /**
  * Exports and account deletion (BIB-47, BIB-48). Only opaque ids travel in URLs; the file itself
@@ -55,10 +56,11 @@ export function deleteAccount(challengeId: string, code: string): Promise<Delete
 
 /**
  * Clears everything this browser keeps for the signed-in account (PRD section 29: local cache
- * deletion on sign-out and deletion). Storage can be unavailable (private mode), so each clear is
- * best effort.
+ * deletion on sign-out and deletion), including the offline queue (BIB-36). Storage can be
+ * unavailable (private mode), so each clear is best effort.
  */
-export function clearLocalAccountData(): void {
+export async function clearLocalAccountData(): Promise<void> {
+  await clearOfflineQueue();
   for (const storage of [() => window.localStorage, () => window.sessionStorage]) {
     try {
       storage().clear();

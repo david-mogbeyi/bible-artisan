@@ -1,8 +1,11 @@
+import 'fake-indexeddb/auto';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearOfflineQueue, listQueued, queueNoteSave } from '@/lib/offline-queue';
 import { invalidateLibrary } from '@/lib/studies';
+import { captureDownloads } from '@/test/downloads';
 import { jsonResponse, renderWithQuery } from '@/test/render';
-import { Home } from './home';
+import { Home, SIGN_OUT_UNSYNCED } from './home';
 
 const replace = vi.fn();
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace }) }));
@@ -175,6 +178,51 @@ describe('Home sign-out', () => {
       expect(logoutCalls()).toHaveLength(2);
     },
   );
+});
+
+describe('Home sign-out with unsynced offline edits (BIB-36)', () => {
+  beforeEach(async () => {
+    await clearOfflineQueue();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('offers the unsynced drafts as a download first, then clears the offline queue and storage on sign-out', async () => {
+    // Offline, so the background replay leaves the entry waiting.
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    await queueNoteSave({
+      accountId: ME.id,
+      studyId: 'aaaaaaaa-2222-4333-8444-555555555555',
+      noteId: 'bbbbbbbb-2222-4333-8444-555555555555',
+      revision: 1,
+      attempt: null,
+      draft: {
+        type: 'doc',
+        content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Mine' }] }],
+      },
+    });
+    window.localStorage.setItem('bible-artisan.test', 'private');
+    logoutResponses.push(jsonResponse(204, null));
+    await renderSignedIn();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    const offer = await screen.findByRole('region', { name: 'Unsynced edits' });
+    expect(within(offer).getByRole('alert').textContent).toBe(SIGN_OUT_UNSYNCED(1));
+    expect(logoutCalls()).toHaveLength(0);
+    const created = captureDownloads();
+    fireEvent.click(within(offer).getByRole('button', { name: 'Download unsynced drafts' }));
+    const file = JSON.parse(await created[0]!.text()) as { drafts: { text: string }[] };
+    expect(file.drafts.map((d) => d.text)).toStrictEqual(['Mine']);
+
+    fireEvent.click(within(offer).getByRole('button', { name: 'Sign out anyway' }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith('/sign-in'));
+    expect([
+      logoutCalls().length,
+      await listQueued(ME.id),
+      window.localStorage.getItem('bible-artisan.test'),
+    ]).toStrictEqual([1, [], null]);
+  });
 });
 
 describe('Home navigation', () => {

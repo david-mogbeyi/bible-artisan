@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { type ReactNode, useEffect } from 'react';
 import { ApiError } from '@/lib/api-client';
 import { fetchMe, ME_QUERY_KEY } from '@/lib/auth';
+import { OfflineSync } from './offline-sync';
 
 const isUnauthenticated = (error: unknown): boolean =>
   error instanceof ApiError && error.status === 401;
@@ -29,7 +30,15 @@ export function RequireAuth({ children }: { children: (me: MeResponse) => ReactN
     router.replace(`/sign-in?next=${encodeURIComponent(next)}`);
   }, [unauthenticated, router]);
 
-  if (me.data) return <>{children(me.data)}</>;
+  if (me.data) {
+    return (
+      <>
+        {children(me.data)}
+        {/* Replays this account's offline queue, and says what still waits (BIB-36). */}
+        <OfflineSync accountId={me.data.id} />
+      </>
+    );
+  }
 
   if (me.isError && !unauthenticated) {
     return (
