@@ -243,6 +243,61 @@ export interface FocusOption {
 
 export const FOCUS_DEPTH = 2;
 
+/** The canvas zoom range (PRD section 12: 25–200%). */
+export const MIN_ZOOM = 0.25;
+export const MAX_ZOOM = 2;
+/** React Flow's default fit padding: the bounds take 1 / (1 + padding) of each canvas side. */
+const FIT_PADDING = 0.1;
+
+/**
+ * The shown nodes a "fit" brings into view (BIB-52, PRD section 12): all of them when their bounds
+ * fit the canvas at the smallest zoom. Otherwise (a focused view whose few nodes sit far apart in
+ * a large study's layout) those nearest `anchorId` that fit together, so the fit never centres on
+ * the empty space between them. Without a shown anchor it starts at the top-left node.
+ */
+export function fitNodeIds(
+  ids: Iterable<string>,
+  positions: Positions,
+  anchorId: string | null,
+  canvas: { width: number; height: number },
+  minZoom: number = MIN_ZOOM,
+): string[] {
+  const placed = [...ids].filter((id) => positions[id]);
+  if (placed.length === 0 || canvas.width <= 0 || canvas.height <= 0) return placed;
+  const maxWidth = canvas.width / (1 + FIT_PADDING) / minZoom;
+  const maxHeight = canvas.height / (1 + FIT_PADDING) / minZoom;
+  const box = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  const grown = (b: typeof box, p: XY) => ({
+    minX: Math.min(b.minX, p.x),
+    minY: Math.min(b.minY, p.y),
+    maxX: Math.max(b.maxX, p.x + NODE_WIDTH),
+    maxY: Math.max(b.maxY, p.y + NODE_HEIGHT),
+  });
+  const fits = (b: typeof box) => b.maxX - b.minX <= maxWidth && b.maxY - b.minY <= maxHeight;
+  const all = placed.reduce((b, id) => grown(b, positions[id] as XY), box);
+  if (fits(all)) return placed;
+
+  const anchored = anchorId && placed.includes(anchorId) ? positions[anchorId] : undefined;
+  const anchor =
+    anchored ??
+    placed
+      .map((id) => positions[id] as XY)
+      .reduce((a, b) => (b.y < a.y || (b.y === a.y && b.x < a.x) ? b : a));
+  const distance = (p: XY) => (p.x - anchor.x) ** 2 + (p.y - anchor.y) ** 2;
+  const nearest = [...placed].sort(
+    (a, b) => distance(positions[a] as XY) - distance(positions[b] as XY),
+  );
+  const result: string[] = [];
+  let bounds = box;
+  for (const id of nearest) {
+    const next = grown(bounds, positions[id] as XY);
+    if (!fits(next)) continue;
+    bounds = next;
+    result.push(id);
+  }
+  return result;
+}
+
 export interface ViewOptions {
   hiddenTypes: ReadonlySet<StudyNodeType>;
   focus: FocusOption | null;

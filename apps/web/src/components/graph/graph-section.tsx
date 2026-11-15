@@ -21,6 +21,7 @@ import {
   ReactFlowProvider,
   useReactFlow,
   useStore as useFlowStore,
+  useStoreApi as useFlowStoreApi,
 } from '@xyflow/react';
 import {
   Component,
@@ -42,10 +43,13 @@ import {
   arrange,
   fallbackPositions,
   FOCUS_DEPTH,
+  fitNodeIds,
   focusStart,
   isValidConnection,
   MAX_ARRANGE_NODES,
+  MAX_ZOOM,
   MIN_EDIT_WIDTH,
+  MIN_ZOOM,
   NODE_HEIGHT,
   NODE_WIDTH,
   nodeData,
@@ -59,6 +63,7 @@ import {
 } from '@/lib/graph-view';
 import { nodeOptionText } from '@/lib/nodes';
 import { stepBack, stepForward } from '@/lib/selection-history';
+import { useUndoEvents } from '@/lib/undo';
 import { BranchesMenu } from './branches-menu';
 import {
   CONNECT_COPY,
@@ -227,6 +232,7 @@ function GraphCanvas({
 }) {
   const store = useGraphViewStore();
   const flow = useReactFlow();
+  const flowStore = useFlowStoreApi();
   const instructionsId = useId();
   const readOnlyId = useId();
   const connectReasonId = useId();
@@ -249,6 +255,11 @@ function GraphCanvas({
   const movable = editable && wide;
   /** Polite announcements: the view switched, Back / Forward selected a node, a relationship added. */
   const [announcement, setAnnouncement] = useState('');
+  // An undo or redo makes the last announcement ("Relationship added") stale.
+  useUndoEvents(
+    'settled',
+    useCallback(() => setAnnouncement(''), []),
+  );
   const [connect, setConnect] = useState<OpenConnect | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const listHeading = useRef<HTMLHeadingElement>(null);
@@ -393,6 +404,44 @@ function GraphCanvas({
   useEffect(() => {
     placement.current = { positions, visible: view.visible };
   }, [positions, view.visible]);
+
+  /**
+   * Fits the canvas to what it shows (BIB-52): every shown node, or, when they can't all fit at
+   * the smallest zoom, those nearest the focused node (else the selected one) that do. A large
+   * study's focused nodes keep their places in the whole graph's layout, so fitting their bounds
+   * at 25% could show none of them.
+   */
+  const fitShown = useCallback(() => {
+    const { positions: shownAt, visible } = placement.current;
+    const { focus: focused, selectedNodeIds: picked } = store.getState();
+    const anchor = [focused?.nodeId, picked.at(-1)].find((id) => id && visible.has(id)) ?? null;
+    const { width, height } = flowStore.getState();
+    const ids = fitNodeIds(visible, shownAt, anchor, { width, height });
+    // Queued by React Flow until its nodes are measured, so it also replaces the initial fit.
+    return flow.fitView(ids.length > 0 ? { nodes: ids.map((id) => ({ id })) } : undefined);
+  }, [flow, flowStore, store]);
+
+  // Focus mode (a large study opens in it) changes what is shown: fit the canvas to it, also when
+  // the canvas comes back from List View. A large study's saved viewport is kept on open.
+  const keepSavedViewport = useRef(largeStart !== null && savedViewport !== null);
+  useEffect(() => {
+    if (!focus || viewMode !== 'graph') return;
+    if (keepSavedViewport.current) {
+      keepSavedViewport.current = false;
+      return;
+    }
+    // After the focused view is painted, in a task of its own: on a 500-node study the switch is
+    // already close to the 200 ms budget (NFR-PERF-004), and a fit re-renders the canvas again.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const frame = requestAnimationFrame(() => {
+      timer = setTimeout(() => void fitShown(), 0);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  }, [fitShown, focus, viewMode]);
+
   useEffect(() => {
     if (selectionSource === 'canvas' || store.getState().viewMode !== 'graph') return;
     const id = selectedNodeIds.at(-1);
@@ -582,7 +631,7 @@ function GraphCanvas({
         {announcement}
       </p>
       <div role="toolbar" aria-label="Graph tools" className="flex flex-wrap items-center gap-2">
-        {viewMode === 'graph' ? <ZoomControls /> : null}
+        {viewMode === 'graph' ? <ZoomControls onFitAll={fitShown} /> : null}
         <details className="relative">
           <summary className="cursor-pointer rounded border border-muted px-2 py-1">Filter</summary>
           <fieldset className="mt-2 flex flex-col gap-1 rounded border border-muted bg-canvas p-2">
@@ -843,8 +892,8 @@ function GraphCanvas({
                 edges={edges}
                 nodeTypes={NODE_TYPES}
                 onNodesChange={onNodesChange}
-                minZoom={0.25}
-                maxZoom={2}
+                minZoom={MIN_ZOOM}
+                maxZoom={MAX_ZOOM}
                 fitView={!savedViewport}
                 {...(savedViewport ? { defaultViewport: savedViewport } : {})}
                 onMoveEnd={onMoveEnd}
@@ -942,7 +991,7 @@ const zoomSelector = (state: { transform: [number, number, number] }) =>
   Math.round(state.transform[2] * 100);
 
 /** Native buttons for the canvas viewport, so none of it needs a mouse or a gesture. */
-function ZoomControls() {
+function ZoomControls({ onFitAll }: { onFitAll: () => Promise<boolean> }) {
   const flow = useReactFlow();
   const store = useGraphViewStore();
   const zoom = useFlowStore(zoomSelector);
@@ -971,7 +1020,7 @@ function ZoomControls() {
       </button>
       <button
         type="button"
-        onClick={() => moved(flow.fitView())}
+        onClick={() => moved(onFitAll())}
         className="rounded border border-muted px-2 py-1"
       >
         Fit all

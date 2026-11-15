@@ -1,6 +1,7 @@
 import type { StudyEventItem, StudyResponse } from '@bible-artisan/contracts';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type GraphViewStore, useGraphViewStore } from '@/lib/graph-store';
 import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { ThreadPanel } from './thread-panel';
@@ -208,5 +209,43 @@ describe('ThreadPanel', () => {
     renderWithQuery(<ThreadPanel study={STUDY} />);
     const list = await screen.findByRole('list', { name: 'Thread events' });
     expect(within(list).getAllByText('Earlier study session')).toHaveLength(1);
+  });
+
+  it('"Show in study" for the node the page URL already names selects it again (BIB-52)', async () => {
+    const nodeId = 'dddddddd-2222-4333-8444-555555555555';
+    pages.set('all|', {
+      items: [
+        event(1, {
+          type: 'thought_created',
+          displayText: 'Wrote a thought',
+          targetRef: { kind: 'node', id: nodeId, label: null, deleted: false },
+          originRef: null,
+        }),
+      ],
+      nextCursor: null,
+    });
+    window.history.replaceState(null, '', `/studies/${STUDY_ID}?node=${nodeId}`);
+    let store: GraphViewStore | null = null;
+    function Probe() {
+      store = useGraphViewStore();
+      return null;
+    }
+    renderWithQuery(
+      <>
+        <Probe />
+        <ThreadPanel study={STUDY} />
+      </>,
+    );
+    // The user picked another node since: the link's URL is unchanged, so it selects here.
+    act(() => store?.getState().select(['eeeeeeee-2222-4333-8444-555555555555'], 'canvas'));
+    const link = await screen.findByRole('link', { name: 'Show in study' });
+    link.addEventListener('click', (e) => e.preventDefault());
+    fireEvent.click(link);
+    expect(store!.getState()).toMatchObject({
+      selectedNodeIds: [nodeId],
+      selectionSource: 'list',
+      focusDetail: true,
+    });
+    window.history.replaceState(null, '', '/');
   });
 });

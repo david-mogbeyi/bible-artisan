@@ -8,6 +8,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REASONING_COPY, ReasoningPath } from '@/components/nodes/reasoning-path';
 import { useGraphView } from '@/lib/graph-store';
+import { formatNodeTime } from '@/lib/nodes';
 import { threadQueryKey } from '@/lib/thread';
 import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
@@ -459,5 +460,47 @@ describe('ReasoningPath (BIB-45)', () => {
       'Version 1: No supporting evidence was recorded with this version.',
     );
     await expectNoA11yViolations(document.body);
+  });
+
+  it('never doubles a period when a statement or evidence label ends a sentence itself', async () => {
+    const evidence = (label: string, n: number) => ({
+      edgeId: `eeeeeeee-2222-4333-8444-55555555555${n}`,
+      edgeType: n === 1 ? 'supports' : 'qualifies',
+      nodeId: `ffffffff-2222-4333-8444-55555555555${n}`,
+      label,
+      edgeLive: true,
+      nodeLive: true,
+      nodeChangedSince: false,
+    });
+    const path: ReasoningPathResponse = {
+      nodeId: OBS,
+      steps: [
+        {
+          kind: 'version',
+          versionId: VER,
+          versionNumber: 2,
+          action: 'updated',
+          statement: 'Conscience binds, yet it can be mistaken.',
+          status: 'supported',
+          established: false,
+          createdAt: T,
+          eventId: null,
+          eventSequence: null,
+          evidence: [
+            evidence('The same act can be clean for one and unclean for another.', 1),
+            evidence('Conscience binds the one who holds it.', 2),
+          ],
+        },
+      ],
+      gaps: [],
+    };
+    reply(`GET /studies/${STUDY_ID}/nodes/${OBS}/reasoning`, jsonResponse(200, path));
+    renderWithQuery(<ReasoningPath studyId={STUDY_ID} nodeId={OBS} />);
+    fireEvent.click(screen.getByRole('button', { name: REASONING_COPY.open }));
+    const region = await screen.findByRole('region', { name: REASONING_COPY.heading });
+    const step = await within(region).findByRole('listitem');
+    expect(textOf(step)).toBe(
+      `${formatNodeTime(T)}: version 2 (updated, supported) “Conscience binds, yet it can be mistaken.” Evidence: supports The same act can be clean for one and unclean for another; qualifies Conscience binds the one who holds it.`,
+    );
   });
 });

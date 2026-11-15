@@ -2,6 +2,7 @@ import type { StudyResponse } from '@bible-artisan/contracts';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { UNDO_COPY, UndoControls } from '@/components/graph/undo-controls';
 import { NODE_ADD_COPY } from '@/lib/add-node';
 import { libraryQueryKey, studyQueryKey } from '@/lib/studies';
 import { EDITION_ID, TRANSLATION } from '@/test/bible-fixtures';
@@ -614,6 +615,120 @@ describe('NodesSection', () => {
     );
     await screen.findByRole('button', { name: 'Scripture · Scripture Text Romans 9:1' });
     expect(screen.queryByRole('region', { name: 'Scripture' })).toBeNull();
+  });
+
+  it('opens every new ?node= on the same page (Show in study), over a restored selection and over a pick', async () => {
+    const ids = [
+      NODE_ID,
+      'eeeeeeee-2222-4333-8444-555555555551',
+      'eeeeeeee-2222-4333-8444-555555555552',
+    ];
+    const texts = ['First thought', 'Second thought', 'Third thought'];
+    reply(
+      `GET ${NODES}`,
+      jsonResponse(200, { items: ids.map((id, i) => summary({ id, label: texts[i] })) }),
+    );
+    ids.forEach((id, i) => {
+      const body = { type: 'thought', ...common({ id }), text: texts[i], derivedFromNote: null };
+      reply(`GET ${NODES}/${id}`, jsonResponse(200, body), jsonResponse(200, body));
+    });
+    const onReload = vi.fn(() => Promise.resolve());
+    const section = (initialNodeId: string | null) => (
+      <NodesSection
+        study={STUDY}
+        onReload={onReload}
+        initialNodeId={initialNodeId}
+        restoredNodeId={ids[0]}
+      />
+    );
+    const rendered = renderWithQuery(section(null));
+    const rerender = (initialNodeId: string) =>
+      rendered.rerender(
+        <QueryClientProvider client={rendered.queryClient}>
+          {section(initialNodeId)}
+        </QueryClientProvider>,
+      );
+    const shown = async (text: string) => {
+      const region = await screen.findByRole('region', { name: 'Thought' });
+      await waitFor(() => expect(textOf(region)).toContain(`Text${text}`));
+      return region;
+    };
+    // The saved selection, restored quietly.
+    expect(document.activeElement).not.toBe(
+      within(await shown('First thought')).getByRole('heading', { name: 'Thought' }),
+    );
+
+    // A Study Thread link on this page changes only `?node=`: it wins over the restore.
+    rerender(ids[1] as string);
+    const second = await shown('Second thought');
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(second).getByRole('heading', { name: 'Thought' })),
+    );
+
+    // And over a node picked by hand since.
+    fireEvent.click(screen.getByRole('button', { name: 'Thought · You First thought' }));
+    await shown('First thought');
+    rerender(ids[2] as string);
+    const third = await shown('Third thought');
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(third).getByRole('heading', { name: 'Thought' })),
+    );
+  });
+
+  it('clears the added status when the add is undone, and "Undid" when a new command follows', async () => {
+    reply(
+      `GET ${NODES}`,
+      jsonResponse(200, { items: [] }),
+      jsonResponse(200, { items: [summary()] }),
+      jsonResponse(200, { items: [] }),
+      jsonResponse(200, { items: [summary()] }),
+    );
+    reply(
+      `POST ${NODES}`,
+      jsonResponse(201, { ...mutation(), studyRevision: 5 }),
+      jsonResponse(201, { ...mutation(), studyRevision: 7 }),
+    );
+    const detail = { type: 'thought', ...common(), text: 'Kept', derivedFromNote: null };
+    reply(`GET ${NODE}`, jsonResponse(200, detail), jsonResponse(200, detail));
+    reply(
+      `DELETE ${NODE}`,
+      jsonResponse(200, {
+        id: NODE_ID,
+        studyId: STUDY_ID,
+        type: 'thought',
+        revision: 2,
+        removedEdgeCount: 0,
+        removedEdges: [],
+        promotedCanonicalNodeId: null,
+        mainQuestionCleared: false,
+        establishmentClearedNodeIds: [],
+        lastEventSequence: '7',
+      }),
+    );
+    const onReload = vi.fn(() => Promise.resolve());
+    const rendered = renderWithQuery(
+      <>
+        <UndoControls studyId={STUDY_ID} editable />
+        <NodesSection study={STUDY} onReload={onReload} />
+      </>,
+    );
+    rendered.queryClient.setQueryData(studyQueryKey(STUDY_ID), STUDY);
+    const add = async () => {
+      await openAdd();
+      fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Kept' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+      await screen.findByRole('button', { name: 'Undo: Add thought' });
+    };
+    await add();
+    expect(screen.getByText('Thought added')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Undo: Add thought' }));
+    expect(await screen.findByText(UNDO_COPY.undid('Add thought'))).toBeTruthy();
+    expect(screen.queryByText('Thought added')).toBeNull();
+
+    await add();
+    expect(screen.getByText('Thought added')).toBeTruthy();
+    expect(screen.queryByText(UNDO_COPY.undid('Add thought'))).toBeNull();
   });
 
   it('keeps the draft on a 409 and asks to press Create again; Retry after an unknown outcome resends the same key and body', async () => {

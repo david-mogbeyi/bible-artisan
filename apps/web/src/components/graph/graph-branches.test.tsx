@@ -273,7 +273,7 @@ describe('node detail Branches (BIB-60)', () => {
     api.branchReplies.push(branchResponse(removedA));
     api.graph = { ...WITH_BRANCHES, branches: [removedA, addedB] };
     fireEvent.click(boxA);
-    expect(await within(group).findByText(`Removed from ${LABEL_A}.`)).toBeTruthy();
+    expect(await within(group).findByText(`Removed from ${LABEL_A}`)).toBeTruthy();
     await waitFor(() => expect(boxA.checked).toBe(false));
     const sent = branchChanges();
     expect(sent.map(({ method, path, body }) => ({ method, path, body }))).toStrictEqual([

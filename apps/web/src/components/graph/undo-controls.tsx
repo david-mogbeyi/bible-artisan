@@ -2,7 +2,7 @@
 
 import { STUDY_ARCHIVED, STUDY_TRASHED } from '@bible-artisan/contracts';
 import { useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { ApiError } from '@/lib/api-client';
 import { classifyError, isRetryable } from '@/lib/api-errors';
 import { useGraphViewStore } from '@/lib/graph-store';
@@ -14,6 +14,7 @@ import {
   UndoRevisionUnknownError,
   UndoTargetGoneError,
   useUndo,
+  useUndoEvents,
   useUndoStore,
 } from '@/lib/undo';
 
@@ -46,6 +47,11 @@ export function UndoControls({ studyId, editable }: { studyId: string; editable:
   const nextRedo = useUndo((s) => s.redo.at(-1) ?? null);
   const busy = useUndo((s) => s.busy);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
+  // A new command makes "Undid: …" about an older one: it goes.
+  useUndoEvents(
+    'recorded',
+    useCallback(() => setOutcome(null), []),
+  );
 
   if (!store || !editable) return null;
 

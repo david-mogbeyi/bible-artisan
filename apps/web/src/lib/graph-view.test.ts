@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   arrange,
   fallbackPositions,
+  fitNodeIds,
   focusStart,
   NODE_HEIGHT,
   NODE_WIDTH,
@@ -466,5 +467,32 @@ describe('focusStart', () => {
     expect(focusStart(graph({ nodes: many, branches }), null)).toBe(id(20));
     expect(focusStart(graph({ nodes: many }), id(77777))).toBe(id(60));
     expect(focusStart(graph({ nodes: many.slice(0, 499) }), id(10))).toBeNull();
+  });
+});
+
+describe('fitNodeIds (BIB-52)', () => {
+  // 1,000 × 600 px canvas: at 25% the fit may span 1,000 / 1.1 / 0.25 ≈ 3,636 units across.
+  const canvas = { width: 1000, height: 600 };
+
+  it('fits every shown node when their bounds fit at the smallest zoom', () => {
+    const positions = { a: { x: 0, y: 0 }, b: { x: 2000, y: 1000 }, c: { x: 400, y: 200 } };
+    expect(fitNodeIds(['a', 'b', 'c'], positions, null, canvas)).toStrictEqual(['a', 'b', 'c']);
+  });
+
+  it('fits the shown nodes nearest the anchor when they are too far apart, never the gap between', () => {
+    // A focused view in a large layout: three nodes at the top, two 13,000 units below.
+    const positions = {
+      top1: { x: 0, y: 0 },
+      top2: { x: 260, y: 0 },
+      top3: { x: 0, y: 136 },
+      far1: { x: 0, y: 13000 },
+      far2: { x: 260, y: 13136 },
+      hidden: { x: 50, y: 50 },
+    };
+    const shown = ['far1', 'top1', 'top2', 'far2', 'top3'];
+    expect(fitNodeIds(shown, positions, 'top2', canvas)).toStrictEqual(['top2', 'top1', 'top3']);
+    expect(fitNodeIds(shown, positions, 'far2', canvas)).toStrictEqual(['far2', 'far1']);
+    // Without a shown anchor: from the top-left node.
+    expect(fitNodeIds(shown, positions, 'hidden', canvas)).toStrictEqual(['top1', 'top3', 'top2']);
   });
 });
