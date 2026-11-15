@@ -152,6 +152,7 @@ export async function readStudyExport(
       establishedAt: isoOrNull(node.establishedAt),
       scriptureReferenceId: node.scriptureReferenceId,
       canonicalNodeId: node.canonicalNodeId,
+      derivedFromNoteId: node.derivedFromNoteId,
       source: node.payloadJson,
       revision: node.revision,
       createdAt: iso(node.createdAt),

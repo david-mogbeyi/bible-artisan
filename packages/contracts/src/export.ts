@@ -104,6 +104,8 @@ export const exportNodeSchema = z.object({
   establishedAt: nullableTimestamp,
   scriptureReferenceId: z.uuid().nullable(),
   canonicalNodeId: z.uuid().nullable(),
+  /** The note an Observation or Thought was converted from (BIB-57), else null. */
+  derivedFromNoteId: z.uuid().nullable(),
   /** A Source node's bibliographic metadata (URL, locator, …) as stored. */
   source: z.record(z.string(), z.unknown()).nullable(),
   revision: z.number().int(),
