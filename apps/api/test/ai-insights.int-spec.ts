@@ -10,6 +10,7 @@ import {
   type CreateStudyResponse,
   type ReasoningPathResponse,
   type StudySummaryResponse,
+  type ThreadEventsResponse,
 } from '@bible-artisan/contracts';
 import request, { type Response } from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -644,6 +645,16 @@ describe('AI study insights (BIB-43, BIB-44, BIB-45)', () => {
         'What does Romans 9:1 add?',
         'open',
       ]);
+      // The Questions filter lists the acceptance with the question it created (one action), so
+      // that card still says it came from an AI suggestion the user accepted (FR-AI-013).
+      const questions = (await send(alice, 'get', `/v1/studies/${studyId}/events?filter=questions`))
+        .body as ThreadEventsResponse;
+      const action = questions.items.filter((item) => item.targetRef?.id === nodeId);
+      expect(action.map((item) => [item.type, item.displayText])).toStrictEqual([
+        ['ai_suggestion_accepted', 'Added the AI-suggested question “What does Romans 9:1 add?”'],
+        ['question_created', 'Asked “What does Romans 9:1 add?”'],
+      ]);
+      expect(new Set(action.map((item) => item.correlationId)).size).toBe(1);
       // A second accept without the key replays the node without writing.
       expect(
         answer(
