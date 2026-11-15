@@ -119,7 +119,19 @@ export class ExportsService {
     const replay = await this.mutations.committedReplay(ownerId, request);
     if (replay) return replay;
     // Refuse before the expensive read; re-checked under the owner's lock before storing.
-    await this.assertWithinRateLimit(ownerId);
+    try {
+      await this.assertWithinRateLimit(ownerId);
+    } catch (error) {
+      // A duplicate of an in-flight request can find nothing to replay above and then count the
+      // export that request committed a moment later. That export's receipt committed with it,
+      // so look again: a replay is never limited.
+      const committed =
+        error instanceof RateLimitedError
+          ? await this.mutations.committedReplay(ownerId, request)
+          : null;
+      if (committed) return committed;
+      throw error;
+    }
     const file = await render();
     const byteSize = Buffer.byteLength(file.content, 'utf8');
     if (byteSize > this.limits.maxBytes) throw new ExportTooLargeError(this.limits.maxBytes);

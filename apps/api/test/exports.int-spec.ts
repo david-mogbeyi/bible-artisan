@@ -13,8 +13,9 @@ import {
 } from '@bible-artisan/contracts';
 import { Op } from 'sequelize';
 import request, { type Response } from 'supertest';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { cursorSecret, type Env } from '../src/config/env';
+import { MutationService } from '../src/common/mutation/mutation.service';
 import { ENV } from '../src/config/config.module';
 import { DATABASE } from '../src/database/database.module';
 import type { Database } from '../src/database/database';
@@ -227,6 +228,7 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
 
   afterEach(() => {
     Object.assign(limits, DEFAULT_EXPORT_LIMITS);
+    vi.restoreAllMocks();
   });
 
   afterAll(async () => {
@@ -621,5 +623,26 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
     );
     expect(responses.map((res) => res.status).sort()).toStrictEqual([201, 201, 429, 429, 429]);
     expect(await ExportFile.count({ where: { ownerId: erin.user.id } })).toBe(2);
+  });
+
+  it('replays a duplicate whose first request committed the last allowed export while it was looking, instead of answering 429', async () => {
+    const fay = await signedInUser();
+    limits.maxExports = 1;
+    const key = randomUUID();
+    const first = await send(fay, 'post', ACCOUNT_EXPORTS, { format: 'json' }, key);
+    expect(first.status).toBe(201);
+
+    // The duplicate looked for a committed response just before the first request committed
+    // (nothing yet), and then counts the export that commit stored: the owner is at the limit.
+    const mutations = app.get(MutationService);
+    vi.spyOn(mutations, 'committedReplay').mockResolvedValueOnce(null);
+    const duplicate = await send(fay, 'post', ACCOUNT_EXPORTS, { format: 'json' }, key);
+    expect([duplicate.status, duplicate.body]).toStrictEqual([201, first.body]);
+    expect(duplicate.headers['idempotent-replayed']).toBe('true');
+    expect(await ExportFile.count({ where: { ownerId: fay.user.id } })).toBe(1);
+
+    // A request that has nothing to replay is still limited.
+    const other = await send(fay, 'post', ACCOUNT_EXPORTS, { format: 'json' }, randomUUID());
+    expect([other.status, other.body]).toStrictEqual([429, RATE_LIMITED]);
   });
 });
