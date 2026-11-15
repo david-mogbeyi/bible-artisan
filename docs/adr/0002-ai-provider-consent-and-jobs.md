@@ -16,12 +16,12 @@
    region, deletion terms, and the cost per request at the configured model. Until that record
    exists, AI stays off in every deployment.
 
-   | Item                                     | Status                                                                                       |
-   | ---------------------------------------- | -------------------------------------------------------------------------------------------- |
-   | Training on submitted content prohibited | to verify (commercial API terms)                                                             |
-   | Retention / zero-retention eligibility   | to verify; do not promise zero retention                                                     |
-   | Processing region                        | to verify                                                                                    |
-   | Cost                                     | Sonnet 5.5: $2 / $10 per million input / output tokens; capped by `AI_MONTHLY_SPEND_CAP_USD` |
+   | Item                                     | Status                                                                                                                                                                               |
+   | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+   | Training on submitted content prohibited | Required by product (2026-11-15). Anthropic Commercial Terms: "Anthropic may not train models on Customer Content from Services". Use the commercial API only, never a consumer plan |
+   | Retention / zero-retention eligibility   | to verify; do not promise zero retention                                                                                                                                             |
+   | Processing region                        | to verify                                                                                                                                                                            |
+   | Cost                                     | Sonnet 5.5: $2 / $10 per million input / output tokens; capped by `AI_MONTHLY_SPEND_CAP_USD`                                                                                         |
 
 3. **Consent is explicit, versioned and revocable.** `AI_CONSENT_VERSION` and `AI_CONSENT_COPY`
    live in `@bible-artisan/contracts`. `user.ai_enabled` can be true only with a recorded consent
