@@ -73,7 +73,7 @@ describe('AI consent and jobs (BIB-39, BIB-40)', () => {
 
   function send(
     owner: Owner | null,
-    method: 'get' | 'post' | 'put',
+    method: 'get' | 'post' | 'put' | 'delete',
     path: string,
     body?: unknown,
     key?: string,
@@ -603,6 +603,39 @@ describe('AI consent and jobs (BIB-39, BIB-40)', () => {
         }),
       ]);
       expect(Number(res.headers['retry-after'])).toBeGreaterThan(0);
+    });
+
+    async function trash(owner: Owner, studyId: string): Promise<void> {
+      const { revision } = await Study.findByPk(studyId, { rejectOnEmpty: true });
+      const res = await send(owner, 'delete', `/v1/studies/${studyId}`, {
+        expectedRevision: revision,
+      });
+      expect(res.status).toBe(200);
+    }
+
+    it('a study trashed after the request is never sent: the job is cancelled with no provider call', async () => {
+      const owner = await optedIn();
+      const studyId = await createStudy(owner);
+      const { jobId } = await requested(owner, studyId);
+      await trash(owner, studyId);
+      expect(await runner.runOnce()).toBe(jobId);
+      expect(fake.calls).toBe(0);
+      const stored = await job(jobId);
+      expect([stored.state, stored.errorCode]).toStrictEqual(['cancelled', 'STUDY_UNAVAILABLE']);
+      expect(await ContextManifest.count({ where: { jobId } })).toBe(0);
+      expect(await AiResult.count({ where: { jobId } })).toBe(0);
+    });
+
+    it('a study trashed while the provider is answering discards the output', async () => {
+      const owner = await optedIn();
+      const studyId = await createStudy(owner);
+      const { jobId } = await requested(owner, studyId);
+      fake.beforeAnswer = () => trash(owner, studyId);
+      expect(await runner.runOnce()).toBe(jobId);
+      expect(fake.calls).toBe(1);
+      const stored = await job(jobId);
+      expect([stored.state, stored.errorCode]).toStrictEqual(['cancelled', 'STUDY_UNAVAILABLE']);
+      expect(await AiResult.count({ where: { jobId } })).toBe(0);
     });
 
     it('marks a finished job stale once the study content moves past its basis', async () => {

@@ -32,11 +32,30 @@ export class OutputValidationError extends Error {
   }
 }
 
-/** Model text → the capability's schema output, or `OutputValidationError`. No coercion. */
+/**
+ * One Markdown code fence around the whole answer (```json … ``` or ``` … ```), as models often
+ * send JSON. Anchored at both ends, so text before or after the fence is not stripped.
+ */
+const SURROUNDING_FENCE = /^```[A-Za-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?```$/;
+
+/**
+ * The answer without surrounding whitespace and at most one surrounding code fence. Nothing more
+ * lenient: prose around the fence, or a second fence, still fails as `not_json`.
+ */
+export function stripFence(text: string): string {
+  const trimmed = text.trim();
+  const fenced = SURROUNDING_FENCE.exec(trimmed);
+  return fenced ? (fenced[1] ?? '').trim() : trimmed;
+}
+
+/**
+ * Model text → the capability's schema output, or `OutputValidationError`. No coercion beyond
+ * `stripFence`.
+ */
 export function parseStructured<S extends z.ZodType>(text: string, schema: S): z.output<S> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text.trim());
+    parsed = JSON.parse(stripFence(text));
   } catch {
     throw new OutputValidationError('not_json');
   }

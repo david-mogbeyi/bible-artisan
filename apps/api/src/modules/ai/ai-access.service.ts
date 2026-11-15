@@ -6,9 +6,10 @@ import {
   type AiJobErrorCode,
 } from '@bible-artisan/contracts';
 import type { Transaction } from 'sequelize';
-import { AiRuleError, AiUnavailableError } from '../../common/errors/domain-errors';
+import { AiRuleError, AiUnavailableError, NotFoundError } from '../../common/errors/domain-errors';
 import { StudyAiSetting } from '../../database/models/study-ai-setting.model';
 import { UserAiConsentService, type UserAiConsent } from '../identity/user-ai-consent.service';
+import { StudyAccessService } from '../study/study-access.service';
 import { AI_PROVIDER, type AiProvider } from './provider/ai-provider';
 
 /** A study's AI switch, with the defaults of a study that never changed it. */
@@ -29,6 +30,7 @@ export class AiAccessService {
   constructor(
     @Inject(AI_PROVIDER) private readonly provider: AiProvider | null,
     private readonly consents: UserAiConsentService,
+    private readonly studies: StudyAccessService,
   ) {}
 
   get providerInfo(): { available: boolean; name: string | null; modelId: string | null } {
@@ -67,6 +69,9 @@ export class AiAccessService {
    * For a job about to call the provider or publish: why it must stop, or null when it may go on.
    * The consent must still be the one the job was requested under. With `transaction`, the user
    * row is locked, so a concurrent revocation either committed first (seen here) or waits.
+   * The study must still be one a request could be made for: a study trashed (or gone past its
+   * recovery window, or purged) after the request is `STUDY_UNAVAILABLE`, so none of its content
+   * is sent and no result is published. Archived studies stay allowed, as for a new request.
    */
   async jobBlocker(
     job: { ownerId: string; studyId: string; consentVersion: string },
@@ -85,6 +90,17 @@ export class AiAccessService {
       ...(transaction ? { transaction } : {}),
     });
     if (row && !row.aiEnabled) return 'AI_DISABLED_FOR_STUDY';
+    try {
+      const study = await this.studies.requireOwnedStudy(
+        job.ownerId,
+        job.studyId,
+        transaction ? { transaction } : {},
+      );
+      if (study.lifecycle === 'trashed') return 'STUDY_UNAVAILABLE';
+    } catch (error) {
+      if (error instanceof NotFoundError) return 'STUDY_UNAVAILABLE';
+      throw error;
+    }
     return null;
   }
 }

@@ -3,6 +3,7 @@ import {
   type NodeSummary,
   type QuestionStatus,
   type StudySummary,
+  type SummaryAttribution,
   type SummaryItem,
   type SummaryModelItem,
   summaryModelOutputSchema,
@@ -164,10 +165,33 @@ function validItem(
   return {
     id: randomUUID(),
     text: item.text,
-    attribution: item.attribution,
+    attribution: verifiedAttribution(item.text, item.attribution, evidence, index),
     evidenceRefs,
     supportingNodeVersions,
   };
+}
+
+/**
+ * Section 17 / "Keep origin, certainty, and adoption separate": the UI shows a `user_statement`
+ * item as the user's own words, so the model's label is not trusted. It stands only when the
+ * item's text is, exactly, the stored text of a cited user-authored item (a node the user wrote,
+ * or a note) or a cited quote from one (quotes are already exact stored text, checked by
+ * `evidenceAcceptable`). Anything else is the AI's wording and is labelled `ai_synthesis`; the
+ * item itself is kept.
+ */
+export function verifiedAttribution(
+  text: string,
+  attribution: SummaryAttribution,
+  evidence: readonly { id: string; quote: string | null }[],
+  index: StudyIndex,
+): SummaryAttribution {
+  if (attribution !== 'user_statement') return attribution;
+  const verbatim = evidence.some((e) => {
+    const userAuthored = index.nodes.get(e.id)?.origin === 'user' || index.notes.has(e.id);
+    if (!userAuthored) return false;
+    return e.quote === text || (index.quotable.get(e.id) ?? []).includes(text);
+  });
+  return verbatim ? 'user_statement' : 'ai_synthesis';
 }
 
 const UNRESOLVED: ReadonlySet<QuestionStatus> = new Set(['open', 'partially_answered']);
