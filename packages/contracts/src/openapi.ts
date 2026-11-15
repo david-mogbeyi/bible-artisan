@@ -37,6 +37,12 @@ import {
   updateAnnotationRequestSchema,
 } from './annotation';
 import { errorEnvelopeSchema } from './error-envelope';
+import {
+  LIMIT_WARNING_RATIO,
+  MAX_ACCOUNT_STORAGE_BYTES,
+  MAX_EVENTS_PER_STUDY,
+  studyLimitsResponseSchema,
+} from './limits';
 import { healthResponseSchema, livenessResponseSchema } from './health';
 import {
   createNoteRequestSchema,
@@ -959,6 +965,17 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/studies/{studyId}/limits': {
+        get: {
+          description: `Returns the study's usage against the safety caps (NFR-SCALE-002): live nodes (cap ${MAX_NODES_PER_STUDY.toLocaleString('en-US')}), live edges (cap ${MAX_EDGES_PER_STUDY.toLocaleString('en-US')}), events (cap ${MAX_EVENTS_PER_STUDY.toLocaleString('en-US')}), and the account's derived storage in bytes, excluding the Bible text and studies in the trash (cap ${MAX_ACCOUNT_STORAGE_BYTES / 1024 / 1024} MB, measured at most a minute ago). Each has state warning from ${LIMIT_WARNING_RATIO * 100}% and reached at the cap. At the event cap a change to the study is 422 STUDY_EVENT_LIMIT_REACHED, and at the storage cap any addition is 422 STORAGE_LIMIT_REACHED; reading, exporting, archiving, trashing and removing nodes, relationships, notes and highlights stay available. Counts only. Archived and trashed studies stay readable. ${NODE_OWNERSHIP}`,
+          security: sessionCookie,
+          parameters: [studyIdParam],
+          responses: {
+            200: jsonResponse('Usage against the safety caps', 'StudyLimitsResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/studies/{studyId}/positions': {
         patch: {
           description: `Saves the canvas positions of 1-${MAX_POSITIONS_PER_REQUEST} live nodes of the study, each node once, coordinates finite and within ±1,000,000. expectedRevision is the view revision from GET /graph or the last save (missing 428, stale 409 with currentRevision): positions are presentation, so the study revision and contentRevision never move and a content edit never conflicts with a layout save. Only the sent nodes change. A node that is not a live node of this study is 404 with nothing written. One internal node_position_saved event (ids and counts only). An archived study is 422 STUDY_ARCHIVED and a trashed one 422 STUDY_TRASHED. Send an Idempotency-Key: a retry with the same key and body replays the original response. ${NODE_OWNERSHIP}`,
@@ -1070,6 +1087,7 @@ function buildDocument(): OpenApiDocument {
         GraphResponse: toSchema(graphResponseSchema),
         SavePositionsRequest: toInputSchema(savePositionsRequestSchema),
         SavePositionsResponse: toSchema(savePositionsResponseSchema),
+        StudyLimitsResponse: toSchema(studyLimitsResponseSchema),
         CreateExportRequest: toSchema(createExportRequestSchema),
         ExportResponse: toSchema(exportResponseSchema),
         DeleteAccountRequest: toInputSchema(deleteAccountRequestSchema),

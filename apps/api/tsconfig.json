@@ -8,5 +8,5 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src", "test", "migrations", "vitest.config.mts"]
+  "include": ["src", "test", "scripts", "migrations", "vitest.config.mts"]
 }

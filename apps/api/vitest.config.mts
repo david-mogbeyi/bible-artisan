@@ -20,6 +20,12 @@ export default defineConfig({
           fileParallelism: false,
         },
       },
+      {
+        // BIB-52: the study-size benchmark (`pnpm bench:sizes`), never part of a test run. Uses
+        // `.env` `DATABASE_URL` as is (migrated, corpus imported) and cleans up its own user.
+        extends: true,
+        test: { name: 'bench', include: ['scripts/**/*.run.ts'] },
+      },
     ],
   },
 });

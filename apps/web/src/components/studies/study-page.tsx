@@ -23,6 +23,7 @@ import { fetchStudy, studyQueryKey } from '@/lib/studies';
 import { useNarrowViewport } from '@/lib/viewport';
 import { StudyEditor } from './study-editor';
 import { StudyLifecycleActions } from './study-lifecycle-actions';
+import { StudyLimitsNotice } from './study-limits-notice';
 import { ViewStateSaver } from './view-state-saver';
 import {
   FollowNodeDetail,
@@ -140,6 +141,8 @@ function StudyDetails({
   return (
     <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
       <h1 className="font-serif text-4xl break-words">{study.title}</h1>
+      {/* BIB-52: warnings from 80% of a safety cap, and what still works at one (every tab). */}
+      <StudyLimitsNotice studyId={study.id} />
       {narrow ? (
         <WorkspaceTabList idBase={idBase} selected={tab} onSelect={setTab} unsaved={unsavedTabs} />
       ) : null}

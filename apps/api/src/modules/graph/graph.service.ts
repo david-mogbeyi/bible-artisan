@@ -2,6 +2,10 @@ import { Inject, Injectable } from '@nestjs/common';
 import {
   type GraphResponse,
   INITIAL_VIEW_REVISION,
+  limitState,
+  MAX_EDGES_PER_STUDY,
+  MAX_NODES_PER_STUDY,
+  type StudyLimitsResponse,
   savePositionsRequestSchema,
   type SavePositionsResponse,
 } from '@bible-artisan/contracts';
@@ -19,6 +23,8 @@ import { StudyEdge } from '../../database/models/study-edge.model';
 import { StudyNode } from '../../database/models/study-node.model';
 import { StudyNodePosition } from '../../database/models/study-node-position.model';
 import { StudyViewState } from '../../database/models/study-view-state.model';
+import { AccountStorageService } from '../study/account-storage.service';
+import { SAFETY_LIMITS, type SafetyLimits } from '../study/safety-limits';
 import { StudyAccessService } from '../study/study-access.service';
 import { StudyGraphService } from '../study/study-graph.service';
 import { NodesService } from './nodes.service';
@@ -56,7 +62,37 @@ export class GraphService {
     private readonly access: StudyAccessService,
     private readonly nodes: NodesService,
     private readonly studyGraph: StudyGraphService,
+    private readonly storage: AccountStorageService,
+    @Inject(SAFETY_LIMITS) private readonly limits: SafetyLimits,
   ) {}
+
+  /**
+   * `GET /studies/:studyId/limits` (BIB-52; NFR-SCALE-002): the study's live nodes, live edges
+   * and events, and the owner's derived account storage, each against its cap with its state
+   * (`warning` from 80%, `reached` at the cap). Counts only. Readable in every lifecycle state;
+   * the storage figure is the cached one the mutation pipeline checks against.
+   */
+  async limitsOf(ownerId: string, studyId: string): Promise<StudyLimitsResponse> {
+    const study = await this.access.requireOwnedStudy(ownerId, studyId);
+    const scope = { studyId, ownerId, deletedAt: null };
+    const [nodes, edges, storage] = await Promise.all([
+      StudyNode.count({ where: scope }),
+      StudyEdge.count({ where: scope }),
+      this.storage.usedBytes(ownerId),
+    ]);
+    const events = Number(study.lastEventSequence);
+    const usage = (used: number, limit: number) => ({
+      used,
+      limit,
+      state: limitState(used, limit),
+    });
+    return {
+      nodes: usage(nodes, MAX_NODES_PER_STUDY),
+      edges: usage(edges, MAX_EDGES_PER_STUDY),
+      events: usage(events, this.limits.maxEventsPerStudy),
+      storage: usage(storage, this.limits.maxAccountStorageBytes),
+    };
+  }
 
   /**
    * `GET /studies/:studyId/graph`: one REPEATABLE READ, read-only transaction, so every row and

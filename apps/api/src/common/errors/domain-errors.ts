@@ -16,6 +16,8 @@ import {
   type EdgeErrorCode,
   type AnnotationErrorCode,
   LIFECYCLE_TRANSITION_INVALID,
+  LIMIT_ERROR_MESSAGES,
+  type LimitErrorCode,
   MAX_ANNOTATIONS_PER_STUDY,
   MAX_NOTE_CHARACTERS,
   MAX_NOTES_PER_STUDY,
@@ -453,5 +455,19 @@ export class AccountDeletedError extends Error {
   constructor() {
     super('This account was deleted and can no longer sign in');
     this.name = 'AccountDeletedError';
+  }
+}
+
+/**
+ * A study change refused because a safety cap is reached (BIB-52; NFR-SCALE-002; PRD section 28
+ * "At safety cap permit review/export/delete while blocking additions with an explanation"): the
+ * study's event cap (`STUDY_EVENT_LIMIT_REACHED`) or the account's storage cap
+ * (`STORAGE_LIMIT_REACHED`). 422, raised by the mutation pipeline before any work, so nothing is
+ * written. Fixed messages: counts and limits only.
+ */
+export class LimitReachedError extends Error {
+  constructor(readonly code: LimitErrorCode) {
+    super(LIMIT_ERROR_MESSAGES[code]);
+    this.name = 'LimitReachedError';
   }
 }

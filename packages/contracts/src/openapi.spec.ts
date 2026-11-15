@@ -955,6 +955,26 @@ describe('buildOpenApiDocument', () => {
             'GraphResponse',
           ),
         },
+        '/studies/{studyId}/limits': {
+          get: noteOperation(
+            [
+              'live nodes \\(cap 2,000\\)',
+              'live edges \\(cap 6,000\\)',
+              'events \\(cap 100,000\\)',
+              'cap 500 MB',
+              'warning from 80%',
+              'STUDY_EVENT_LIMIT_REACHED',
+              'STORAGE_LIMIT_REACHED',
+              'exporting, archiving, trashing and removing',
+              'Counts only',
+              SAME_404,
+            ],
+            [studyId],
+            200,
+            'Usage against the safety caps',
+            'StudyLimitsResponse',
+          ),
+        },
         '/studies/{studyId}/positions': {
           patch: noteOperation(
             [
@@ -1147,6 +1167,7 @@ describe('buildOpenApiDocument', () => {
       'GraphResponse',
       'SavePositionsRequest',
       'SavePositionsResponse',
+      'StudyLimitsResponse',
       'CreateExportRequest',
       'ExportResponse',
       'DeleteAccountRequest',

@@ -448,6 +448,14 @@ const ROUTES: Record<string, Access> = {
       test: 'GET /v1/studies/:studyId/graph gives another user the same neutral 404 as an absent, malformed or past-window study',
     },
   },
+  // BIB-52: usage against the safety caps, counts only.
+  'GET /v1/studies/:studyId/limits': {
+    access: 'private',
+    crossUserTest: {
+      file: 'safety-limits.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/limits gives another user the same neutral 404 as an absent or malformed id',
+    },
+  },
   'PATCH /v1/studies/:studyId/positions': {
     access: 'private',
     crossUserTest: {
