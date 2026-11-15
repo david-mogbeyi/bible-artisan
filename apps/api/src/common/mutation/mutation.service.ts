@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { STUDY_EVENT_LIMIT_REACHED } from '@bible-artisan/contracts';
 import { fn, Op, QueryTypes, Transaction } from 'sequelize';
 import { DATABASE } from '../../database/database.module';
 import type { Database } from '../../database/database';
@@ -13,8 +14,10 @@ import {
   assertLifecycleAllows,
   type StudyLifecycleTransition,
 } from '../../modules/study/study-lifecycle';
+import { AccountStorageService } from '../../modules/study/account-storage.service';
+import { SAFETY_LIMITS, type SafetyLimits } from '../../modules/study/safety-limits';
 import { ThreadService } from '../../modules/thread/thread.service';
-import { IdempotencyKeyReusedError } from '../errors/domain-errors';
+import { IdempotencyKeyReusedError, LimitReachedError } from '../errors/domain-errors';
 import { requestFingerprint } from './fingerprint';
 import type { MutationRequestInfo } from './mutation-request';
 import { StudyMutation } from './study-mutation';
@@ -70,6 +73,14 @@ export interface StudyMutationSpec {
    * the content revision (`bumpsContentRevision: false`). Revision and content revision stay put.
    */
   navigation?: boolean;
+  /**
+   * Removals only (BIB-52): deleting a node or relationship, trashing a note, removing a
+   * highlight. They stay available at a safety cap (PRD section 28: "At safety cap permit
+   * review/export/delete while blocking additions"). Every other mutation, except a lifecycle
+   * transition (archive, trash, restore), is refused at the study's event cap (422
+   * STUDY_EVENT_LIMIT_REACHED) and at the account's storage cap (422 STORAGE_LIMIT_REACHED).
+   */
+  allowedAtCap?: boolean;
   /**
    * The domain work. Must revision-check at least one row with `m.updateWithExpectedRevision`
    * and append at least one event with `m.appendEvent`, or declare `m.unchanged()` before writing
@@ -128,6 +139,8 @@ export class MutationService {
     @Inject(DATABASE) private readonly db: Database,
     private readonly studyRevisions: StudyRevisionService,
     private readonly thread: ThreadService,
+    private readonly storage: AccountStorageService,
+    @Inject(SAFETY_LIMITS) private readonly limits: SafetyLimits,
   ) {}
 
   async execute(
@@ -135,11 +148,22 @@ export class MutationService {
     request: MutationRequestInfo,
     spec: StudyMutationSpec,
   ): Promise<MutationResult> {
+    const capped = spec.lifecycleTransition === undefined && spec.allowedAtCap !== true;
     return this.transact(ownerId, request, async (transaction) => {
       const lock = await this.studyRevisions.lock(transaction, ownerId, spec.studyId);
       // The lifecycle guard (BIB-22), once for every study mutation: under the lock, before any
       // work, so a refusal writes nothing and rolls the receipt back.
       assertLifecycleAllows(lock.lifecycle, spec.lifecycleTransition);
+      // The event cap (BIB-52; NFR-SCALE-002): the study's history is never dropped, so at the cap
+      // only reads, exports, lifecycle changes and removals go on. One mutation appends a handful
+      // of events, so the cap can be passed by at most that many.
+      if (capped && lock.lockedEventSequence >= BigInt(this.limits.maxEventsPerStudy)) {
+        throw new LimitReachedError(STUDY_EVENT_LIMIT_REACHED);
+      }
+      // The account's storage cap (BIB-52), after the owner-scoped lock (an absent or foreign
+      // study stays a plain 404) and the receipt claim (a retry of a committed request replays).
+      // Cached per owner, so it measures at most once per window.
+      if (capped) await this.storage.assertRoom(ownerId);
       if (spec.navigation && spec.bumpsContentRevision) {
         throw new Error('MutationService: a navigation mutation cannot bump the content revision');
       }
@@ -178,6 +202,8 @@ export class MutationService {
     spec: StudyCreationSpec,
   ): Promise<MutationResult> {
     return this.transact(ownerId, request, async (transaction) => {
+      // A new study adds to the account: refused at the storage cap (BIB-52).
+      await this.storage.assertRoom(ownerId);
       const lock = await this.studyRevisions.create(transaction, ownerId, spec.study);
       return this.run(
         lock,

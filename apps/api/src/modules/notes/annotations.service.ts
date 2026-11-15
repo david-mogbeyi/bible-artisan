@@ -182,6 +182,7 @@ export class AnnotationsService {
     return this.mutations.execute(ownerId, mutation, {
       studyId,
       bumpsContentRevision: true,
+      allowedAtCap: true, // a removal (BIB-52)
       work: async (m) => {
         const current = await lockedHighlight(m, annotationId, expectedRevision);
         const updated = await m.updateWithExpectedRevision(Annotation, {

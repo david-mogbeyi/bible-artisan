@@ -1,5 +1,5 @@
 import { Controller, Get, Header, Param, Patch } from '@nestjs/common';
-import type { GraphResponse } from '@bible-artisan/contracts';
+import type { GraphResponse, StudyLimitsResponse } from '@bible-artisan/contracts';
 import { MutationRequest, type MutationRequestInfo } from '../../common/mutation/mutation-request';
 import { MutationResult } from '../../common/mutation/mutation.service';
 import { ParseResourceIdPipe } from '../../common/validation/resource-id';
@@ -23,6 +23,16 @@ export class GraphController {
     @Param('studyId', ParseResourceIdPipe) studyId: string,
   ): Promise<GraphResponse> {
     return this.graph.snapshot(ownerId, studyId);
+  }
+
+  /** BIB-52: the study's and account's usage against the safety caps. Counts only. */
+  @Get('limits')
+  @Header('Cache-Control', 'no-store')
+  limits(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+  ): Promise<StudyLimitsResponse> {
+    return this.graph.limitsOf(ownerId, studyId);
   }
 
   @Patch('positions')

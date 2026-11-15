@@ -501,6 +501,7 @@ export class NodesService {
     return this.mutations.execute(ownerId, mutation, {
       studyId,
       bumpsContentRevision: true,
+      allowedAtCap: true, // a removal (BIB-52)
       work: async (m) => {
         const current = await lockedNode(m, nodeId, expectedRevision);
         const deleted = await m.updateWithExpectedRevision(StudyNode, {

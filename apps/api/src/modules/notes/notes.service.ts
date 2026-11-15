@@ -425,6 +425,7 @@ export class NotesService {
     return this.mutations.execute(ownerId, mutation, {
       studyId,
       bumpsContentRevision: true,
+      allowedAtCap: change === 'trash', // a removal (BIB-52); a restore adds
       work: async (m) => {
         const current = await lockedNote(m, noteId, expectedRevision);
         if (change === 'trash' && current.deletedAt !== null) {

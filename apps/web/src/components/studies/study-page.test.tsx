@@ -14,6 +14,12 @@ const EMPTY_GRAPH = {
   branches: [],
   positions: [],
 };
+const LIMITS_OK = {
+  nodes: { used: 0, limit: 2000, state: 'ok' },
+  edges: { used: 0, limit: 6000, state: 'ok' },
+  events: { used: 1, limit: 100000, state: 'ok' },
+  storage: { used: 1000, limit: 524288000, state: 'ok' },
+};
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
   useParams: () => ({ studyId: STUDY_ID }),
@@ -77,6 +83,8 @@ beforeEach(() => {
     // The page's Nodes section (BIB-25): no nodes in these tests.
     // The page's Graph section (BIB-28): an empty graph in these tests.
     if (input.endsWith('/graph')) return Promise.resolve(jsonResponse(200, EMPTY_GRAPH));
+    // The page's safety-cap notice (BIB-52): everything well below the caps in these tests.
+    if (input.endsWith('/limits')) return Promise.resolve(jsonResponse(200, LIMITS_OK));
     if (input.includes('/nodes')) return Promise.resolve(jsonResponse(200, { items: [] }));
     if (input.endsWith(`/studies/${STUDY_ID}`)) {
       const next = studyReplies.shift();

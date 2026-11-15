@@ -17,6 +17,7 @@ import {
   EdgeRuleError,
   IdempotencyKeyReusedError,
   NotFoundError,
+  LimitReachedError,
   NodeRuleError,
   NoteRuleError,
   NoteTooLongError,
@@ -171,7 +172,8 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof BranchRuleError ||
       exception instanceof AiRuleError ||
       exception instanceof ExportLinkExpiredError ||
-      exception instanceof AccountDeletedError
+      exception instanceof AccountDeletedError ||
+      exception instanceof LimitReachedError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,

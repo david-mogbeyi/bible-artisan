@@ -430,6 +430,7 @@ export class EdgesService {
     return this.mutations.execute(ownerId, mutation, {
       studyId,
       bumpsContentRevision: true,
+      allowedAtCap: true, // a removal (BIB-52)
       work: async (m) => {
         const current = await lockedEdge(m, edgeId, expectedRevision);
         const before = edgeBefore(current);
