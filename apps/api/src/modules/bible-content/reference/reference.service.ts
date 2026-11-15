@@ -150,6 +150,48 @@ export class ReferenceService {
   }
 
   /**
+   * The stored corpus text of a reference's verses, byte for byte, joined by single spaces, whole
+   * verses only while the total stays within `maxChars` (BIB-42: Scripture text for an AI
+   * context, so a model quote can be checked against it exactly). Null for an unknown reference
+   * or an inactive edition. Never logged.
+   */
+  async passageText(
+    referenceId: string,
+    maxChars: number,
+  ): Promise<{ label: string; text: string; truncated: boolean } | null> {
+    const found = (await this.storedReferences([referenceId])).get(referenceId);
+    if (!found) return null;
+    const verses = await this.db.query<{ text: string }>(
+      `SELECT text FROM bible_verse
+        WHERE edition_id = $1 AND book_code = $2
+          AND (chapter, verse) >= ($3, $4) AND (chapter, verse) <= ($5, $6)
+        ORDER BY chapter, verse`,
+      {
+        bind: [
+          found.editionId,
+          found.bookCode,
+          found.startChapter,
+          found.startVerse,
+          found.endChapter,
+          found.endVerse,
+        ],
+        type: QueryTypes.SELECT,
+      },
+    );
+    let text = '';
+    let truncated = false;
+    for (const verse of verses) {
+      const next = text === '' ? verse.text : `${text} ${verse.text}`;
+      if (next.length > maxChars) {
+        truncated = true;
+        break;
+      }
+      text = next;
+    }
+    return { label: found.label, text, truncated };
+  }
+
+  /**
    * The shared reference for a whole chapter, or one verse of it, chosen by structure (no text
    * parsing): validated against the corpus and persisted exactly as `resolve` persists the same
    * range, so both give the same id. Unknown or inactive edition: 404. A book, chapter or verse

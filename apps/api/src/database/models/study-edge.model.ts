@@ -19,7 +19,11 @@ import type { EdgeOrigin, EdgeType } from '@bible-artisan/contracts';
  * - CHECKs: the 15 types, no self-edge, two-way types (`parallels`, `related_to`) stored with
  *   `source_node_id < target_node_id`, note NULL or 1-2,000 code points, origin `user`/`ai`;
  * - partial unique `study_edge_live_key` on live (study, source, target, type);
- * - trigger `study_edge_identity_immutable`: endpoints, study, owner and origin never change.
+ * - trigger `study_edge_identity_immutable`: endpoints, study, owner, origin, `suggestion_id` and
+ *   `accepted_by` never change;
+ * - BIB-42: composite FK `(owner_id, study_id, suggestion_id) -> ai_suggestion`, CHECK an `ai`
+ *   edge has a suggestion and adopter (the owner) and a `user` edge neither, partial unique
+ *   `study_edge_suggestion_key` (one edge per suggestion).
  *
  * `note` is private text: never logged, put in events or stored on a receipt.
  */
@@ -49,6 +53,14 @@ export class StudyEdge extends Model {
 
   @Column({ type: DataType.TEXT, allowNull: false })
   declare origin: EdgeOrigin;
+
+  /** The accepted AI suggestion this edge came from (BIB-42); set exactly when origin is `ai`. */
+  @Column({ field: 'suggestion_id', type: DataType.UUID, allowNull: true })
+  declare suggestionId: string | null;
+
+  /** Who adopted the AI suggestion (always the owner); set exactly when origin is `ai`. */
+  @Column({ field: 'accepted_by', type: DataType.UUID, allowNull: true })
+  declare acceptedBy: string | null;
 
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 1 })
   declare revision: number;

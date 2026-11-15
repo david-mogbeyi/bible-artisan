@@ -507,6 +507,34 @@ const ROUTES: Record<string, Access> = {
       file: 'ai-jobs.int-spec.ts',
       test: "gives another user the same 404 on a study's AI settings, requests and jobs, writing nothing",
     },
+  }, // BIB-42: relationship proposals and their accept / reject: Bob's calls on Alice's study.
+  'POST /v1/studies/:studyId/ai/relationships': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-suggestions.int-spec.ts',
+      test: "gives another user the same 404 on a study's relationship requests and suggestions, writing nothing",
+    },
+  },
+  'GET /v1/studies/:studyId/ai/suggestions': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-suggestions.int-spec.ts',
+      test: "gives another user the same 404 on a study's relationship requests and suggestions, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/suggestions/:suggestionId/accept': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-suggestions.int-spec.ts',
+      test: "gives another user the same 404 on a study's relationship requests and suggestions, writing nothing",
+    },
+  },
+  'POST /v1/studies/:studyId/ai/suggestions/:suggestionId/reject': {
+    access: 'private',
+    crossUserTest: {
+      file: 'ai-suggestions.int-spec.ts',
+      test: "gives another user the same 404 on a study's relationship requests and suggestions, writing nothing",
+    },
   },
 };
 

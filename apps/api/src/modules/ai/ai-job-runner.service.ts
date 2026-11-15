@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import type { AiJobErrorCode } from '@bible-artisan/contracts';
+import type { AiCapability, AiJobErrorCode } from '@bible-artisan/contracts';
 import { fn, literal, QueryTypes, Transaction } from 'sequelize';
 import { DATABASE } from '../../database/database.module';
 import type { Database } from '../../database/database';
@@ -7,8 +7,20 @@ import { AiJob } from '../../database/models/ai-job.model';
 import { AiResult } from '../../database/models/ai-result.model';
 import { ContextManifest } from '../../database/models/context-manifest.model';
 import { AiAccessService } from './ai-access.service';
+import { AiSuggestionsService } from './ai-suggestions.service';
+import { OutputValidationError, REPAIR_INSTRUCTION } from './capabilities/output-validation';
 import {
-  OutputValidationError,
+  RELATIONSHIPS_INPUT_BUDGET,
+  RELATIONSHIPS_OUTPUT_TOKENS,
+  RELATIONSHIPS_PROMPT_VERSION,
+  RELATIONSHIPS_SAFETY_RESERVE,
+  RELATIONSHIPS_SCHEMA_VERSION,
+  RELATIONSHIPS_SCRIPTURE_CHARS,
+  RELATIONSHIPS_SYSTEM_PROMPT,
+  relationshipsPrompt,
+  validateRelationshipsOutput,
+} from './capabilities/relationships.capability';
+import {
   SUMMARY_INPUT_BUDGET,
   SUMMARY_OUTPUT_TOKENS,
   SUMMARY_PROMPT_VERSION,
@@ -21,6 +33,7 @@ import {
 import {
   type AssembledContext,
   assembleContext,
+  type ContextCandidate,
   ContextBudgetExceededError,
   RETRIEVAL_RULES_VERSION,
 } from './context/assemble-context';
@@ -44,6 +57,8 @@ interface ClaimedJob {
   id: string;
   ownerId: string;
   studyId: string;
+  capability: AiCapability;
+  input: Record<string, unknown>;
   consentVersion: string;
   leaseToken: string;
   attemptCount: number;
@@ -83,6 +98,7 @@ export class AiJobRunnerService {
     @Inject(AI_RUNTIME) private readonly runtime: AiRuntime,
     private readonly access: AiAccessService,
     private readonly candidates: ContextCandidatesService,
+    private readonly suggestions: AiSuggestionsService,
   ) {}
 
   /** Starts polling (the worker). Returns a function that stops it. */
@@ -167,6 +183,8 @@ export class AiJobRunnerService {
           consent_version: string;
           lease_token: string;
           attempt_count: number;
+          capability: AiCapability;
+          input: Record<string, unknown>;
         }>(
           `UPDATE ai_job j
               SET state = 'running', lease_token = gen_random_uuid(),
@@ -188,7 +206,7 @@ export class AiJobRunnerService {
                LIMIT 1
                FOR UPDATE SKIP LOCKED)
             RETURNING j.id, j.owner_id, j.study_id, j.consent_version, j.lease_token,
-                      j.attempt_count`,
+                      j.attempt_count, j.capability, j.input`,
           { bind: [this.runtime.leaseMs, 2], type: QueryTypes.SELECT, transaction },
         );
         const row = rows[0];
@@ -200,6 +218,8 @@ export class AiJobRunnerService {
           consentVersion: row.consent_version,
           leaseToken: row.lease_token,
           attemptCount: row.attempt_count,
+          capability: row.capability,
+          input: row.input,
         };
       },
     );
@@ -226,11 +246,14 @@ export class AiJobRunnerService {
       return { outcome: { state: 'failed', errorCode: 'SPEND_CAP_REACHED' }, usage: null };
     }
 
-    let gathered;
+    let plan: CapabilityPlan | null;
     try {
-      gathered = await this.candidates.gather(job.ownerId, job.studyId);
+      plan = await this.plan(job);
     } catch {
       // The study left the owner's reach (purged, past its window) after the request.
+      plan = null;
+    }
+    if (plan === null) {
       return { outcome: { state: 'cancelled', errorCode: 'STUDY_UNAVAILABLE' }, usage: null };
     }
 
@@ -241,29 +264,20 @@ export class AiJobRunnerService {
       });
     }, this.runtime.heartbeatMs);
     const deadline = Date.now() + this.runtime.requestBudgetMs;
+    const limit = plan.inputBudget - plan.safetyReserve;
     try {
-      const contextBudget =
-        SUMMARY_INPUT_BUDGET - estimateTokens(SUMMARY_SYSTEM_PROMPT) - SUMMARY_SAFETY_RESERVE;
+      const contextBudget = limit - estimateTokens(plan.system);
       let context: AssembledContext;
       let measured: number;
       try {
-        context = assembleContext(
-          gathered.candidates,
-          gathered.capped,
-          contextBudget,
-          estimateTokens,
-        );
-        measured = await this.measure(provider, context, heartbeat.signal, deadline);
-        if (measured > SUMMARY_INPUT_BUDGET - SUMMARY_SAFETY_RESERVE) {
+        context = assembleContext(plan.candidates, plan.capped, contextBudget, estimateTokens);
+        measured = await this.measure(provider, plan, context, heartbeat.signal, deadline);
+        if (measured > limit) {
           // The provider's tokenizer counts more than the estimate: shrink once, proportionally.
-          const scaled = Math.floor(
-            (contextBudget * (SUMMARY_INPUT_BUDGET - SUMMARY_SAFETY_RESERVE)) / measured,
-          );
-          context = assembleContext(gathered.candidates, gathered.capped, scaled, estimateTokens);
-          measured = await this.measure(provider, context, heartbeat.signal, deadline);
-          if (measured > SUMMARY_INPUT_BUDGET - SUMMARY_SAFETY_RESERVE) {
-            throw new ContextBudgetExceededError();
-          }
+          const scaled = Math.floor((contextBudget * limit) / measured);
+          context = assembleContext(plan.candidates, plan.capped, scaled, estimateTokens);
+          measured = await this.measure(provider, plan, context, heartbeat.signal, deadline);
+          if (measured > limit) throw new ContextBudgetExceededError();
         }
       } catch (error) {
         if (error instanceof ContextBudgetExceededError) {
@@ -278,56 +292,119 @@ export class AiJobRunnerService {
         throw error;
       }
 
-      await this.saveManifest(job, context, measured);
+      await this.saveManifest(job, plan, context, measured);
 
-      let response: AiProviderResponse;
-      try {
-        response = await this.callWithRetries(
-          provider,
-          summaryPrompt(context.blocks),
-          heartbeat.signal,
-          deadline,
-        );
-      } catch (error) {
-        if (error instanceof AiProviderError) {
-          return { outcome: this.providerOutcome(error, heartbeat.signal), usage: null };
+      // BIB-41: validate; one constrained repair (same context and trust rules) for output that
+      // is not JSON or not the schema; then fail closed. Invented ids are never repaired.
+      const prompt = plan.prompt(context.blocks);
+      let usage: AiProviderResponse | null = null;
+      let validated: unknown;
+      for (let round = 0; ; round += 1) {
+        let response: AiProviderResponse;
+        try {
+          response = await this.callWithRetries(
+            provider,
+            plan,
+            round === 0 ? prompt : `${prompt}\n\n${REPAIR_INSTRUCTION}`,
+            heartbeat.signal,
+            deadline,
+          );
+        } catch (error) {
+          if (error instanceof AiProviderError) {
+            return { outcome: this.providerOutcome(error, heartbeat.signal), usage };
+          }
+          throw error;
         }
-        throw error;
+        usage = addUsage(usage, response);
+        try {
+          validated = plan.validate(response.text, context);
+          break;
+        } catch (error) {
+          if (!(error instanceof OutputValidationError)) throw error;
+          if (round === 0 && error.repairable) {
+            this.logger.log('ai_job_output_repair', { jobId: job.id, reason: error.reason });
+            continue;
+          }
+          this.logger.log('ai_job_output_rejected', { jobId: job.id, reason: error.reason });
+          return { outcome: { state: 'failed', errorCode: 'VALIDATION_FAILED' }, usage };
+        }
       }
 
-      let output;
-      try {
-        const manifestIds = new Set(context.entries.map((entry) => entry.id));
-        output = validateSummaryOutput(response.text, manifestIds);
-      } catch (error) {
-        if (error instanceof OutputValidationError) {
-          return { outcome: { state: 'failed', errorCode: 'VALIDATION_FAILED' }, usage: response };
-        }
-        throw error;
-      }
-
-      const published = await this.publish(
-        job,
-        provider,
-        gathered.contentRevision,
-        output,
-        response,
-      );
-      return { outcome: published, usage: response };
+      const published = await this.publish(job, provider, plan, validated, usage);
+      return { outcome: published, usage };
     } finally {
       clearInterval(timer);
     }
   }
 
+  /** What the job's capability reads, asks and validates (BIB-42 adds `relationships`). */
+  private async plan(job: ClaimedJob): Promise<CapabilityPlan | null> {
+    if (job.capability === 'relationships') {
+      const sourceNodeId = typeof job.input.sourceNodeId === 'string' ? job.input.sourceNodeId : '';
+      const targetNodeId = typeof job.input.targetNodeId === 'string' ? job.input.targetNodeId : '';
+      const gathered = await this.candidates.gatherPair(
+        job.ownerId,
+        job.studyId,
+        sourceNodeId,
+        targetNodeId,
+        RELATIONSHIPS_SCRIPTURE_CHARS,
+      );
+      const pair = gathered.pair;
+      if (pair === null) return null;
+      return {
+        system: RELATIONSHIPS_SYSTEM_PROMPT,
+        inputBudget: RELATIONSHIPS_INPUT_BUDGET,
+        outputTokens: RELATIONSHIPS_OUTPUT_TOKENS,
+        safetyReserve: RELATIONSHIPS_SAFETY_RESERVE,
+        promptVersion: RELATIONSHIPS_PROMPT_VERSION,
+        schemaVersion: RELATIONSHIPS_SCHEMA_VERSION,
+        contentRevision: gathered.contentRevision,
+        candidates: gathered.candidates,
+        capped: gathered.capped,
+        prompt: (blocks) => relationshipsPrompt(blocks, sourceNodeId, targetNodeId),
+        validate: (text, context) =>
+          validateRelationshipsOutput(text, {
+            manifest: new Map(context.entries.map((entry) => [entry.id, entry.kind])),
+            pair,
+            quotable: gathered.quotable,
+          }),
+        store: (transaction, scope, validated) =>
+          this.suggestions.storeProposals(transaction, scope, {
+            ...(validated as ReturnType<typeof validateRelationshipsOutput>),
+            pair,
+            regenerate: job.input.regenerate === true,
+          }),
+      };
+    }
+    const gathered = await this.candidates.gather(job.ownerId, job.studyId);
+    return {
+      system: SUMMARY_SYSTEM_PROMPT,
+      inputBudget: SUMMARY_INPUT_BUDGET,
+      outputTokens: SUMMARY_OUTPUT_TOKENS,
+      safetyReserve: SUMMARY_SAFETY_RESERVE,
+      promptVersion: SUMMARY_PROMPT_VERSION,
+      schemaVersion: SUMMARY_SCHEMA_VERSION,
+      contentRevision: gathered.contentRevision,
+      candidates: gathered.candidates,
+      capped: gathered.capped,
+      prompt: summaryPrompt,
+      validate: (text, context) =>
+        validateSummaryOutput(text, new Set(context.entries.map((entry) => entry.id))),
+      store: (_transaction, _scope, validated) =>
+        Promise.resolve(validated as Record<string, unknown>),
+    };
+  }
+
   private measure(
     provider: AiProvider,
+    plan: CapabilityPlan,
     context: AssembledContext,
     cancel: AbortSignal,
     deadline: number,
   ): Promise<number> {
     return provider.countTokens({
-      system: SUMMARY_SYSTEM_PROMPT,
-      prompt: summaryPrompt(context.blocks),
+      system: plan.system,
+      prompt: plan.prompt(context.blocks),
       signal: AbortSignal.any([cancel, AbortSignal.timeout(Math.max(1, deadline - Date.now()))]),
     });
   }
@@ -335,6 +412,7 @@ export class AiJobRunnerService {
   /** At most `MAX_PROVIDER_TRIES` calls inside the request budget, with jittered backoff. */
   private async callWithRetries(
     provider: AiProvider,
+    plan: CapabilityPlan,
     prompt: string,
     cancel: AbortSignal,
     deadline: number,
@@ -345,9 +423,9 @@ export class AiJobRunnerService {
       const timeout = AbortSignal.timeout(remaining);
       try {
         return await provider.generate({
-          system: SUMMARY_SYSTEM_PROMPT,
+          system: plan.system,
           prompt,
-          maxOutputTokens: SUMMARY_OUTPUT_TOKENS,
+          maxOutputTokens: plan.outputTokens,
           signal: AbortSignal.any([cancel, timeout]),
         });
       } catch (error) {
@@ -402,6 +480,7 @@ export class AiJobRunnerService {
 
   private async saveManifest(
     job: ClaimedJob,
+    plan: CapabilityPlan,
     context: AssembledContext,
     measured: number,
   ): Promise<void> {
@@ -412,7 +491,7 @@ export class AiJobRunnerService {
       await ContextManifest.create({
         ...scope,
         retrievalRulesVersion: RETRIEVAL_RULES_VERSION,
-        tokenBudget: SUMMARY_INPUT_BUDGET,
+        tokenBudget: plan.inputBudget,
         tokenCount: measured,
         entries: context.entries,
         omissions: context.omissions,
@@ -429,10 +508,11 @@ export class AiJobRunnerService {
   private async publish(
     job: ClaimedJob,
     provider: AiProvider,
-    basisRevision: number,
-    output: Record<string, unknown>,
+    plan: CapabilityPlan,
+    validated: unknown,
     response: AiProviderResponse,
   ): Promise<Outcome> {
+    const basisRevision = plan.contentRevision;
     return this.db.transaction(async (transaction) => {
       const blocker = await this.access.jobBlocker(job, transaction);
       const current = await AiJob.findOne({
@@ -445,16 +525,28 @@ export class AiJobRunnerService {
         await this.finishIn(transaction, job, 'cancelled', blocker, response, provider);
         return { state: 'abandoned' } as const;
       }
+      const output = await plan.store(
+        transaction,
+        {
+          jobId: job.id,
+          ownerId: job.ownerId,
+          studyId: job.studyId,
+          basisRevision,
+          modelId: provider.modelId,
+          promptVersion: plan.promptVersion,
+        },
+        validated,
+      );
       await AiResult.create(
         {
           jobId: job.id,
           ownerId: job.ownerId,
           studyId: job.studyId,
-          capability: 'summary',
+          capability: job.capability,
           basisRevision,
           modelId: provider.modelId,
-          promptVersion: SUMMARY_PROMPT_VERSION,
-          schemaVersion: SUMMARY_SCHEMA_VERSION,
+          promptVersion: plan.promptVersion,
+          schemaVersion: plan.schemaVersion,
           outputJson: output,
         },
         { transaction },
@@ -527,6 +619,48 @@ export class AiJobRunnerService {
     );
     return Number(row?.spent ?? 0) >= this.runtime.monthlySpendCapMicros;
   }
+}
+
+/** Where a capability publishes, inside the publishing transaction. */
+export interface PublishScope {
+  jobId: string;
+  ownerId: string;
+  studyId: string;
+  basisRevision: number;
+  modelId: string;
+  promptVersion: string;
+}
+
+/** One capability's budget, prompt, validation and publication (summary, relationships). */
+interface CapabilityPlan {
+  system: string;
+  inputBudget: number;
+  outputTokens: number;
+  safetyReserve: number;
+  promptVersion: string;
+  schemaVersion: string;
+  contentRevision: number;
+  candidates: ContextCandidate[];
+  capped: ContextCandidate[];
+  prompt: (blocks: readonly string[]) => string;
+  /** Throws `OutputValidationError`; returns what `store` publishes. */
+  validate: (text: string, context: AssembledContext) => unknown;
+  /** Writes capability rows (suggestions) and returns the AiResult output. */
+  store: (
+    transaction: Transaction,
+    scope: PublishScope,
+    validated: unknown,
+  ) => Promise<Record<string, unknown>>;
+}
+
+/** Token usage summed over a call and its repair. */
+function addUsage(total: AiProviderResponse | null, next: AiProviderResponse): AiProviderResponse {
+  if (total === null) return next;
+  return {
+    text: next.text,
+    inputTokens: total.inputTokens + next.inputTokens,
+    outputTokens: total.outputTokens + next.outputTokens,
+  };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

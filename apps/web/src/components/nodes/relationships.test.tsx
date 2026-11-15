@@ -49,6 +49,8 @@ const edge = (
   targetNodeId,
   type,
   origin: 'user',
+  suggestionId: null,
+  acceptedBy: null,
   note,
   revision,
   createdAt: T,

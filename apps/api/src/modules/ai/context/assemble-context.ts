@@ -106,13 +106,14 @@ const KIND_NAMES: Record<ManifestEntry['kind'], [string, string]> = {
   node: ['study item', 'study items'],
   note: ['note', 'notes'],
   event: ['activity entry', 'activity entries'],
+  edge: ['relationship', 'relationships'],
 };
 
 /** One fixed sentence per omitted kind, e.g. "3 notes were left out of this request." */
 export function coverageWarnings(omissions: readonly ManifestOmission[]): string[] {
   const counts = new Map<ManifestEntry['kind'], number>();
   for (const omission of omissions) counts.set(omission.kind, (counts.get(omission.kind) ?? 0) + 1);
-  return (['node', 'note', 'event', 'study'] as const)
+  return (['node', 'edge', 'note', 'event', 'study'] as const)
     .filter((kind) => (counts.get(kind) ?? 0) > 0)
     .map((kind) => {
       const count = counts.get(kind) ?? 0;

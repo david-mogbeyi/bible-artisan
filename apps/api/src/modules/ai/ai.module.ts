@@ -11,6 +11,7 @@ import { AiAccessService } from './ai-access.service';
 import { AiJobRunnerService } from './ai-job-runner.service';
 import { AiJobsService } from './ai-jobs.service';
 import { AiSettingsService } from './ai-settings.service';
+import { AiSuggestionsService } from './ai-suggestions.service';
 import { AiConsentController, StudyAiController } from './ai.controller';
 import { ContextCandidatesService } from './context/context-candidates.service';
 import {
@@ -41,8 +42,9 @@ export function providerFromEnv(env: Env): AiProvider | null {
 }
 
 /**
- * AI bounded context (PRD section 26). Owns `ai_job`, `context_manifest`, `ai_result` and
- * `study_ai_setting`; reads the account's consent through Identity's `UserAiConsentService` and
+ * AI bounded context (PRD section 26). Owns `ai_job`, `context_manifest`, `ai_result`,
+ * `ai_suggestion` (BIB-42) and `study_ai_setting`; an accepted suggestion becomes an edge only
+ * through Graph's `connectNodes`, inside the accept mutation; reads the account's consent through Identity's `UserAiConsentService` and
  * study content through the Study, Graph, Notes and Thread read services. AI creates derived
  * artifacts only: it never updates conclusions, statuses or any other study content.
  *
@@ -66,6 +68,7 @@ export function providerFromEnv(env: Env): AiProvider | null {
     AiJobsService,
     AiSettingsService,
     AiJobRunnerService,
+    AiSuggestionsService,
     ContextCandidatesService,
   ],
   exports: [AiJobRunnerService],

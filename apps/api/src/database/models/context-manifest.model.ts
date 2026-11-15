@@ -2,7 +2,8 @@ import { Column, DataType, Model, PrimaryKey, Table } from 'sequelize-typescript
 
 /** One item the context assembler selected (ids, kinds and counts only: never text). */
 export interface ManifestEntry {
-  kind: 'study' | 'node' | 'note' | 'event';
+  /** `edge`: an adjacent relationship (BIB-42's relationships context). */
+  kind: 'study' | 'node' | 'note' | 'event' | 'edge';
   id: string;
   /** The entity's revision (nodes, notes, study content) or sequence (events). */
   version: string | null;

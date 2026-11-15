@@ -15,14 +15,19 @@ export type FakeBehaviour =
   /** Not JSON at all. */
   | 'invalid-json'
   /** Never answers until the request is aborted. */
-  | 'hang';
+  | 'hang'
+  /** Answers exactly this text (BIB-41's validation fixtures). */
+  | { text: string };
 
 const ID_PATTERN = /id="([0-9a-f-]{36})"/g;
+const PAIR_PATTERN = /between node "([0-9a-f-]{36})" and node "([0-9a-f-]{36})"/;
 
 /**
  * A deterministic, in-process provider for development and tests (PRD section 38: AI tests never
  * need a real provider or key). Its answer is computed from the prompt alone: a fixed overview
  * citing the first three ids in the context, so the same context always gives the same output.
+ * For a relationships prompt (BIB-42) it proposes one `related_to` edge between the two requested
+ * nodes, citing both.
  * Nothing leaves the process. Tests script failures with `script(...)` and observe `calls`.
  */
 export class FakeAiProvider implements AiProvider {
@@ -60,6 +65,13 @@ export class FakeAiProvider implements AiProvider {
     }
     if (this.beforeAnswer) await this.beforeAnswer();
     if (request.signal.aborted) throw new AiProviderError('aborted');
+    if (typeof behaviour === 'object') {
+      return {
+        text: behaviour.text,
+        inputTokens: estimateTokens(request.system) + estimateTokens(request.prompt),
+        outputTokens: estimateTokens(behaviour.text),
+      };
+    }
     if (
       behaviour === 'transient' ||
       behaviour === 'timeout' ||
@@ -70,16 +82,33 @@ export class FakeAiProvider implements AiProvider {
     }
     const ids = [...request.prompt.matchAll(ID_PATTERN)].map((match) => match[1] ?? '');
     const unique = [...new Set(ids)].slice(0, 3);
+    const pair = PAIR_PATTERN.exec(request.prompt);
+    const invented = '00000000-0000-4000-8000-000000000000';
     const output =
       behaviour === 'invalid-json'
         ? 'not json'
-        : JSON.stringify({
-            overview: `Summary of ${new Set(ids).size} study items.`,
-            citedIds:
-              behaviour === 'invented-id'
-                ? [...unique, '00000000-0000-4000-8000-000000000000']
-                : unique,
-          });
+        : pair
+          ? JSON.stringify({
+              proposals: [
+                {
+                  sourceNodeId: pair[1],
+                  targetNodeId: pair[2],
+                  type: 'related_to',
+                  rationale: 'These two items may address a shared theme.',
+                  evidence: [
+                    { id: behaviour === 'invented-id' ? invented : pair[1] },
+                    { id: pair[2] },
+                  ],
+                },
+              ],
+            })
+          : JSON.stringify({
+              overview: `Summary of ${new Set(ids).size} study items.`,
+              citedIds:
+                behaviour === 'invented-id'
+                  ? [...unique, '00000000-0000-4000-8000-000000000000']
+                  : unique,
+            });
     return {
       text: output,
       inputTokens: estimateTokens(request.system) + estimateTokens(request.prompt),

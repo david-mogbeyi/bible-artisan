@@ -70,11 +70,16 @@ const ACCOUNT_DELETION_REFUSED =
 const DERIVED_FROM_MIGRATION = '20261115140057_add_node_derived_from_note.ts';
 const DERIVED_FROM_REFUSED =
   'node derived-from drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-41/42's AI suggestions migration. */
+const SUGGESTIONS_MIGRATION = '20261115150000_add_ai_suggestions.ts';
+const SUGGESTIONS_REFUSED =
+  'AI suggestions drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'account_deletion',
   'ai_job',
   'ai_result',
+  'ai_suggestion',
   'annotation',
   'auth_challenge',
   'auth_session',
@@ -292,12 +297,12 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
 
-      // No opt-in at all: the newest migration (BIB-57's node derived-from) is the first `down`
+      // No opt-in at all: the newest migration (BIB-41/42's AI suggestions) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: DERIVED_FROM_REFUSED,
+        message: SUGGESTIONS_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -312,6 +317,39 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies the AI suggestions and edge provenance (BIB-41/42) only with the study-data opt-in', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const provenance = async () =>
+      (await columns(['study_edge', 'ai_job'])).filter((column) =>
+        ['study_edge.suggestion_id', 'study_edge.accepted_by', 'ai_job.input'].includes(column),
+      );
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(SUGGESTIONS_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: SUGGESTIONS_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['ai_suggestion'])).toStrictEqual([]);
+      expect(await provenance()).toStrictEqual([]);
+      await migrator.up();
+      expect(await publicTables(db, ['ai_suggestion'])).toStrictEqual(['ai_suggestion']);
+      expect(await provenance()).toStrictEqual([
+        'ai_job.input',
+        'study_edge.accepted_by',
+        'study_edge.suggestion_id',
+      ]);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies the AI tables and consent columns (BIB-39/40) only with the study-data opt-in', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
@@ -319,7 +357,7 @@ describe('migration reversibility', () => {
     const aiUserColumns = async () =>
       (await columns(['user'])).filter((column) => column.startsWith('user.ai_'));
     try {
-      // Later migrations (BIB-62's and BIB-31's) step down first.
+      // Later migrations (BIB-62's, BIB-31's and BIB-41/42's) step down first.
       await withStudyDataDropAllowed(() =>
         migrator.down({ to: ESTABLISHED_OBSERVATIONS_MIGRATION }),
       );
@@ -590,7 +628,7 @@ describe('migration reversibility', () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
     try {
-      // The newer BIB-57 step goes down first.
+      // The newer BIB-57 and BIB-41/42 steps go down first.
       await withStudyDataDropAllowed(() => migrator.down({ to: DERIVED_FROM_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.slice(-2)).toStrictEqual([EXPORT_MIGRATION, ACCOUNT_DELETION_MIGRATION]);
@@ -635,7 +673,7 @@ describe('migration reversibility', () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
     try {
-      // Later migrations (BIB-33's sessions, BIB-47's, BIB-48's and BIB-57's) step down first.
+      // Later migrations (BIB-33's sessions, BIB-47's, BIB-48's, BIB-57's and BIB-41/42's) step down first.
       await withStudyDataDropAllowed(() => migrator.down({ to: SESSIONS_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(DELETED_WITH_MIGRATION);
@@ -683,6 +721,7 @@ describe('migration reversibility', () => {
         EXPORT_MIGRATION,
         ACCOUNT_DELETION_MIGRATION,
         DERIVED_FROM_MIGRATION,
+        SUGGESTIONS_MIGRATION,
       ]);
       expect(await columns(['study_edge'])).toContain('study_edge.deleted_with_node_id');
     } finally {
@@ -704,6 +743,8 @@ describe('migration reversibility', () => {
         { type: QueryTypes.SELECT },
       );
     try {
+      // Past the newer suggestions step (BIB-41/42) with the opt-in.
+      await withStudyDataDropAllowed(() => migrator.down({ to: SUGGESTIONS_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(DERIVED_FROM_MIGRATION);
       const schemaBefore = await derivedSchema();
@@ -816,7 +857,7 @@ describe('migration reversibility', () => {
     try {
       const schemaBefore = await sessionSchema();
       expect(schemaBefore.map((row) => row.name)).toContain('study_session_open_tab_key');
-      // Past the later migrations (BIB-47, BIB-48), which refuse first from latest.
+      // Past the later migrations (BIB-47, BIB-48, BIB-41/42), which refuse first from latest.
       await withStudyDataDropAllowed(() => migrator.down({ to: EXPORT_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(SESSIONS_MIGRATION);
@@ -863,7 +904,10 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
       const schemaBefore = await edgeSchema();
+      // Includes BIB-42's provenance constraints (the newer migration has not been reverted yet).
       expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'study_edge_accepted_by_owner_check',
+        'study_edge_ai_provenance_check',
         'study_edge_deleted_with_check',
         'study_edge_deleted_with_idx',
         'study_edge_deleted_with_node_fk',
@@ -881,6 +925,8 @@ describe('migration reversibility', () => {
         'study_edge_source_idx',
         'study_edge_source_node_fk',
         'study_edge_study_owner_fk',
+        'study_edge_suggestion_fk',
+        'study_edge_suggestion_key',
         'study_edge_symmetric_order_check',
         'study_edge_target_idx',
         'study_edge_target_node_fk',

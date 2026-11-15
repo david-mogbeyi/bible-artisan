@@ -1,10 +1,21 @@
 import { Injectable } from '@nestjs/common';
 import type { NodeSummary } from '@bible-artisan/contracts';
-import { NodesService } from '../../graph/nodes.service';
+import { EdgesService } from '../../graph/edges.service';
+import { type NodeContextContent, NodesService } from '../../graph/nodes.service';
 import { NotesService } from '../../notes/notes.service';
 import { StudyAccessService } from '../../study/study-access.service';
 import { ThreadReadService } from '../../thread/thread-read.service';
+import type { RelationshipPair } from '../capabilities/relationships.capability';
 import { block, CONTEXT_CAPS, type ContextCandidate } from './assemble-context';
+
+/** Adjacent edges in a relationships context (BIB-42). */
+export const RELATIONSHIP_EDGE_CAP = 20;
+
+export interface PairContextCandidates extends StudyContextCandidates {
+  /** Manifest id → the stored texts sent for it, for exact-quote checks. */
+  quotable: Map<string, string[]>;
+  pair: RelationshipPair | null;
+}
 
 export interface StudyContextCandidates {
   contentRevision: number;
@@ -29,7 +40,132 @@ export class ContextCandidatesService {
     private readonly nodes: NodesService,
     private readonly notes: NotesService,
     private readonly thread: ThreadReadService,
+    private readonly edges: EdgesService,
   ) {}
+
+  /**
+   * The relationships context (BIB-42; PRD section 16: "both texts, selected phrases, branch
+   * question, adjacent accepted edges"): the study, the two nodes with their full stored text
+   * (Scripture as corpus text), the main question, and up to `RELATIONSHIP_EDGE_CAP` live edges
+   * touching either node (ids and types only). Owner-scoped through the Graph read services.
+   * `pair` is null when either node is no longer a live node of this study.
+   */
+  async gatherPair(
+    ownerId: string,
+    studyId: string,
+    sourceNodeId: string,
+    targetNodeId: string,
+    scriptureChars: number,
+  ): Promise<PairContextCandidates> {
+    const study = await this.access.requireOwnedStudy(ownerId, studyId);
+    const mainId = study.mainQuestionNodeId;
+    const wanted = [sourceNodeId, targetNodeId, ...(mainId ? [mainId] : [])];
+    const content = await this.nodes.contextContent(ownerId, studyId, wanted, scriptureChars);
+    const source = content.get(sourceNodeId);
+    const target = content.get(targetNodeId);
+    const quotable = new Map<string, string[]>();
+    const candidates: ContextCandidate[] = [
+      {
+        kind: 'study',
+        id: study.id,
+        version: String(study.contentRevision),
+        priority: 'required',
+        block: block(
+          'study',
+          { id: study.id, source: 'user statement' },
+          { title: study.title, description: study.description },
+        ),
+      },
+    ];
+    if (!source || !target) {
+      return {
+        contentRevision: study.contentRevision,
+        candidates,
+        capped: [],
+        quotable,
+        pair: null,
+      };
+    }
+    const nodeCandidate = (node: NodeContextContent, role: string): ContextCandidate => {
+      quotable.set(
+        node.id,
+        Object.values(node.text).filter((value): value is string => typeof value === 'string'),
+      );
+      return {
+        kind: 'node',
+        id: node.id,
+        version: String(node.revision),
+        priority: 'required',
+        block: block(
+          'node',
+          {
+            id: node.id,
+            role,
+            type: node.type,
+            status: node.status,
+            established: node.established,
+            source:
+              node.type === 'scripture'
+                ? 'scripture text'
+                : node.type === 'source'
+                  ? 'external source'
+                  : 'user statement',
+          },
+          node.text,
+        ),
+      };
+    };
+    candidates.push(nodeCandidate(source, 'first'), nodeCandidate(target, 'second'));
+    const main = mainId ? content.get(mainId) : undefined;
+    if (main && main.id !== source.id && main.id !== target.id) {
+      candidates.push(nodeCandidate(main, 'main question'));
+    }
+    const adjacent = await this.edges.adjacentEdges(
+      ownerId,
+      studyId,
+      [source.id, target.id],
+      RELATIONSHIP_EDGE_CAP + 1,
+    );
+    const capped: ContextCandidate[] = [];
+    adjacent.forEach((edge, index) => {
+      const candidate: ContextCandidate = {
+        kind: 'edge',
+        id: edge.id,
+        version: null,
+        priority: 'optional',
+        block: block(
+          'edge',
+          {
+            id: edge.id,
+            type: edge.type,
+            from: edge.sourceNodeId,
+            to: edge.targetNodeId,
+            source: 'user graph',
+          },
+          {},
+        ),
+      };
+      (index < RELATIONSHIP_EDGE_CAP ? candidates : capped).push(candidate);
+    });
+    return {
+      contentRevision: study.contentRevision,
+      candidates,
+      capped,
+      quotable,
+      pair: {
+        sourceNodeId: source.id,
+        targetNodeId: target.id,
+        types: new Map([
+          [source.id, source.type],
+          [target.id, target.type],
+        ]),
+        revisions: new Map([
+          [source.id, source.revision],
+          [target.id, target.revision],
+        ]),
+      },
+    };
+  }
 
   async gather(ownerId: string, studyId: string): Promise<StudyContextCandidates> {
     const study = await this.access.requireOwnedStudy(ownerId, studyId);

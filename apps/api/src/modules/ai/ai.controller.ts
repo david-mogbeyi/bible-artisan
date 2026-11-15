@@ -1,10 +1,15 @@
-import { Controller, Get, Header, HttpCode, Param, Post, Put } from '@nestjs/common';
-import type {
-  AiConsentResponse,
-  AiJobAcceptedResponse,
-  AiJobResponse,
-  StudyAiSettingsResponse,
+import { Controller, Get, Header, HttpCode, Param, Post, Put, Query } from '@nestjs/common';
+import {
+  type AiConsentResponse,
+  type AiJobAcceptedResponse,
+  type AiJobResponse,
+  type AiSuggestionListResponse,
+  requestRelationshipsSchema,
+  type StudyAiSettingsResponse,
 } from '@bible-artisan/contracts';
+import { parseBody } from '../../common/validation/parse-body';
+import { StudyAccessService } from '../study/study-access.service';
+import { AiSuggestionsService } from './ai-suggestions.service';
 import { MutationRequest, type MutationRequestInfo } from '../../common/mutation/mutation-request';
 import { MutationResult } from '../../common/mutation/mutation.service';
 import { ParseResourceIdPipe } from '../../common/validation/resource-id';
@@ -45,6 +50,8 @@ export class StudyAiController {
   constructor(
     private readonly settings: AiSettingsService,
     private readonly jobs: AiJobsService,
+    private readonly suggestions: AiSuggestionsService,
+    private readonly access: StudyAccessService,
   ) {}
 
   @Get('settings')
@@ -74,6 +81,58 @@ export class StudyAiController {
     @MutationRequest() mutation: MutationRequestInfo,
   ): Promise<AiJobAcceptedResponse> {
     return this.jobs.request(ownerId, studyId, 'summary', mutation.idempotencyKey);
+  }
+
+  /**
+   * BIB-42: relationship proposals between two live nodes of the study (202, an AI job). Either
+   * node absent, deleted or another study's or user's: 404.
+   */
+  @Post('relationships')
+  @HttpCode(202)
+  @Header('Cache-Control', 'no-store')
+  async requestRelationships(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<AiJobAcceptedResponse> {
+    const body = parseBody(requestRelationshipsSchema, mutation.body);
+    await this.access.requireOwnedNode(ownerId, studyId, body.sourceNodeId);
+    await this.access.requireOwnedNode(ownerId, studyId, body.targetNodeId);
+    return this.jobs.request(ownerId, studyId, 'relationships', mutation.idempotencyKey, {
+      sourceNodeId: body.sourceNodeId,
+      targetNodeId: body.targetNodeId,
+      regenerate: body.regenerate === true,
+    });
+  }
+
+  @Get('suggestions')
+  @Header('Cache-Control', 'no-store')
+  listSuggestions(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Query() query: unknown,
+  ): Promise<AiSuggestionListResponse> {
+    return this.suggestions.list(ownerId, studyId, query);
+  }
+
+  @Post('suggestions/:suggestionId/accept')
+  acceptSuggestion(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('suggestionId', ParseResourceIdPipe) suggestionId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.suggestions.accept(ownerId, studyId, suggestionId, mutation);
+  }
+
+  @Post('suggestions/:suggestionId/reject')
+  rejectSuggestion(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('suggestionId', ParseResourceIdPipe) suggestionId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.suggestions.reject(ownerId, studyId, suggestionId, mutation);
   }
 
   @Get('jobs/:jobId')

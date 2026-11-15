@@ -36,6 +36,7 @@ import {
 } from '@/lib/edges';
 import { invalidateNodeChange, nodeOptionText } from '@/lib/nodes';
 import { TextAreaField } from './node-fields';
+import { RelationshipSuggestions } from './relationship-suggestions';
 import {
   codeOf,
   EDGE_RULE_COPY,
@@ -70,7 +71,14 @@ const LOAD_COPY: ProblemCopy = {
   unavailable: "Couldn't load the relationships.",
 };
 
-const ORIGIN_NAMES: Record<EdgeOrigin, string> = { user: 'You', ai: 'AI suggestion you accepted' };
+/**
+ * Who a relationship came from. An accepted AI proposal keeps its AI origin and shows the user's
+ * adoption separately (FR-AI-013), even after the user edits it.
+ */
+const ORIGIN_TEXT: Record<EdgeOrigin, string> = {
+  user: 'Added by You',
+  ai: 'Origin: AI suggestion · Adopted by you',
+};
 
 /**
  * The open node's relationships (BIB-27, PRD section 12): each one a sentence from this node's
@@ -236,6 +244,9 @@ export function Relationships({
           )}
         </div>
       ) : null}
+      {editable && hasOther ? (
+        <RelationshipSuggestions studyId={studyId} node={node} nodes={nodes} />
+      ) : null}
       {editable && connecting ? (
         <ConnectDialog
           studyId={studyId}
@@ -321,7 +332,7 @@ function RelationshipItem({
     <li ref={itemRef} tabIndex={-1} className="flex flex-col gap-2 rounded border border-muted p-3">
       <p className="break-words">{sentence(edge.type, otherId, reversed)}</p>
       <p className="text-sm text-muted">
-        {EDGE_TYPE_NAMES[edge.type]} · Added by {ORIGIN_NAMES[edge.origin]}
+        {EDGE_TYPE_NAMES[edge.type]} · {ORIGIN_TEXT[edge.origin]}
       </p>
       {edge.note ? (
         <p className="break-words whitespace-pre-wrap">
