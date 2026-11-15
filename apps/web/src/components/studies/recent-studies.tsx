@@ -16,7 +16,7 @@ const COPY: ProblemCopy = {
  * PRD section 11 (Home): the three most recently active studies, whatever their pin. Pinning
  * orders the library; it does not make an old study recent.
  */
-const RECENT: LibraryRequest = { sort: 'recent', pinnedFirst: false, limit: 3 };
+export const RECENT: LibraryRequest = { sort: 'recent', pinnedFirst: false, limit: 3 };
 
 /**
  * Home's "Recent studies" (BIB-21): the three studies with the latest activity, each a link,

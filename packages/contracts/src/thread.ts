@@ -64,8 +64,6 @@ export const SEARCH_QUERY_MAX = 200;
 const activityBase = {
   /** The client's operation id: a retry resends it with the identical body (FR-THREAD-004). */
   clientMutationId: id,
-  /** The browser tab's session id, when the client has one. */
-  sessionId: id.nullable().optional(),
   /** When it happened on the client; the server records its own time too. */
   occurredAt: z.iso.datetime({ offset: true }).optional(),
   branchId: id.nullable().optional(),
@@ -205,3 +203,42 @@ export type StudyEventDetail = z.infer<typeof studyEventDetailSchema>;
 
 /** Recorded more than this long after it happened → `delayedSync`. */
 export const DELAYED_SYNC_MS = 2 * 60 * 1000;
+
+/**
+ * Study sessions (BIB-33; PRD sections 8, 13, 23; FR-THREAD-002).
+ *
+ * The web client sends this header (a random UUID per browser tab) on every request. A study
+ * mutation from that tab whose event is meaningful starts or continues the tab's session in that
+ * study, and the event records the session's id. Tabs have separate sessions; they share the
+ * study revision. Without the header (or with a malformed value) no session is recorded.
+ */
+export const TAB_INSTANCE_HEADER = 'X-Tab-Instance-Id';
+
+/** A session closes after this long without a meaningful action (PRD section 8). */
+export const SESSION_IDLE_MS = 30 * 60 * 1000;
+
+/**
+ * Events that never start, continue or end a session and never move `last_activity_at`
+ * (PRD sections 13, 18: view-only changes and layout are not meaningful study actions).
+ */
+export const BACKGROUND_EVENT_TYPES: readonly string[] = [
+  'node_position_saved',
+  'view_state_saved',
+  'session_started',
+  'session_ended',
+];
+
+export function isMeaningfulEventType(eventType: string): boolean {
+  return !BACKGROUND_EVENT_TYPES.includes(eventType);
+}
+
+export const SESSION_END_REASONS = ['inactivity', 'exit'] as const;
+export type SessionEndReason = (typeof SESSION_END_REASONS)[number];
+
+/** 200 from `POST /studies/:id/sessions/end` (explicit exit of this tab's session). */
+export const endSessionResponseSchema = z.object({
+  /** The session that was ended, or null when this tab had no open session in the study. */
+  sessionId: z.uuid().nullable(),
+  lastEventSequence: eventSequenceSchema.nullable(),
+});
+export type EndSessionResponse = z.infer<typeof endSessionResponseSchema>;

@@ -17,6 +17,12 @@ import { GraphViewProvider } from '@/lib/graph-store';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
 import { StudyEditor } from './study-editor';
 import { StudyLifecycleActions } from './study-lifecycle-actions';
+import { ViewStateSaver } from './view-state-saver';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function uuidOrNull(value: string | null): string | null {
+  return value !== null && UUID.test(value) ? value.toLowerCase() : null;
+}
 
 const LOAD_COPY: ProblemCopy = {
   notFound: "This study isn't available.",
@@ -92,7 +98,10 @@ function StudyDetails({
   const [unsavedEdits, setUnsavedEdits] = useState(false);
   const [unsavedNote, setUnsavedNote] = useState(false);
   // `?node=<id>` (BIB-26, e.g. the reader's "Show in study"): an opaque id, selected if listed.
-  const nodeParam = useSearchParams().get('node');
+  const searchParams = useSearchParams();
+  const nodeParam = searchParams.get('node');
+  // `?branch=<id>` (BIB-34, Home's Resume): the branch shown alone, if it is one of the study's.
+  const branchParam = uuidOrNull(searchParams.get('branch'));
   const showOriginal =
     study.originalQuestion !== null && study.originalQuestion.nodeId !== study.mainQuestion?.nodeId;
   return (
@@ -155,7 +164,14 @@ function StudyDetails({
       {study.lifecycle === 'active' ? (
         <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
       ) : null}
-      <GraphViewProvider>
+      <GraphViewProvider initialSoloBranchId={branchParam}>
+        {/* BIB-34: saves the selection and branch the user picks, for Resume. */}
+        <ViewStateSaver
+          studyId={study.id}
+          active={study.lifecycle === 'active'}
+          openedNodeId={uuidOrNull(nodeParam)}
+          openedBranchId={branchParam}
+        />
         {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide.
             BIB-29: or the same graph as List View (the default below 900 px). */}
         <div className="w-[min(72rem,calc(100vw-2rem))] self-center">

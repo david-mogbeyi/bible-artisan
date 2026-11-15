@@ -202,7 +202,10 @@ describe('verse selection with checkboxes', () => {
       '“one two three four five”',
       'Psalms 3:1–2 (World English Bible)',
     );
-    expect(setItem).not.toHaveBeenCalled();
+    // Nothing of the selection reaches browser storage (only the opaque tab id, BIB-33).
+    expect(
+      setItem.mock.calls.filter(([key]) => key !== 'bible-artisan.tab-instance-id'),
+    ).toStrictEqual([]);
   });
 
   it('refuses a gap between ticked verses until it is closed', async () => {

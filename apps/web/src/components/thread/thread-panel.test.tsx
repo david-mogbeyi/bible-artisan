@@ -161,4 +161,20 @@ describe('ThreadPanel', () => {
       ).toStrictEqual(['all', 'conclusions']),
     );
   });
+
+  it('marks where one recorded study session gives way to an earlier one (BIB-33)', async () => {
+    const later = 'dddddddd-2222-4333-8444-000000000002';
+    const earlier = 'dddddddd-2222-4333-8444-000000000001';
+    pages.set('all|', {
+      items: [
+        event(3, { sessionId: later }),
+        event(2, { sessionId: earlier }),
+        event(1, { sessionId: earlier }),
+      ],
+      nextCursor: null,
+    });
+    renderWithQuery(<ThreadPanel study={STUDY} />);
+    const list = await screen.findByRole('list', { name: 'Thread events' });
+    expect(within(list).getAllByText('Earlier study session')).toHaveLength(1);
+  });
 });

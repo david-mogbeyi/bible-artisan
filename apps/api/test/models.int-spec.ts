@@ -33,6 +33,7 @@ import { StudyEdge } from '../src/database/models/study-edge.model';
 import { StudyNodePosition } from '../src/database/models/study-node-position.model';
 import { StudyViewState } from '../src/database/models/study-view-state.model';
 import { StudyEvent } from '../src/database/models/study-event.model';
+import { StudySession } from '../src/database/models/study-session.model';
 import { StudyNode } from '../src/database/models/study-node.model';
 import { StudyTag } from '../src/database/models/study-tag.model';
 import { Study } from '../src/database/models/study.model';
@@ -552,6 +553,49 @@ describe('Sequelize models against the real schema', () => {
     expect(typeof found.sequence).toBe('string');
   });
 
+  it("creates a StudySession through the model with DB defaults; one open session per tab, and a last visit cannot be another study's event (BIB-33)", async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const tabInstanceId = randomUUID();
+    const at = new Date('2026-11-01T10:00:00.000Z');
+    const session = await StudySession.create({
+      ...scope,
+      tabInstanceId,
+      startedAt: at,
+      lastMeaningfulActivityAt: at,
+    });
+    expect(
+      (await StudySession.findByPk(session.id, { rejectOnEmpty: true })).get({ plain: true }),
+    ).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      ...scope,
+      tabInstanceId,
+      startedAt: at,
+      lastMeaningfulActivityAt: at,
+      endedAt: null,
+      endReason: null,
+      activeBranchId: null,
+      lastVisitEventId: null,
+      createdAt: expect.any(Date),
+      updatedAt: expect.any(Date),
+    });
+    await expect(
+      StudySession.create({ ...scope, tabInstanceId, startedAt: at, lastMeaningfulActivityAt: at }),
+    ).rejects.toBeInstanceOf(UniqueConstraintError);
+    await expect(session.update({ endedAt: at })).rejects.toBeInstanceOf(DatabaseError);
+    const foreign = await StudyEvent.create({
+      studyId: other.id,
+      ownerId: owner.id,
+      sequence: '1',
+      eventType: 'scripture_opened',
+    });
+    await expect(session.update({ lastVisitEventId: foreign.id })).rejects.toBeInstanceOf(
+      ForeignKeyConstraintError,
+    );
+  });
+
   it('rejects a StudyEvent whose parent visit is an event of another study, and a reused client mutation id (BIB-55)', async () => {
     const owner = await createUser();
     const study = await createStudy(owner.id);
@@ -1064,6 +1108,14 @@ describe('Sequelize models against the real schema', () => {
       id: expect.stringMatching(UUID),
       ...scope,
       revision: 1,
+      // BIB-34's saved context, all unset until the first view-state save.
+      selectedNodeId: null,
+      activeBranchId: null,
+      activeQuestionNodeId: null,
+      readerReferenceId: null,
+      viewport: null,
+      paneState: null,
+      contextSavedAt: null,
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });

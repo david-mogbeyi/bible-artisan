@@ -144,7 +144,14 @@ export class MutationService {
         throw new Error('MutationService: a navigation mutation cannot bump the content revision');
       }
       if (spec.bumpsContentRevision) lock.bumpContentRevision();
-      return this.run(lock, spec.work, false, request.correlationId ?? null, spec.navigation);
+      return this.run(
+        lock,
+        spec.work,
+        false,
+        request.correlationId ?? null,
+        spec.navigation,
+        request.tabInstanceId ?? null,
+      );
     });
   }
 
@@ -172,7 +179,14 @@ export class MutationService {
   ): Promise<MutationResult> {
     return this.transact(ownerId, request, async (transaction) => {
       const lock = await this.studyRevisions.create(transaction, ownerId, spec.study);
-      return this.run(lock, spec.work, true, request.correlationId ?? null);
+      return this.run(
+        lock,
+        spec.work,
+        true,
+        request.correlationId ?? null,
+        false,
+        request.tabInstanceId ?? null,
+      );
     });
   }
 
@@ -245,8 +259,16 @@ export class MutationService {
     creating: boolean,
     correlationId: string | null,
     navigation = false,
+    tabInstanceId: string | null = null,
   ): Promise<MutationResponse> {
-    const mutation = new StudyMutation(lock, this.thread, creating, correlationId, navigation);
+    const mutation = new StudyMutation(
+      lock,
+      this.thread,
+      creating,
+      correlationId,
+      navigation,
+      tabInstanceId,
+    );
     let response: MutationResponse;
     try {
       response = await runWork(work, mutation);

@@ -17,7 +17,7 @@ import {
   TRANSLATIONS_QUERY_KEY,
 } from '@/lib/bible';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
-import { invalidateThread, recordActivity, threadSessionId } from '@/lib/thread';
+import { invalidateThread, recordActivity } from '@/lib/thread';
 import { BibleReader, type FocusRequest, usePassage } from './bible-reader';
 import { type Navigation, ReferenceSearch } from './bible-search';
 import { ProblemAlert } from './problem-alert';
@@ -125,7 +125,6 @@ function BibleWorkspace() {
     recordActivity(studyId, {
       kind: 'visit',
       clientMutationId: crypto.randomUUID(),
-      sessionId: threadSessionId(),
       occurredAt: new Date().toISOString(),
       referenceId: pendingVisit.referenceId,
       origin: pendingVisit.origin,

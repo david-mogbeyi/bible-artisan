@@ -24,6 +24,7 @@ export class StudyLock {
   private released = false;
   private eventSequence: bigint;
   private contentBumped = false;
+  private meaningfulEvents = 0;
 
   /** @internal Use `StudyRevisionService.lock`. */
   constructor(
@@ -53,6 +54,20 @@ export class StudyLock {
     this.assertHeld();
     this.eventSequence += 1n;
     return this.eventSequence.toString();
+  }
+
+  /**
+   * Records that a meaningful event was appended (BIB-33, BIB-34): only then does `writeCounters`
+   * move `last_activity_at`. Background events (layout, view state, session bookkeeping) do not.
+   */
+  noteMeaningfulEvent(): void {
+    this.assertHeld();
+    this.meaningfulEvents += 1;
+  }
+
+  /** True once a meaningful event was appended under this lock. */
+  get hasMeaningfulEvents(): boolean {
+    return this.meaningfulEvents > 0;
   }
 
   /** Marks this mutation as a content change: `content_revision + 1` once, however often called. */
@@ -206,7 +221,8 @@ export class StudyRevisionService {
    * Persists the lock's counters in ONE statement: `content_revision` (when the mutation bumped
    * it) and `last_event_sequence` (when it appended events). No-op when neither changed.
    *
-   * Appended events also set `last_activity_at` (BIB-21): the library's "recent" order is when
+   * Appended meaningful events also set `last_activity_at` (BIB-21; BIB-34: not layout, view-state
+   * or session bookkeeping events, PRD section 18): the library's "recent" order is when
    * anything last happened to the study, committed with the mutation that did it. This is the
    * column's only writer after creation, so no read and no rolled-back mutation moves it. The
    * application clock, like `created_at` and `study_event.occurred_at`, taken as the mutation
@@ -219,7 +235,7 @@ export class StudyRevisionService {
       {
         contentRevision: lock.contentRevision,
         lastEventSequence: lock.lastEventSequence.toString(),
-        ...(lock.eventsAppended > 0 ? { lastActivityAt: new Date() } : {}),
+        ...(lock.hasMeaningfulEvents ? { lastActivityAt: new Date() } : {}),
       },
       {
         where: { id: lock.studyId, ownerId: lock.ownerId },

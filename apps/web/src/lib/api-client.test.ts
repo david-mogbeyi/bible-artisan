@@ -20,6 +20,21 @@ describe('apiFetch', () => {
     );
   });
 
+  it('sends the same tab instance id on every request (BIB-33)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ ok: true }))));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await apiFetch('/x', ok);
+    await apiFetch('/y', ok);
+    const tabs = fetchMock.mock.calls.map(
+      ([, init]) => (init as { headers: Record<string, string> }).headers['X-Tab-Instance-Id'],
+    );
+    expect(tabs[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(tabs[1]).toBe(tabs[0]);
+  });
+
   it('throws ApiError with the error envelope on non-2xx', async () => {
     const envelope = { code: 'not_found', message: 'Not found' };
     vi.stubGlobal(

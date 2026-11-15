@@ -115,6 +115,12 @@ const SIMPLE: Record<string, (input: DisplayInput) => string> = {
   node_position_saved: () => 'Moved nodes on the canvas',
   phrase_selected: (i) => `Selected text in ${passage(i.payload.referenceLabel, null)}`,
   search_performed: () => 'Searched the Bible',
+  session_started: () => 'Started a study session',
+  session_ended: (i) =>
+    i.payload.reason === 'inactivity'
+      ? 'Study session ended after 30 minutes without activity'
+      : 'Ended the study session',
+  view_state_saved: () => 'Saved the workspace view',
 };
 
 export function displayText(input: DisplayInput): string {

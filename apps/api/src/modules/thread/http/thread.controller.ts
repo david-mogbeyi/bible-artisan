@@ -31,6 +31,16 @@ export class ThreadController {
     return this.activity.record(ownerId, studyId, mutation);
   }
 
+  /** Explicit exit (BIB-33): ends this tab's open session in the study. */
+  @Post('sessions/end')
+  endSession(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.activity.endSession(ownerId, studyId, mutation);
+  }
+
   @Get('events')
   @Header('Cache-Control', 'no-store')
   list(
