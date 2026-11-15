@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CONNECT_COPY } from '@/components/graph/connect-dialog';
 import { studyQueryKey } from '@/lib/studies';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { EDGE_RULE_COPY } from './relationship-controls';
 import { RELATIONSHIPS_COPY, Relationships } from './relationships';
@@ -183,6 +184,7 @@ describe('Relationships', () => {
     expect(sentences()).toStrictEqual([
       'Observation: Paul appeals to conscience supports this conclusion',
     ]);
+    await expectNoA11yViolations(document.body);
   });
 
   it('shows the empty state, and no Connect, Edit or Remove on a read-only study', async () => {
@@ -254,6 +256,7 @@ describe('Relationships', () => {
     await waitFor(() => expect(sentences()).toHaveLength(1));
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Connect' }));
+    await expectNoA11yViolations(document.body);
   });
 
   it('hides Swap direction for a two-way type, and Escape closes the dialog back to Connect', async () => {

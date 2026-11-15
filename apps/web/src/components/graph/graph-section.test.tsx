@@ -2,6 +2,7 @@ import type { GraphResponse, StudyResponse } from '@bible-artisan/contracts';
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NODES_COPY, NodesSection } from '@/components/nodes/nodes-section';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { GRAPH_COPY, GraphSection } from './graph-section';
 import { POSITION_SAVE_DEBOUNCE_MS } from './use-position-saver';
@@ -202,6 +203,10 @@ describe('GraphSection (BIB-28)', () => {
     expect(textOf(canvasNode(OBS))).toContain('Textual observation');
     expect(within(canvas()).getByText('supports')).toBeTruthy();
     expect(textOf(status())).toContain('Showing 3 of 3 nodes');
+    await expectNoA11yViolations(document.body);
+    // BIB-53: one step past every node and edge Tab stop.
+    fireEvent.click(screen.getByRole('button', { name: GRAPH_COPY.skipCanvas }));
+    expect(textOf(document.activeElement)).toBe(GRAPH_COPY.afterCanvas);
   });
 
   it('says when the graph cannot load, offers Retry, and leaves the Nodes list working', async () => {

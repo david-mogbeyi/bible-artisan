@@ -1,6 +1,7 @@
 import { AI_CONSENT_VERSION } from '@bible-artisan/contracts';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import {
   AI_CHANGED_ELSEWHERE,
@@ -83,6 +84,7 @@ describe('AI consent settings (BIB-40)', () => {
       },
     ]);
     expect(await screen.findByRole('button', { name: 'Turn off AI features' })).not.toBeNull();
+    await expectNoA11yViolations(document.body);
   });
 
   it('turning AI off reports cancelled requests; a conflict asks the user to review', async () => {

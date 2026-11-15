@@ -2,6 +2,7 @@ import type { StudyResponse } from '@bible-artisan/contracts';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { studyQueryKey } from '@/lib/studies';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { CONCLUSION_COPY, ConclusionActions } from './conclusion-actions';
 import { NodesSection } from './nodes-section';
@@ -241,6 +242,7 @@ describe('conclusion markers and warnings (BIB-30)', () => {
     );
     expect(within(region).getByRole('button', { name: 'Connect evidence' })).toBeTruthy();
     expect(within(region).getByRole('button', { name: "Remove 'Established by me'" })).toBeTruthy();
+    await expectNoA11yViolations(document.body);
   });
 
   it('offers Mark as established by me only for a supported conclusion with live evidence', async () => {

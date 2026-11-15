@@ -14,6 +14,7 @@ import {
   TRANSLATION,
   wholeChapterReference,
 } from '@/test/bible-fixtures';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { BibleReader, type FocusRequest } from './bible-reader';
 
@@ -111,6 +112,7 @@ describe('BibleReader', () => {
         .getByRole('link', { name: 'About this translation (opens in a new tab)' })
         .getAttribute('href'),
     ).toBe('https://example.test/about');
+    await expectNoA11yViolations(document.body);
   });
 
   it('shows a verse the edition has no text for, with its number and a plain note', async () => {
@@ -195,6 +197,7 @@ describe('BibleReader', () => {
     const heading = await screen.findByRole('heading', { name: 'Psalms 4' });
     expect(screen.queryByRole('alert')).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(heading));
+    await expectNoA11yViolations(document.body);
   });
 
   it('holds Retry until Retry-After has passed when rate limited (429)', async () => {

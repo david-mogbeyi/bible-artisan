@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearOfflineQueue, listQueued, queueNoteSave } from '@/lib/offline-queue';
 import { invalidateLibrary } from '@/lib/studies';
 import { captureDownloads } from '@/test/downloads';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { Home, SIGN_OUT_UNSYNCED } from './home';
 
@@ -273,6 +274,7 @@ describe('Home recent studies', () => {
     expect(new URL(request ?? '', 'http://api.test').searchParams.toString()).toBe(
       'sort=recent&pinnedFirst=false&limit=3',
     );
+    await expectNoA11yViolations(document.body);
   });
 
   it('refetches when the library is invalidated after a study is created or edited', async () => {

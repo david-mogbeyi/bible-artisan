@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EDITION_ID } from '@/test/bible-fixtures';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { formatPurgeDate } from '@/lib/studies';
 import { StudyLibraryPage } from './study-library';
@@ -113,6 +114,7 @@ describe('Study library', () => {
     expect(within(others).getByRole('link', { name: 'Grace alone' })).toBeTruthy();
     // Pinned group comes before the rest in document order.
     expect(pinned.compareDocumentPosition(others) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await expectNoA11yViolations(document.body);
   });
 
   it('searches through the API only: the text never reaches the page URL or localStorage', async () => {

@@ -87,6 +87,8 @@ export const GRAPH_COPY = {
   selectToConnect: 'Select one or two nodes to connect.',
   arrangeInList: 'Switch to Graph to preview an arrangement.',
   drawFailed: "The graph couldn't be drawn.",
+  skipCanvas: 'Skip the canvas',
+  afterCanvas: 'End of the canvas',
 } as const;
 
 const LOAD_COPY: ProblemCopy = {
@@ -221,6 +223,8 @@ function GraphCanvas({
   const canvasRef = useRef<HTMLDivElement>(null);
   const listHeading = useRef<HTMLHeadingElement>(null);
   const lockedAlert = useRef<HTMLDivElement>(null);
+  /** BIB-53: "Skip the canvas" moves focus here, past every focusable node and edge. */
+  const afterCanvas = useRef<HTMLSpanElement>(null);
   /** After a Connect refused for the study's lifecycle: the locked alert takes focus. */
   const focusLocked = useRef(false);
   /** After "Open List View" (the canvas failed to draw): the List heading takes focus. */
@@ -552,7 +556,7 @@ function GraphCanvas({
           type="button"
           aria-pressed={!hiddenTypes.has('source')}
           onClick={() => store.getState().toggleType('source')}
-          className="rounded border border-muted px-2 py-1 aria-pressed:border-accent"
+          className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent aria-pressed:font-semibold"
         >
           Sources
         </button>
@@ -767,6 +771,15 @@ function GraphCanvas({
           <p id={instructionsId} className="sr-only">
             {movable ? GRAPH_COPY.instructions : GRAPH_COPY.readOnlyInstructions}
           </p>
+          {/* BIB-53 (WCAG 2.4.1): every node and edge is a Tab stop, so a keyboard user can jump
+              past the canvas in one step. Hidden until it has focus. */}
+          <button
+            type="button"
+            onClick={() => afterCanvas.current?.focus()}
+            className="sr-only self-start rounded border border-accent px-2 py-1 text-accent focus:not-sr-only"
+          >
+            {GRAPH_COPY.skipCanvas}
+          </button>
           <CanvasErrorBoundary onOpenList={openListView}>
             <div
               role="group"
@@ -805,6 +818,13 @@ function GraphCanvas({
               </ReactFlow>
             </div>
           </CanvasErrorBoundary>
+          <span
+            ref={afterCanvas}
+            tabIndex={-1}
+            className="sr-only text-sm text-muted focus:not-sr-only"
+          >
+            {GRAPH_COPY.afterCanvas}
+          </span>
         </>
       ) : (
         <GraphListView

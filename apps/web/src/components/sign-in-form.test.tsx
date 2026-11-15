@@ -1,5 +1,6 @@
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { SignInForm } from './sign-in-form';
 
@@ -58,9 +59,10 @@ describe('SignInForm', () => {
   it('signs in with email then code and returns to the requested route', async () => {
     search = new URLSearchParams({ next: '/studies/42?tab=thread' });
     fetchMock.mockResolvedValueOnce(started()).mockResolvedValueOnce(jsonResponse(200, ME));
-    const { queryClient } = renderWithQuery(<SignInForm />);
+    const { container, queryClient } = renderWithQuery(<SignInForm />);
 
     expect(screen.getByRole('heading', { name: 'Sign in' })).toBeTruthy();
+    await expectNoA11yViolations(container);
     const emailInput = screen.getByLabelText('Email address');
     expect(emailInput.getAttribute('type')).toBe('email');
     expect(emailInput.getAttribute('autocomplete')).toBe('email');
@@ -71,6 +73,7 @@ describe('SignInForm', () => {
     expect(codeInput.getAttribute('autocomplete')).toBe('one-time-code');
     expect(codeInput.getAttribute('inputmode')).toBe('numeric');
     expect(screen.getByText('Enter the 6-digit code sent to reader@example.test.')).toBeTruthy();
+    await expectNoA11yViolations(container);
 
     fireEvent.change(codeInput, { target: { value: '123456' } });
     const codeForm = codeInput.closest('form');

@@ -1,6 +1,7 @@
 import type { StudyEventItem, StudyResponse } from '@bible-artisan/contracts';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { ThreadPanel } from './thread-panel';
 
@@ -138,6 +139,7 @@ describe('ThreadPanel', () => {
     if (!card) throw new Error('expected a card');
     expect(within(card).getByText('No longer in the graph')).toBeTruthy();
     expect(within(card).queryByRole('link', { name: 'Show in study' })).toBeNull();
+    await expectNoA11yViolations(document.body);
     expect(screen.queryByRole('button', { name: 'Load more events' })).toBeNull();
   });
 

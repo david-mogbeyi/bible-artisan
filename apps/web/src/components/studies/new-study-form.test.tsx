@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deferred, EDITION_ID, TRANSLATION } from '@/test/bible-fixtures';
 import { libraryQueryKey } from '@/lib/studies';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import {
   BLANK_RULE,
@@ -168,6 +169,7 @@ describe('NewStudyForm', () => {
     await waitFor(() => expect(document.activeElement).toBe(alert.parentElement));
     expect((field(/^Title/) as HTMLInputElement).value).toBe('Only a title');
     expect(createCalls()).toStrictEqual([]);
+    await expectNoA11yViolations(document.body);
   });
 
   it('offers the candidate books for an ambiguous passage and resolves the one picked', async () => {

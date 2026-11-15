@@ -2,8 +2,10 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GRAPH_COPY } from '@/components/graph/graph-section';
 import { GRAPH } from '@/test/graph-fixtures';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { StudyPage } from './study-page';
+import { STICKY_HEIGHT_VAR } from './workspace-tabs';
 
 const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
 const NODE_ID = 'bbbbbbbb-2222-4333-8444-555555555555';
@@ -142,6 +144,7 @@ describe('StudyPage below 900 px (BIB-38)', () => {
     expect(within(panel).getByText('Starting passage')).toBeTruthy();
     expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(5);
     expect(screen.queryByRole('heading', { name: 'Nodes' })).toBeNull();
+    await expectNoA11yViolations(document.body);
 
     fireEvent.click(tab('Thread'));
     expect(tab('Thread').getAttribute('aria-selected')).toBe('true');
@@ -149,6 +152,16 @@ describe('StudyPage below 900 px (BIB-38)', () => {
     expect(
       screen.getByText('Starting passage').closest('[role="tabpanel"]')?.hasAttribute('hidden'),
     ).toBe(true);
+  });
+
+  it('keeps the sticky tab list height as page scroll padding, so focus is never hidden under it (BIB-53)', async () => {
+    stubViewport(true);
+    const { unmount } = renderWithQuery(<StudyPage />);
+    const tablist = await screen.findByRole('tablist', { name: 'Study workspace' });
+    const root = document.documentElement;
+    expect(root.style.getPropertyValue(STICKY_HEIGHT_VAR)).toBe(`${tablist.offsetHeight}px`);
+    unmount();
+    expect(root.style.getPropertyValue(STICKY_HEIGHT_VAR)).toBe('');
   });
 
   it('moves between tabs with the arrow keys, Home and End, keeping one tab in the Tab order', async () => {
@@ -230,5 +243,6 @@ describe('StudyPage below 900 px (BIB-38)', () => {
     expect(screen.queryByRole('tabpanel')).toBeNull();
     expect(screen.getByText('Starting passage')).toBeTruthy();
     expect(await screen.findByRole('heading', { name: 'Nodes' })).toBeTruthy();
+    await expectNoA11yViolations(document.body);
   });
 });
