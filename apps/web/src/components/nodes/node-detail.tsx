@@ -38,6 +38,7 @@ import {
   updateNode,
 } from '@/lib/nodes';
 import { invalidateLibrary } from '@/lib/studies';
+import { type NodeEdit, nodeCommandLabel, nodeKey, useUndoRecorder } from '@/lib/undo';
 import {
   type FieldErrors,
   fieldErrorsOf,
@@ -448,6 +449,18 @@ function SourceContent({ source }: { source: Source }) {
   );
 }
 
+/**
+ * BIB-63: the saved content an edit replaced, as the edit that puts it back. An observation's
+ * "Established by me" is not part of it: undo never sets a marker again (BIB-30/62).
+ */
+function editOf(node: EditableNode): NodeEdit {
+  if (node.type === 'source') return { source: sourceInputOf(sourceDraftOf(node.source)) };
+  if (node.type === 'observation') {
+    return { text: node.text, observationKind: node.observationKind };
+  }
+  return { text: node.text };
+}
+
 function EditNode({
   studyId,
   node,
@@ -480,6 +493,7 @@ function EditNode({
   } | null>(null);
   const frozen = useRef<{ json: string; key: string; body: UpdateNodeRequest } | null>(null);
   const returnFocus = useRef(false);
+  const record = useUndoRecorder();
 
   const unsaved = editing && (pending || JSON.stringify(draft) !== JSON.stringify(draftOf(base)));
   useEffect(() => {
@@ -541,6 +555,14 @@ function EditNode({
     try {
       const saved = await updateNode(studyId, node.id, attempt.body, attempt.key);
       frozen.current = null;
+      const { expectedRevision: _sent, ...edited } = attempt.body;
+      record(
+        {
+          label: nodeCommandLabel('Edit', base.type),
+          action: { op: 'editNode', nodeId: node.id, body: edited, inverse: editOf(base) },
+        },
+        { [nodeKey(node.id)]: saved.revision },
+      );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nodeQueryKey(studyId, node.id) }),
         queryClient.invalidateQueries({ queryKey: nodesQueryKey(studyId) }),

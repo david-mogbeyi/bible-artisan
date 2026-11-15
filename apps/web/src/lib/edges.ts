@@ -84,6 +84,20 @@ export function deleteEdge(
   });
 }
 
+/** `POST /studies/:id/edges/:edgeId/restore` (BIB-63). `expectedRevision` is the removed edge's. */
+export function restoreEdge(
+  studyId: string,
+  edgeId: string,
+  body: { expectedRevision: number },
+  idempotencyKey: string,
+): Promise<EdgeMutationResponse> {
+  return apiFetch(`${edgePath(studyId, edgeId)}/restore`, edgeMutationResponseSchema, {
+    method: 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+    body: JSON.stringify(body),
+  });
+}
+
 /**
  * After any relationship change: both endpoints' lists, the study's counters, the graph snapshot
  * (the canvas and List View draw every live edge) and the library order.

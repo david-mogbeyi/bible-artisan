@@ -29,6 +29,7 @@ import { createEdge, edgeSentence, invalidateEdgeChange } from '@/lib/edges';
 import { invalidateGraph } from '@/lib/graph';
 import { nodeOptionText, nodesQueryKey } from '@/lib/nodes';
 import { studyQueryKey } from '@/lib/studies';
+import { edgeKey, useUndoRecorder } from '@/lib/undo';
 
 export const CONNECT_COPY = {
   title: 'Connect nodes',
@@ -106,6 +107,7 @@ export function ConnectDialog({
   const [errors, setErrors] = useState<FieldErrors>({});
   const [problem, setProblem] = useState<Problem | null>(null);
   const [existing, setExisting] = useState(false);
+  const record = useUndoRecorder();
   const request = useFrozenRequest((body: CreateEdgeRequest, key: string) =>
     createEdge(studyId, body, key),
   );
@@ -204,6 +206,16 @@ export function ConnectDialog({
     setExisting(false);
     const result = await attempt;
     if (result.ok) {
+      const edge = result.value;
+      if (edge.outcome === 'created') {
+        record(
+          {
+            label: 'Connect nodes',
+            action: { op: 'removeEdge', edgeId: edge.id, sourceNodeId: edge.sourceNodeId },
+          },
+          { [edgeKey(edge.id)]: edge.revision },
+        );
+      }
       adopt(result.value);
       if (result.value.outcome === 'created') close('created');
       else setExisting(true);

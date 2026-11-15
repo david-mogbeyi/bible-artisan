@@ -35,6 +35,7 @@ import {
   updateEdge,
 } from '@/lib/edges';
 import { invalidateNodeChange, nodeOptionText } from '@/lib/nodes';
+import { edgeKey, useUndoRecorder } from '@/lib/undo';
 import { TextAreaField } from './node-fields';
 import { RelationshipSuggestions } from './relationship-suggestions';
 import {
@@ -422,6 +423,7 @@ function EditRelationship({
   const [note, setNote] = useState(edge.note ?? '');
   const [typeError, setTypeError] = useState<string | undefined>();
   const [problem, setProblem] = useState<Problem | null>(null);
+  const record = useUndoRecorder();
   const request = useFrozenRequest((body: UpdateEdgeRequest, key: string) =>
     updateEdge(studyId, edge.id, body, key),
   );
@@ -439,6 +441,19 @@ function EditRelationship({
     setTypeError(undefined);
     const result = await attempt;
     if (result.ok) {
+      record(
+        {
+          label: 'Change relationship',
+          action: {
+            op: 'editEdge',
+            edgeId: edge.id,
+            sourceNodeId: edge.sourceNodeId,
+            body: { type, note: note.trim() ? note : null },
+            inverse: { type: base.type, note: base.note },
+          },
+        },
+        { [edgeKey(edge.id)]: result.value.revision },
+      );
       onSaved(result.value.establishmentClearedNodeIds);
       return;
     }
@@ -547,6 +562,7 @@ function RemoveRelationship({
 }) {
   const confirmButton = useRef<HTMLButtonElement>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
+  const record = useUndoRecorder();
   const request = useFrozenRequest((body: { expectedRevision: number }, key: string) =>
     deleteEdge(studyId, edge.id, body, key),
   );
@@ -561,6 +577,13 @@ function RemoveRelationship({
     setProblem(null);
     const result = await attempt;
     if (result.ok) {
+      record(
+        {
+          label: 'Remove relationship',
+          action: { op: 'restoreEdge', edgeId: edge.id, sourceNodeId: edge.sourceNodeId },
+        },
+        { [edgeKey(edge.id)]: result.value.revision },
+      );
       onRemoved(result.value.establishmentClearedNodeIds);
       return;
     }

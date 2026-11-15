@@ -55,4 +55,14 @@ export class EdgesController {
   ): Promise<MutationResult> {
     return this.edges.remove(ownerId, studyId, edgeId, mutation);
   }
+
+  @Post(':edgeId/restore')
+  restore(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('edgeId', ParseResourceIdPipe) edgeId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.edges.restore(ownerId, studyId, edgeId, mutation);
+  }
 }

@@ -387,6 +387,13 @@ const ROUTES: Record<string, Access> = {
       test: 'DELETE /v1/studies/:studyId/edges/:edgeId gives another user the same neutral 404 as an absent or malformed id, writing nothing',
     },
   },
+  'POST /v1/studies/:studyId/edges/:edgeId/restore': {
+    access: 'private',
+    crossUserTest: {
+      file: 'edges.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/edges/:edgeId/restore gives another user the same neutral 404 as an absent or malformed id, writing nothing',
+    },
+  },
   // Study Thread (BIB-55, BIB-32): Bob's calls on Alice's study and events, absent and malformed
   // ids, and Alice's ids inside his own study's activity.
   'POST /v1/studies/:studyId/activity': {

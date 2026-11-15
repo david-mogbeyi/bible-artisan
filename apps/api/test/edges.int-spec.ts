@@ -38,6 +38,8 @@ const nodesPath = (studyId: string): string => `${STUDIES}/${studyId}/nodes`;
 const edgesPath = (studyId: string): string => `/v1/studies/${studyId}/edges`;
 const edgePath = (studyId: string, edgeId: string): string =>
   `/v1/studies/${studyId}/edges/${edgeId}`;
+const restorePath = (studyId: string, edgeId: string): string =>
+  `/v1/studies/${studyId}/edges/${edgeId}/restore`;
 const listPath = (studyId: string, nodeId: string): string =>
   `/v1/studies/${studyId}/edges?nodeId=${encodeURIComponent(nodeId)}`;
 
@@ -81,6 +83,14 @@ const EDGE_EXISTS = envelope({
 const EDGE_UNCHANGED = envelope({
   code: 'EDGE_UNCHANGED',
   message: 'The relationship already has these values',
+});
+const EDGE_NOT_REMOVED = envelope({
+  code: 'EDGE_NOT_REMOVED',
+  message: 'This relationship has not been removed',
+});
+const EDGE_ENDPOINT_DELETED = envelope({
+  code: 'EDGE_ENDPOINT_DELETED',
+  message: 'One of these nodes is deleted. Restore it first',
 });
 
 /** BIB-27: typed, directional relationships. Real PostgreSQL, whole-body assertions. */
@@ -982,6 +992,159 @@ describe('typed relationships (BIB-27)', () => {
         statuses: results.map((r) => r.status).sort(),
         live: await StudyEdge.count({ where: { studyId, deletedAt: null } }),
       }).toStrictEqual({ statuses: [201, 409], live: 1 });
+    });
+  });
+
+  describe('restore (BIB-63)', () => {
+    /** An observation supporting a conclusion, connected then removed (edge revision 2). */
+    async function removedEdge(owner: Owner, studyId: string) {
+      const a = await observation(owner, studyId);
+      const b = await conclusion(owner, studyId);
+      const edge = await connected(owner, studyId, {
+        sourceNodeId: a,
+        targetNodeId: b,
+        type: 'supports',
+        note: 'Same witness',
+      });
+      const removed = await send(owner, 'delete', edgePath(studyId, edge.id), {
+        expectedRevision: 1,
+      });
+      expect(removed.status).toBe(200);
+      return { a, b, edge };
+    }
+
+    it('brings a removed edge back under its own id with its note, in one transaction with edge_restored, replays the same key, and refuses a live edge with 422', async () => {
+      const studyId = await createStudy(alice);
+      const { a, b, edge } = await removedEdge(alice, studyId);
+      const key = randomUUID();
+      const restored = await send(
+        alice,
+        'post',
+        restorePath(studyId, edge.id),
+        { expectedRevision: 2 },
+        key,
+      );
+      const restoredEvent = await lastEvent(studyId);
+      const replay = await send(
+        alice,
+        'post',
+        restorePath(studyId, edge.id),
+        { expectedRevision: 2 },
+        key,
+      );
+      const eventsAfterReplay = (await events(studyId)).length;
+      const list = (await send(alice, 'get', listPath(studyId, b))).body as unknown;
+      const again = await send(alice, 'post', restorePath(studyId, edge.id), {
+        expectedRevision: 3,
+      });
+      const body = {
+        id: edge.id,
+        studyId,
+        sourceNodeId: a,
+        targetNodeId: b,
+        type: 'supports',
+        origin: 'user',
+        revision: 3,
+        createdAt: edge.createdAt,
+        updatedAt: anyTime,
+        lastEventSequence: String(Number(edge.lastEventSequence) + 2),
+        establishmentClearedNodeIds: [],
+      };
+      expect({
+        restored: [restored.status, restored.body],
+        restoredEvent,
+        replay: [replay.status, replay.body],
+        oneEvent: eventsAfterReplay === (await events(studyId)).length,
+        list,
+        again: [again.status, again.body],
+      }).toStrictEqual({
+        restored: [200, body],
+        restoredEvent: {
+          sequence: String(Number(edge.lastEventSequence) + 2),
+          eventType: 'edge_restored',
+          payload: { edgeId: edge.id, sourceNodeId: a, targetNodeId: b, edgeType: 'supports' },
+        },
+        replay: [200, body],
+        oneEvent: true,
+        list: { items: [listed(edge, 'Same witness', 3)] },
+        again: [422, EDGE_NOT_REMOVED],
+      });
+    });
+
+    it('refuses a missing or stale revision, an identical live edge and a deleted endpoint, writing nothing', async () => {
+      const studyId = await createStudy(alice);
+      const { a, b, edge } = await removedEdge(alice, studyId);
+      const twin = await connected(alice, studyId, {
+        sourceNodeId: a,
+        targetNodeId: b,
+        type: 'supports',
+      });
+      const before = await ownerRows(alice);
+      const missing = await send(alice, 'post', restorePath(studyId, edge.id), {});
+      const stale = await send(alice, 'post', restorePath(studyId, edge.id), {
+        expectedRevision: 1,
+      });
+      const duplicate = await send(alice, 'post', restorePath(studyId, edge.id), {
+        expectedRevision: 2,
+      });
+      const unchanged = isDeepStrictEqual(await ownerRows(alice), before);
+      // Remove the twin, then delete the conclusion: the first edge's endpoint is gone.
+      await send(alice, 'delete', edgePath(studyId, twin.id), { expectedRevision: 1 });
+      const node = await StudyNode.findByPk(b, { rejectOnEmpty: true });
+      const deleted = await send(alice, 'delete', `${nodesPath(studyId)}/${b}`, {
+        expectedRevision: node.revision,
+      });
+      expect(deleted.status).toBe(200);
+      const endpoint = await send(alice, 'post', restorePath(studyId, edge.id), {
+        expectedRevision: 2,
+      });
+      expect({
+        missing: [missing.status, missing.body],
+        stale: [stale.status, stale.body],
+        duplicate: [duplicate.status, duplicate.body],
+        unchanged,
+        endpoint: [endpoint.status, endpoint.body],
+      }).toStrictEqual({
+        missing: [428, REVISION_MISSING],
+        stale: [409, conflict(2)],
+        duplicate: [422, EDGE_EXISTS],
+        unchanged: true,
+        endpoint: [422, EDGE_ENDPOINT_DELETED],
+      });
+    });
+
+    it('POST /v1/studies/:studyId/edges/:edgeId/restore gives another user the same neutral 404 as an absent or malformed id, writing nothing', async () => {
+      const studyId = await createStudy(alice);
+      const { edge } = await removedEdge(alice, studyId);
+      const aliceOther = await createStudy(alice);
+      const bobsStudy = await createStudy(bob);
+      const aliceBefore = await ownerRows(alice);
+      const bobBefore = await ownerRows(bob);
+      const body = { expectedRevision: 2 };
+      const answers = [
+        await send(bob, 'post', restorePath(studyId, edge.id), body),
+        await send(bob, 'post', restorePath(studyId, randomUUID()), body),
+        await send(bob, 'post', restorePath(studyId, 'not-a-uuid'), body),
+        await send(bob, 'post', restorePath(bobsStudy, edge.id), body),
+        await send(alice, 'post', restorePath(aliceOther, edge.id), body),
+        await send(null, 'post', restorePath(studyId, edge.id), body),
+      ].map((res): unknown[] => [res.status, res.body]);
+      expect({
+        answers,
+        aliceUnchanged: isDeepStrictEqual(await ownerRows(alice), aliceBefore),
+        bobUnchanged: isDeepStrictEqual(await ownerRows(bob), bobBefore),
+      }).toStrictEqual({
+        answers: [
+          [404, NOT_FOUND],
+          [404, NOT_FOUND],
+          [404, NOT_FOUND],
+          [404, NOT_FOUND],
+          [404, NOT_FOUND],
+          [401, UNAUTHENTICATED],
+        ],
+        aliceUnchanged: true,
+        bobUnchanged: true,
+      });
     });
   });
 

@@ -906,6 +906,18 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      '/studies/{studyId}/edges/{edgeId}/restore': {
+        post: {
+          description: `Restores a removed edge under its own id (BIB-63: undo of a removal), with its type and note. expectedRevision is the removed edge's. Checked in order: 422 lifecycle, 404, 409, then 422 EDGE_NOT_REMOVED (the edge is live), EDGE_ENDPOINT_DELETED (restore the deleted node instead), EDGE_EXISTS (an identical live edge exists) and EDGE_LIMIT_EXCEEDED. contentRevision moves. edge_restored. Restoring evidence never sets "Established by me" again (establishmentClearedNodeIds is always empty). ${EDGE_MUTATION_RULES}`,
+          security: sessionCookie,
+          parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('edgeId')],
+          requestBody: jsonBody('EdgeStateRequest'),
+          responses: {
+            200: jsonResponse('The restored edge', 'EdgeMutationResponse'),
+            default: errorResponse,
+          },
+        },
+      },
       '/studies/{studyId}/branches': {
         post: {
           description: `Starts a branch (PRD section 8: a navigation grouping rooted in a question or passage) at rootNodeId, a live Question or Scripture node of the study: any other type is 422 BRANCH_ROOT_TYPE_NOT_ALLOWED, and a node that already roots a branch (the study's initial branch included) is 422 BRANCH_EXISTS. The branch starts with no members at revision 1 and has no label: it is named by its root. Starting a branch is a study change: expectedRevision is the study's revision (studyRevision in the response). One thread-visible branch_created event. ${BRANCH_MUTATION_RULES}`,
