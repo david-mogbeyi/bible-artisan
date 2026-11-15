@@ -4,24 +4,38 @@ import {
   type ExportFormat,
   type ExportResponse,
   exportResponseSchema,
+  IDEMPOTENCY_KEY_HEADER,
 } from '@bible-artisan/contracts';
 import { apiFetch, apiHref } from './api-client';
 
 /**
  * Exports and account deletion (BIB-47, BIB-48). Only opaque ids travel in URLs; the file itself
  * is downloaded by navigating to its signed, 15-minute link (`downloadExport`).
+ *
+ * Creating an export takes an Idempotency-Key, one per user click: a retry of that click resends
+ * the same key and body, so the server replays the export it already made instead of storing a
+ * second one.
  */
 
-export function createStudyExport(studyId: string, format: ExportFormat): Promise<ExportResponse> {
+export function createStudyExport(
+  studyId: string,
+  format: ExportFormat,
+  idempotencyKey: string,
+): Promise<ExportResponse> {
   return apiFetch(`/studies/${studyId}/exports`, exportResponseSchema, {
     method: 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
     body: JSON.stringify({ format }),
   });
 }
 
-export function createAccountExport(format: ExportFormat): Promise<ExportResponse> {
+export function createAccountExport(
+  format: ExportFormat,
+  idempotencyKey: string,
+): Promise<ExportResponse> {
   return apiFetch('/me/exports', exportResponseSchema, {
     method: 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
     body: JSON.stringify({ format }),
   });
 }

@@ -9,5 +9,7 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
     setupFiles: ['./src/test/setup.ts'],
+    // Room for the async-util ceiling (src/test/setup.ts) under load; a passing test is no slower.
+    testTimeout: 15_000,
   },
 });

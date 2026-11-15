@@ -13,7 +13,7 @@ import {
 } from '@bible-artisan/contracts';
 import { Op } from 'sequelize';
 import request, { type Response } from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { cursorSecret, type Env } from '../src/config/env';
 import { ENV } from '../src/config/config.module';
 import { DATABASE } from '../src/database/database.module';
@@ -28,6 +28,11 @@ import { User } from '../src/database/models/user.model';
 import { ENGWEBP_RELEASE } from '../src/modules/bible-content/corpus/engwebp-release';
 import { ExportPurgeService } from '../src/modules/exports/export-purge.service';
 import { exportLinkKey, signExportLink } from '../src/modules/exports/download-link';
+import {
+  DEFAULT_EXPORT_LIMITS,
+  EXPORT_LIMITS,
+  type ExportLimits,
+} from '../src/modules/exports/export-limits';
 import { SessionService } from '../src/modules/identity/session.service';
 import { createTestApp } from './app';
 import { envelope, NOT_FOUND, UNAUTHENTICATED } from './support/envelopes';
@@ -48,6 +53,16 @@ const exportPath = (exportId: string): string => `/v1/exports/${exportId}`;
 const downloadPath = (exportId: string, query: string): string =>
   `/v1/exports/${exportId}/download?${query}`;
 const ACCOUNT_EXPORTS = '/v1/me/exports';
+
+const KEY_REUSED = envelope({
+  code: 'IDEMPOTENCY_KEY_REUSED',
+  message: 'This Idempotency-Key was already used for a different request',
+});
+const RATE_LIMITED = envelope({
+  code: 'RATE_LIMITED',
+  message: 'Too many exports. Try again later',
+  retryable: true,
+});
 
 const LINK_EXPIRED = envelope({
   code: 'EXPORT_LINK_EXPIRED',
@@ -87,6 +102,8 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
   let bob: Owner;
   let editionId: string;
   const userIds: string[] = [];
+  /** The app's export limits; a test lowers them and `afterEach` puts the defaults back. */
+  const limits: ExportLimits = { ...DEFAULT_EXPORT_LIMITS };
 
   async function signedInUser(): Promise<Owner> {
     const user = await User.create({ normalizedEmail: `${randomUUID()}@example.test` });
@@ -102,9 +119,11 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
     method: 'get' | 'post' | 'patch' | 'delete',
     path: string,
     body?: unknown,
+    idempotencyKey?: string,
   ): Promise<Response> {
     let req = request(app.getHttpServer())[method](path);
     if (owner) req = req.set('Cookie', owner.cookie);
+    if (idempotencyKey !== undefined) req = req.set('Idempotency-Key', idempotencyKey);
     if (body !== undefined) req = req.send(body as object);
     return req.then((res) => res);
   }
@@ -189,7 +208,9 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
   }
 
   beforeAll(async () => {
-    app = await createTestApp();
+    app = await createTestApp(undefined, {
+      override: (builder) => builder.overrideProvider(EXPORT_LIMITS).useValue(limits),
+    });
     db = app.get<Database>(DATABASE);
     const edition = await BibleEdition.findOne({
       where: {
@@ -202,6 +223,10 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
     editionId = edition.id;
     alice = await signedInUser();
     bob = await signedInUser();
+  });
+
+  afterEach(() => {
+    Object.assign(limits, DEFAULT_EXPORT_LIMITS);
   });
 
   afterAll(async () => {
@@ -454,5 +479,147 @@ describe('study and account exports (BIB-47, BIB-48)', () => {
     ]);
     expect(await new ExportPurgeService().purgeExpired()).toBeGreaterThanOrEqual(1);
     expect(await ExportFile.findByPk(created.id)).toBeNull();
+  });
+
+  it('replays a retried export with the same Idempotency-Key instead of storing a second one, and refuses the key for another request', async () => {
+    const { studyId } = await richStudy(alice);
+    const key = randomUUID();
+
+    const first = await send(alice, 'post', studyExportsPath(studyId), { format: 'json' }, key);
+    expect([first.status, first.body]).toStrictEqual([201, exportBody('study', studyId, 'json')]);
+    expect(first.headers['idempotent-replayed']).toBeUndefined();
+    // A double click or a retry after a lost response: the same export, nothing new stored.
+    const again = await send(alice, 'post', studyExportsPath(studyId), { format: 'json' }, key);
+    expect([again.status, again.body]).toStrictEqual([201, first.body]);
+    expect(again.headers['idempotent-replayed']).toBe('true');
+    expect(again.headers['cache-control']).toBe('no-store');
+    expect(await ExportFile.count({ where: { ownerId: alice.user.id, studyId } })).toBe(1);
+
+    // The same key with another body, or on the other route, is refused and stores nothing.
+    const refused = [
+      await send(alice, 'post', studyExportsPath(studyId), { format: 'markdown' }, key),
+      await send(alice, 'post', ACCOUNT_EXPORTS, { format: 'json' }, key),
+    ];
+    expect(refused.map((res): unknown[] => [res.status, res.body as unknown])).toStrictEqual([
+      [422, KEY_REUSED],
+      [422, KEY_REUSED],
+    ]);
+    expect(await ExportFile.count({ where: { ownerId: alice.user.id, studyId } })).toBe(1);
+
+    // Receipts are per owner: Bob's request with the same key is his own new account export.
+    const bobs = await send(bob, 'post', ACCOUNT_EXPORTS, { format: 'json' }, key);
+    expect([bobs.status, bobs.body]).toStrictEqual([201, exportBody('account', null, 'json')]);
+    expect(bobs.headers['idempotent-replayed']).toBeUndefined();
+    expect((bobs.body as ExportResponse).id).not.toBe((first.body as ExportResponse).id);
+
+    // An account export replays the same way.
+    const accountKey = randomUUID();
+    const account = await send(alice, 'post', ACCOUNT_EXPORTS, { format: 'markdown' }, accountKey);
+    expect(account.status).toBe(201);
+    const replayed = await send(alice, 'post', ACCOUNT_EXPORTS, { format: 'markdown' }, accountKey);
+    expect([replayed.status, replayed.body]).toStrictEqual([201, account.body]);
+    expect(replayed.headers['idempotent-replayed']).toBe('true');
+
+    // A malformed key is a 400, as on every mutation.
+    const malformed = await send(alice, 'post', ACCOUNT_EXPORTS, { format: 'json' }, 'not-a-key');
+    expect([malformed.status, malformed.body]).toStrictEqual([
+      400,
+      envelope({
+        code: 'VALIDATION',
+        message: 'Invalid request',
+        fieldErrors: { 'Idempotency-Key': ['Must be a UUID'] },
+      }),
+    ]);
+  });
+
+  it('refuses an export larger than the size cap with 413 and stores nothing', async () => {
+    const { studyId } = await richStudy(alice);
+    limits.maxBytes = 1024;
+    const key = randomUUID();
+
+    const tooLarge = await send(alice, 'post', studyExportsPath(studyId), { format: 'json' }, key);
+    expect([tooLarge.status, tooLarge.body]).toStrictEqual([
+      413,
+      envelope({ code: 'EXPORT_TOO_LARGE', message: 'An export can be at most 1 KB' }),
+    ]);
+    const account = await send(alice, 'post', ACCOUNT_EXPORTS, { format: 'json' });
+    expect([account.status, account.body]).toStrictEqual([
+      413,
+      envelope({ code: 'EXPORT_TOO_LARGE', message: 'An export can be at most 1 KB' }),
+    ]);
+    expect(await ExportFile.count({ where: { ownerId: alice.user.id, studyId } })).toBe(0);
+
+    // The refusal is not cached on the key: under a bigger cap the same request goes through.
+    limits.maxBytes = DEFAULT_EXPORT_LIMITS.maxBytes;
+    const retried = await send(alice, 'post', studyExportsPath(studyId), { format: 'json' }, key);
+    expect([retried.status, retried.body]).toStrictEqual([
+      201,
+      exportBody('study', studyId, 'json'),
+    ]);
+    expect(retried.headers['idempotent-replayed']).toBeUndefined();
+  });
+
+  it('rate limits new exports per owner with 429 and Retry-After, still replays a used key, and leaves other users alone', async () => {
+    const carol = await signedInUser();
+    const dave = await signedInUser();
+    const created = await send(carol, 'post', STUDIES, { blank: true });
+    expect(created.status).toBe(201);
+    const { studyId } = created.body as CreateStudyResponse;
+    limits.maxExports = 2;
+
+    const key = randomUUID();
+    const first = await send(carol, 'post', ACCOUNT_EXPORTS, { format: 'json' }, key);
+    expect(first.status).toBe(201);
+    expect((await send(carol, 'post', studyExportsPath(studyId), { format: 'json' })).status).toBe(
+      201,
+    );
+
+    // Study and account exports share the limit.
+    const limited = [
+      await send(carol, 'post', ACCOUNT_EXPORTS, { format: 'markdown' }, randomUUID()),
+      await send(carol, 'post', studyExportsPath(studyId), { format: 'markdown' }),
+    ];
+    expect(limited.map((res): unknown[] => [res.status, res.body as unknown])).toStrictEqual([
+      [429, RATE_LIMITED],
+      [429, RATE_LIMITED],
+    ]);
+    for (const res of limited) {
+      const retryAfter = Number(res.headers['retry-after']);
+      expect(retryAfter).toBeGreaterThanOrEqual(1);
+      expect(retryAfter).toBeLessThanOrEqual(DEFAULT_EXPORT_LIMITS.windowSeconds);
+    }
+    expect(await ExportFile.count({ where: { ownerId: carol.user.id } })).toBe(2);
+
+    // A retry of an export already made is not a new export: it still replays.
+    const replayed = await send(carol, 'post', ACCOUNT_EXPORTS, { format: 'json' }, key);
+    expect([replayed.status, replayed.body]).toStrictEqual([201, first.body]);
+    expect(replayed.headers['idempotent-replayed']).toBe('true');
+
+    // Another user has their own allowance.
+    const daves = await send(dave, 'post', ACCOUNT_EXPORTS, { format: 'json' });
+    expect([daves.status, daves.body]).toStrictEqual([201, exportBody('account', null, 'json')]);
+
+    // Once the oldest export leaves the window, a new one goes through.
+    await db.query(`UPDATE export_file SET created_at = now() - interval '2 hours' WHERE id = $1`, {
+      bind: [(first.body as ExportResponse).id],
+    });
+    const later = await send(carol, 'post', ACCOUNT_EXPORTS, { format: 'markdown' });
+    expect([later.status, later.body]).toStrictEqual([
+      201,
+      exportBody('account', null, 'markdown'),
+    ]);
+  });
+
+  it('never lets concurrent export requests overshoot the rate limit', async () => {
+    const erin = await signedInUser();
+    limits.maxExports = 2;
+
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        send(erin, 'post', ACCOUNT_EXPORTS, { format: 'json' }, randomUUID()),
+      ),
+    );
+    expect(responses.map((res) => res.status).sort()).toStrictEqual([201, 201, 429, 429, 429]);
+    expect(await ExportFile.count({ where: { ownerId: erin.user.id } })).toBe(2);
   });
 });

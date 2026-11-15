@@ -40,12 +40,14 @@ const EXPORT = {
 };
 
 let deleteResponses: Response[];
+let exportResponses: Response[];
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   replace.mockReset();
   vi.mocked(downloadExport).mockReset();
   deleteResponses = [];
+  exportResponses = [];
   fetchMock = vi.fn((input: string, init?: RequestInit) => {
     if (input.endsWith('/me') && (init?.method ?? 'GET') === 'GET') {
       return Promise.resolve(jsonResponse(200, ME));
@@ -64,7 +66,9 @@ beforeEach(() => {
       if (!next) throw new Error('unexpected delete');
       return Promise.resolve(next);
     }
-    if (input.endsWith('/me/exports')) return Promise.resolve(jsonResponse(201, EXPORT));
+    if (input.endsWith('/me/exports')) {
+      return Promise.resolve(exportResponses.shift() ?? jsonResponse(201, EXPORT));
+    }
     throw new Error(`unexpected fetch ${input}`);
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -135,5 +139,39 @@ describe('Account data settings (BIB-48)', () => {
     expect(
       await screen.findByText('Your export is ready. The download should start now.'),
     ).toBeTruthy();
+  });
+
+  it('sends a new Idempotency-Key for every export click and the same key when retrying one', async () => {
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    const keyOf = (call: unknown[]): unknown =>
+      ((call[1] as RequestInit).headers as Record<string, string>)['Idempotency-Key'];
+    exportResponses = [
+      jsonResponse(503, {
+        code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'A required service is temporarily unavailable',
+        retryable: true,
+        correlationId: ME.id,
+      }),
+    ];
+    renderWithQuery(<AccountDataSettings me={ME} />);
+    const json = await screen.findByRole('button', {
+      name: 'Export as JSON (complete, versioned)',
+    });
+
+    fireEvent.click(json);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(downloadExport).toHaveBeenCalledTimes(1));
+    fireEvent.click(json);
+    await waitFor(() => expect(downloadExport).toHaveBeenCalledTimes(2));
+
+    const keys = callsTo('/me/exports', 'POST').map(keyOf);
+    expect(keys).toStrictEqual([
+      expect.stringMatching(UUID),
+      expect.stringMatching(UUID),
+      expect.stringMatching(UUID),
+    ]);
+    // The retry resent the failed click's key; the second click has its own.
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
   });
 });

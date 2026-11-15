@@ -13,6 +13,7 @@ import {
   BranchRuleError,
   DependencyUnavailableError,
   ExportLinkExpiredError,
+  ExportTooLargeError,
   EdgeRuleError,
   IdempotencyKeyReusedError,
   NotFoundError,
@@ -183,7 +184,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       };
     }
 
-    if (exception instanceof NoteTooLongError) {
+    if (exception instanceof NoteTooLongError || exception instanceof ExportTooLargeError) {
       return {
         status: HttpStatus.PAYLOAD_TOO_LARGE,
         envelope: {

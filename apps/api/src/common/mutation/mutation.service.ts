@@ -209,6 +209,29 @@ export class MutationService {
   }
 
   /**
+   * For a route that does expensive read-only work before its mutation (exports render the whole
+   * study before storing the file): the committed response a retry with this Idempotency-Key
+   * replays, so the route can return it without redoing that work or hitting its rate limit.
+   * Null when there is nothing to replay yet (no key, no live receipt, or one still in flight).
+   * Same rule as `execute`: a live receipt for a different request is 422. This only reads; the
+   * route must still store its result through `executeForOwner` with the same request, whose
+   * claim replays a concurrent duplicate that committed in between.
+   */
+  async committedReplay(
+    ownerId: string,
+    request: MutationRequestInfo,
+  ): Promise<MutationResult | null> {
+    const { idempotencyKey } = request;
+    if (idempotencyKey === null) return null;
+    const receipt = await MutationReceipt.findOne({
+      where: { ownerId, idempotencyKey, expiresAt: { [Op.gt]: fn('now') } },
+    });
+    if (!receipt || receipt.responseStatus === null || receipt.responseBody === null) return null;
+    if (receipt.requestHash !== requestFingerprint(request)) throw new IdempotencyKeyReusedError();
+    return new MutationResult(receipt.responseStatus, receipt.responseBody, true);
+  }
+
+  /**
    * Step 1 and the end of every mutation: one READ COMMITTED transaction, the receipt claimed
    * first (or the committed response replayed), and the response stored on the receipt before
    * COMMIT. `run` does everything in between.

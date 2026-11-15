@@ -87,20 +87,41 @@ describe('buildOpenApiDocument', () => {
       default: errorResponse,
     };
     const exportId = uuidParam('exportId');
+    const EXPORT_CREATE_RULES = [
+      'Idempotency-Key',
+      '422 IDEMPOTENCY_KEY_REUSED',
+      '413 EXPORT_TOO_LARGE',
+      '50 MB',
+      '429 RATE_LIMITED',
+      'Retry-After',
+    ];
+    const idempotencyKey = {
+      name: 'Idempotency-Key',
+      in: 'header',
+      required: false,
+      schema: { type: 'string', format: 'uuid' },
+    };
     const exportPaths = {
       '/studies/{studyId}/exports': {
         post: {
-          description: phrases(['versioned JSON', 'Markdown', 'rights', ...EXPORT_RULES]),
+          description: phrases([
+            'versioned JSON',
+            'Markdown',
+            'rights',
+            ...EXPORT_CREATE_RULES,
+            ...EXPORT_RULES,
+          ]),
           security: [{ sessionCookie: [] }],
-          parameters: [studyId],
+          parameters: [idempotencyKey, studyId],
           requestBody: { required: true, content: json('CreateExportRequest') },
           responses: created,
         },
       },
       '/me/exports': {
         post: {
-          description: phrases(['whole account', ...EXPORT_RULES]),
+          description: phrases(['whole account', ...EXPORT_CREATE_RULES, ...EXPORT_RULES]),
           security: [{ sessionCookie: [] }],
+          parameters: [idempotencyKey],
           requestBody: { required: true, content: json('CreateExportRequest') },
           responses: created,
         },

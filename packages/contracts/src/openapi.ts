@@ -113,7 +113,9 @@ import {
   createExportRequestSchema,
   deleteAccountRequestSchema,
   deleteAccountResponseSchema,
+  EXPORT_RATE_LIMIT,
   exportResponseSchema,
+  MAX_EXPORT_BYTES,
 } from './export';
 
 /** JSON-schema object as emitted by `z.toJSONSchema` (OpenAPI 3.0 target). */
@@ -276,6 +278,9 @@ const ACCOUNT_DELETION_DESCRIPTION =
 const EXPORT_RULES =
   "Exports change no study data: no expectedRevision, no StudyEvent. The file is stored for 24 hours; downloadUrl is signed for the session's owner and expires after 15 minutes (GET /exports/{exportId} gives a fresh one). Another user's, an absent, a malformed and an expired id are the same 404.";
 
+/** What both export create routes share: idempotency, the size cap and the rate limit. */
+const EXPORT_CREATE_RULES = `Send an Idempotency-Key: a retry with the same key and body replays the original 201 (Idempotent-Replayed: true, the same export) and stores nothing new; the same key with another body is 422 IDEMPOTENCY_KEY_REUSED. An export larger than ${MAX_EXPORT_BYTES / (1024 * 1024)} MB is 413 EXPORT_TOO_LARGE and nothing is stored. At most ${EXPORT_RATE_LIMIT.maxExports} new exports (study and account together) per owner per rolling hour; more is 429 RATE_LIMITED with Retry-After (a replay is never limited).`;
+
 /** Study and account export paths (BIB-47, BIB-48). */
 function exportPaths(): Record<string, Record<string, unknown>> {
   const created = {
@@ -285,17 +290,18 @@ function exportPaths(): Record<string, Record<string, unknown>> {
   return {
     '/studies/{studyId}/exports': {
       post: {
-        description: `Exports one owned study as versioned JSON (nodes, edges, branches, conclusion versions with evidence, notes with versions, highlights, Study Thread events, Scripture with attribution, and the basis revision) or a readable Markdown outline. Scripture text is included only where the edition's rights permit export; otherwise the reference stays and the text is labeled as left out. Archived and trashed studies can be exported. ${EXPORT_RULES}`,
+        description: `Exports one owned study as versioned JSON (nodes, edges, branches, conclusion versions with evidence, notes with versions, highlights, Study Thread events, Scripture with attribution, and the basis revision) or a readable Markdown outline. Scripture text is included only where the edition's rights permit export; otherwise the reference stays and the text is labeled as left out. Archived and trashed studies can be exported. ${EXPORT_CREATE_RULES} ${EXPORT_RULES}`,
         security: sessionCookie,
-        parameters: [studyIdParam],
+        parameters: [idempotencyKeyHeader, studyIdParam],
         requestBody: jsonBody('CreateExportRequest'),
         responses: created,
       },
     },
     '/me/exports': {
       post: {
-        description: `Exports the whole account: its profile and every study inside its recovery window, in the same versioned structure as a study export. ${EXPORT_RULES}`,
+        description: `Exports the whole account: its profile and every study inside its recovery window, in the same versioned structure as a study export. ${EXPORT_CREATE_RULES} ${EXPORT_RULES}`,
         security: sessionCookie,
+        parameters: [idempotencyKeyHeader],
         requestBody: jsonBody('CreateExportRequest'),
         responses: created,
       },
