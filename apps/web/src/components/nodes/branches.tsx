@@ -18,6 +18,7 @@ import {
 } from '@/components/graph/use-branch-members';
 import { branchLabel, createBranch, inBranch, storeBranch } from '@/lib/branches';
 import { fetchGraph, graphQueryKey, invalidateGraph } from '@/lib/graph';
+import { endSentence } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import {
   codeOf,
@@ -98,7 +99,7 @@ export function Branches({
     const member = branch.memberNodeIds.includes(node.id);
     setProblem(null);
     setAnnouncement('');
-    membersDone.current = `${member ? 'Removed from' : 'Added to'} ${branchLabel(branch, nodesById)}.`;
+    membersDone.current = `${member ? 'Removed from' : 'Added to'} ${endSentence(branchLabel(branch, nodesById))}`;
     await settleMembers(
       members.send(branch.id, {
         expectedRevision: branch.revision,

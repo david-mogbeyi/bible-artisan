@@ -8,7 +8,7 @@ import {
   type StudyNodeType,
   type UpdateNodeRequest,
 } from '@bible-artisan/contracts';
-import { createContext, type ReactNode, useContext, useState } from 'react';
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from 'react';
 import { createStore, type StoreApi, useStore } from 'zustand';
 import { deleteEdge, restoreEdge, updateEdge } from './edges';
 import { deleteNode, restoreNode, updateNode } from './nodes';
@@ -104,6 +104,12 @@ export interface UndoState {
   revisions: Record<string, number>;
   /** An undo or redo is in flight: both buttons wait. */
   busy: boolean;
+  /**
+   * Counts of commands recorded and of undos / redos done on this page, so a status about the
+   * last action ("Observation added", "Undid: …") can be cleared when another one replaces it.
+   */
+  recorded: number;
+  settled: number;
   /** A new acknowledged command: pushed on the undo stack (the oldest past `MAX_UNDO` goes), redo cleared. */
   record: (entry: UndoEntry, revisions: RevisionUpdates) => void;
   setBusy: (busy: boolean) => void;
@@ -128,8 +134,11 @@ export function createUndoStore(): StoreApi<UndoState> {
     redo: [],
     revisions: {},
     busy: false,
+    recorded: 0,
+    settled: 0,
     record: (entry, revisions) =>
       set((s) => ({
+        recorded: s.recorded + 1,
         undo: [...s.undo, entry].slice(-MAX_UNDO),
         redo: [],
         revisions: applyRevisions(s.revisions, revisions),
@@ -140,6 +149,8 @@ export function createUndoStore(): StoreApi<UndoState> {
         const to = from === 'undo' ? 'redo' : 'undo';
         const target = moved ? [...s[to], moved].slice(-MAX_UNDO) : s[to];
         return {
+          // Only a reversal that happened (a refusal just drops the command).
+          settled: moved ? s.settled + 1 : s.settled,
           [from]: s[from].slice(0, -1),
           [to]: target,
           revisions: applyRevisions(s.revisions, revisions),
@@ -170,6 +181,25 @@ const NO_STORE = createUndoStore();
 
 export function useUndo<T>(selector: (state: UndoState) => T): T {
   return useStore(useUndoStore() ?? NO_STORE, selector);
+}
+
+/**
+ * Calls `onChange` after each command recorded (`'recorded'`) or each undo / redo settled
+ * (`'settled'`) on this page, so a status about the previous action can be cleared.
+ */
+export function useUndoEvents(kind: 'recorded' | 'settled', onChange: () => void): void {
+  const store = useUndoStore();
+  const callback = useRef(onChange);
+  useEffect(() => {
+    callback.current = onChange;
+  }, [onChange]);
+  useEffect(
+    () =>
+      store?.subscribe((state, previous) => {
+        if (state[kind] !== previous[kind]) callback.current();
+      }),
+    [kind, store],
+  );
 }
 
 /**

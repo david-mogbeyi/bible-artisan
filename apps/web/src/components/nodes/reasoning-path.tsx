@@ -4,7 +4,7 @@ import type { ReasoningPathResponse, ReasoningStep } from '@bible-artisan/contra
 import { useQuery } from '@tanstack/react-query';
 import { useId, useState } from 'react';
 import { fetchReasoning, reasoningQueryKey } from '@/lib/ai';
-import { formatNodeTime } from '@/lib/nodes';
+import { endSentence, endsSentence, formatNodeTime, listItem } from '@/lib/nodes';
 
 export const REASONING_COPY = {
   open: 'How did I arrive at this?',
@@ -109,7 +109,7 @@ function stepText(step: ReasoningStep): string {
         step.evidence
           .map(
             (item) =>
-              `${item.edgeType.replaceAll('_', ' ')} ${item.label}${
+              `${item.edgeType.replaceAll('_', ' ')} ${listItem(item.label)}${
                 !item.edgeLive
                   ? REASONING_COPY.removed
                   : !item.nodeLive || item.nodeChangedSince
@@ -118,5 +118,7 @@ function stepText(step: ReasoningStep): string {
               }`,
           )
           .join('; ');
-  return `${formatNodeTime(step.createdAt)}: version ${step.versionNumber} (${step.action}, ${step.status}${marker}) “${step.statement}”. ${evidence}.`;
+  // A statement or label that ends a sentence itself gets no second period (no "..", no ".;").
+  const statement = `“${step.statement}”${endsSentence(step.statement) ? '' : '.'}`;
+  return `${formatNodeTime(step.createdAt)}: version ${step.versionNumber} (${step.action}, ${step.status}${marker}) ${statement} ${endSentence(evidence)}`;
 }

@@ -22,6 +22,7 @@ import { invalidateGraph } from '@/lib/graph';
 import { useGraphView, useGraphViewStore } from '@/lib/graph-store';
 import { listNodes, nodeStateText, nodesQueryKey, notAboutNodes } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
+import { useUndoEvents } from '@/lib/undo';
 import { AddNodeForm } from './add-node-form';
 import {
   DeletedNodes,
@@ -147,22 +148,32 @@ export function NodesSection({
   });
 
   // The `?node=` node (else the saved selection) becomes the shared selection once the list has
-  // it, unless something was picked first. Only once: clearing the selection later never brings
-  // it back.
-  const initialApplied = useRef(false);
+  // it. The saved selection is restored once, and only when nothing was picked first. Every new
+  // `?node=` wins, also after a restore or a pick: a same-page link (the Study Thread's "Show in
+  // study") changes only the URL. Clearing the selection later never brings either back.
+  const appliedNodeParam = useRef<string | null>(null);
+  const restoreDone = useRef(false);
   useEffect(() => {
-    const pick = initialNodeId ?? restoredNodeId;
-    if (initialApplied.current || !pick || !nodes.data) return;
-    initialApplied.current = true;
-    if (graphView.getState().selectedNodeIds.length > 0) return;
-    if (!nodes.data.items.some((node) => node.id === pick)) return;
+    if (!nodes.data) return;
+    const listed = (id: string) => nodes.data.items.some((node) => node.id === id);
     if (initialNodeId) {
+      if (initialNodeId === appliedNodeParam.current) return;
+      // On page load, a node picked while the list was loading stays picked.
+      const onLoad = appliedNodeParam.current === null && !restoreDone.current;
+      appliedNodeParam.current = initialNodeId;
+      restoreDone.current = true;
+      if (onLoad && graphView.getState().selectedNodeIds.length > 0) return;
       // Its heading takes focus when it opens (the user came to see it).
-      graphView.getState().select([initialNodeId], 'list', { focusDetail: true });
-    } else {
-      // A restore, like a canvas pick: no focus move, and the restored viewport stays as saved.
-      graphView.getState().select([pick], 'canvas');
+      if (listed(initialNodeId)) {
+        graphView.getState().select([initialNodeId], 'list', { focusDetail: true });
+      }
+      return;
     }
+    if (restoreDone.current || !restoredNodeId) return;
+    restoreDone.current = true;
+    if (graphView.getState().selectedNodeIds.length > 0 || !listed(restoredNodeId)) return;
+    // A restore, like a canvas pick: no focus move, and the restored viewport stays as saved.
+    graphView.getState().select([restoredNodeId], 'canvas');
   }, [graphView, initialNodeId, nodes.data, restoredNodeId]);
 
   useEffect(() => {
@@ -231,6 +242,16 @@ export function NodesSection({
   useEffect(() => {
     if (deletedStatus) deletedStatusRef.current?.focus();
   }, [deletedStatus]);
+
+  // An undo or redo reverses the last action: its status ("Observation added", "Deleted …" with
+  // Restore) would contradict the "Undid: …" that replaces it.
+  useUndoEvents(
+    'settled',
+    useCallback(() => {
+      setAnnouncement('');
+      setDeletedStatus(null);
+    }, []),
+  );
 
   const restore = useNodeRestore({
     studyId: study.id,

@@ -241,6 +241,11 @@ export function useGraphViewStore(): GraphViewStore {
   return store;
 }
 
+/** The study page's store, or null outside one (a panel rendered on its own). */
+export function useOptionalGraphViewStore(): GraphViewStore | null {
+  return useContext(GraphViewContext);
+}
+
 export function useGraphView<T>(selector: (state: GraphViewState) => T): T {
   return useStore(useGraphViewStore(), selector);
 }

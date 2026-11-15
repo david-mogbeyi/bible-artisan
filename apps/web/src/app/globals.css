@@ -18,8 +18,10 @@
 :root {
   color-scheme: light;
   /* WCAG 2.4.11 (BIB-53): below 900 px the study's tab list sticks to the top; it measures itself
-     into this variable so a control scrolled into view by focus is never hidden under it. */
-  scroll-padding-top: var(--workspace-tabs-height, 0px);
+     into this variable so a control scrolled into view by focus is never hidden under it. The 8px
+     beyond it keeps the whole focus ring (2px outline, 2px offset) on screen, also when the list
+     isn't sticky (200% text on a phone). */
+  scroll-padding-top: calc(var(--workspace-tabs-height, 0px) + 8px);
 }
 
 body {

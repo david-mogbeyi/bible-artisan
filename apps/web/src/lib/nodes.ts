@@ -206,6 +206,23 @@ export function nodeStateText(
   return null;
 }
 
+const SENTENCE_END = /[.!?…]["'”’)]*$/;
+
+/** Whether text already ends a sentence (with . ! ? or …, maybe before a closing quote). */
+export function endsSentence(text: string): boolean {
+  return SENTENCE_END.test(text.trimEnd());
+}
+
+/** Text (a node label) ending a sentence: no second period when it already ends with one. */
+export function endSentence(text: string): string {
+  return endsSentence(text) ? text : `${text}.`;
+}
+
+/** Text (a node label) as one item of a "; " list: its own final period dropped, never ".;". */
+export function listItem(text: string): string {
+  return text.trimEnd().replace(/([^.])\.$/, '$1');
+}
+
 /**
  * "Thought: Maybe conscience…", as the Notes "Attach to" select names a node; a duplicate
  * Scripture node (BIB-26) says so: "Scripture: Romans 9:1 (duplicate)".

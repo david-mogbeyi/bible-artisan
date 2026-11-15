@@ -8,9 +8,10 @@ import type {
 } from '@bible-artisan/contracts';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import Link from 'next/link';
-import { useId, useMemo, useState } from 'react';
+import { type MouseEvent, useId, useMemo, useState } from 'react';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { bibleHref } from '@/lib/bible';
+import { useOptionalGraphViewStore } from '@/lib/graph-store';
 import {
   fetchThreadPage,
   groupThreadCards,
@@ -164,6 +165,19 @@ function ThreadCardView({ card, study }: { card: ThreadCard; study: StudyRespons
   const detailsId = useId();
   const { primary, events } = card;
   const target = primary.targetRef;
+  const graphView = useOptionalGraphViewStore();
+  /**
+   * "Show in study" changes the page's `?node=`, which selects that node (NodesSection). A link to
+   * the node the URL already names changes nothing, so it selects the node here instead (the user
+   * may have picked another one since).
+   */
+  const showNode = (event: MouseEvent<HTMLAnchorElement>, nodeId: string) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    if (new URLSearchParams(window.location.search).get('node') !== nodeId) return;
+    graphView?.getState().select([nodeId], 'list', { focusDetail: true });
+  };
   return (
     <article className="flex flex-col gap-2 rounded border border-muted p-3">
       <p className="break-words">{primary.displayText}</p>
@@ -178,6 +192,7 @@ function ThreadCardView({ card, study }: { card: ThreadCard; study: StudyRespons
         {target?.kind === 'node' && !target.deleted ? (
           <Link
             href={`/studies/${encodeURIComponent(study.id)}?node=${encodeURIComponent(target.id)}`}
+            onClick={(event) => showNode(event, target.id)}
             className="text-accent underline"
           >
             Show in study

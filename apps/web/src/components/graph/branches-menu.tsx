@@ -6,6 +6,7 @@ import { type Problem, ProblemLine } from '@/components/nodes/relationship-contr
 import { branchLabel, branchNodeIds } from '@/lib/branches';
 import { useGraphViewStore } from '@/lib/graph-store';
 import { MAX_ARRANGE_NODES } from '@/lib/graph-view';
+import { endSentence } from '@/lib/nodes';
 import {
   BRANCH_COPY,
   branchRuleText,
@@ -82,7 +83,7 @@ export function BranchesMenu({
       const added = outcome.value.memberNodeIds.filter(
         (id) => request.ids.includes(id) && !request.before.includes(id),
       ).length;
-      onAnnounce(`Added ${nodesText(added)} to ${request.label}.`);
+      onAnnounce(`Added ${nodesText(added)} to ${endSentence(request.label)}`);
       return;
     }
     const said = membersProblem(outcome);
