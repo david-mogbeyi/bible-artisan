@@ -6,6 +6,7 @@ import { AiResult } from './models/ai-result.model';
 import { Annotation } from './models/annotation.model';
 import { ContextManifest } from './models/context-manifest.model';
 import { ExportFile } from './models/export-file.model';
+import { OperationalRequestMetric } from './models/operational-request-metric.model';
 import { StudyAiSetting } from './models/study-ai-setting.model';
 import { AuthChallenge } from './models/auth-challenge.model';
 import { AuthSession } from './models/auth-session.model';
@@ -111,6 +112,7 @@ export function createDatabase(
       AiResult,
       StudySession,
       ExportFile,
+      OperationalRequestMetric,
       AccountDeletion,
       AiSuggestion,
       StudySummary,

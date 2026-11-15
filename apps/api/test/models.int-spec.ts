@@ -28,6 +28,7 @@ import { MutationReceipt } from '../src/database/models/mutation-receipt.model';
 import { NodeVersionEvidence } from '../src/database/models/node-version-evidence.model';
 import { NodeVersion } from '../src/database/models/node-version.model';
 import { NoteVersion } from '../src/database/models/note-version.model';
+import { OperationalRequestMetric } from '../src/database/models/operational-request-metric.model';
 import { Note } from '../src/database/models/note.model';
 import { ScriptureReference } from '../src/database/models/scripture-reference.model';
 import { StudyBranchMember } from '../src/database/models/study-branch-member.model';
@@ -2160,6 +2161,60 @@ describe('Sequelize models against the real schema', () => {
     await Study.destroy({ where: { id: study.id } });
     expect(await StudySummary.count({ where: { studyId: study.id } })).toBe(0);
     expect(await StudySummarySchedule.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('creates an OperationalRequestMetric through the model with zero-count defaults; the database refuses a partial minute, a wrong-sized histogram or a counter above the request count (BIB-50)', async () => {
+    // A far-past minute nobody else writes, so the test owns its key.
+    const bucketStart = new Date(Date.UTC(1999, 0, 1, 0, Math.floor(Math.random() * 1440)));
+    const labels = { bucketStart, method: 'GET', route: `/v1/model-test/${randomUUID()}` };
+    const histogram = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    try {
+      await OperationalRequestMetric.create({ ...labels, latencyHistogram: histogram });
+      const found = await OperationalRequestMetric.findOne({
+        where: { route: labels.route },
+        rejectOnEmpty: true,
+      });
+      expect(found.get({ plain: true })).toStrictEqual({
+        ...labels,
+        requestCount: 0,
+        serverErrorCount: 0,
+        conflictCount: 0,
+        unauthorizedCount: 0,
+        forbiddenCount: 0,
+        notFoundCount: 0,
+        abortedCount: 0,
+        latencyHistogram: histogram,
+      });
+
+      const refusals = await Promise.all([
+        OperationalRequestMetric.create({
+          ...labels,
+          route: `${labels.route}/partial`,
+          bucketStart: new Date(bucketStart.getTime() + 1_000),
+          latencyHistogram: histogram,
+        }).catch((e: unknown) => e),
+        OperationalRequestMetric.create({
+          ...labels,
+          route: `${labels.route}/short`,
+          latencyHistogram: [0, 0],
+        }).catch((e: unknown) => e),
+        OperationalRequestMetric.create({
+          ...labels,
+          route: `${labels.route}/over`,
+          requestCount: 1,
+          serverErrorCount: 2,
+          latencyHistogram: histogram,
+        }).catch((e: unknown) => e),
+      ]);
+      for (const refused of refusals) {
+        expect(refused).toBeInstanceOf(DatabaseError);
+        expect((refused as DatabaseError).parent).toMatchObject({ code: '23514' });
+      }
+    } finally {
+      await OperationalRequestMetric.destroy({
+        where: { route: { [Op.like]: `${labels.route}%` } },
+      });
+    }
   });
 
   it('refuses to truncate scripture_reference', async () => {
