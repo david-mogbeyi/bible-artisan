@@ -79,6 +79,7 @@ describe('renderStudyMarkdown (BIB-47)', () => {
       establishedAt: null,
       scriptureReferenceId: null,
       canonicalNodeId: null,
+      derivedFromNoteId: null,
       source: null,
       revision: 1,
       createdAt: T,

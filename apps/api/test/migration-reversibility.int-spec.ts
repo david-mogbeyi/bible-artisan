@@ -763,7 +763,7 @@ describe('migration reversibility', () => {
       expect(await columns(['study_node'])).not.toContain('study_node.derived_from_note_id');
       expect(await derivedSchema()).toStrictEqual([]);
       await migrator.up();
-      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await recordedMigrations(db)).toStrictEqual([...before, SUGGESTIONS_MIGRATION]);
       expect(await derivedSchema()).toStrictEqual(schemaBefore);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
