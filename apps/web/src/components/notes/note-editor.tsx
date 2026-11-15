@@ -8,6 +8,8 @@ import {
   NOTE_TRASHED,
   type NoteDocument,
   type NoteMutationResponse,
+  type NoteConflictResolution,
+  notePlainText,
   type NoteResponse,
   STUDY_ARCHIVED,
 } from '@bible-artisan/contracts';
@@ -49,6 +51,7 @@ import {
   noteVersionsQueryKey,
   saveNote,
 } from '@/lib/notes';
+import { useNoteTabs } from '@/lib/note-tabs';
 import { invalidateLibrary } from '@/lib/studies';
 import { NOTE_LINK_REL, NOTE_LINK_TARGET } from './note-content';
 import { characterCount, NoteAutosave, type SaveState } from './note-autosave';
@@ -64,8 +67,14 @@ export const SAVE_COPY = {
   pending: 'Changes not saved yet',
   saving: 'Saving…',
   failed: "Couldn't save. Your text is still here, and Retry won't save it twice.",
+  waiting:
+    "Waiting to sync: you're offline. Your text is still here and saves when you're back online.",
+  signedOut:
+    'Your session expired, so this edit was not saved. Your text is still here. Sign in again in another tab, then come back or choose Retry.',
   conflict:
-    'This note changed somewhere else, so this edit was not saved. Your text is still here.',
+    'Conflict needs review: this note changed somewhere else, so this edit was not saved. Your text is still here.',
+  otherTab:
+    'This note is also open in another tab. Edits in both may conflict; nothing is overwritten without asking.',
   tooLong: `Too long to save: a note can have at most ${LIMIT} characters. Your text is still here.`,
   tooLarge:
     'This note is too large to save. Try removing long links or splitting it into two notes. Your text is still here.',
@@ -105,6 +114,10 @@ function stateText(state: SaveState): string {
       return SAVE_COPY.saving;
     case 'failed':
       return SAVE_COPY.failed;
+    case 'waiting':
+      return SAVE_COPY.waiting;
+    case 'signed_out':
+      return SAVE_COPY.signedOut;
     case 'conflict':
       return SAVE_COPY.conflict;
     case 'too_long':
@@ -299,8 +312,10 @@ export interface NoteEditorHandle {
  * Saving follows `NoteAutosave`: 750 ms after typing stops (five seconds at most), one request at
  * a time, frozen for a byte-identical retry, "Saved" only after the server acknowledged the
  * latest content. Over the limit nothing is sent and the draft stays. A conflict stops autosave
- * and keeps the draft; the user chooses Keep mine (saved as a new version) or Reload latest. The
- * page warns before unload while anything is unsaved; closing the editor saves first.
+ * and keeps the draft beside the server text; the user chooses Keep server version, Save my
+ * version or Combine manually (BIB-37). Offline it waits to sync; an expired session pauses
+ * with the draft kept. The page warns before unload while anything is unsaved; closing the
+ * editor saves first.
  */
 export function NoteEditor({
   studyId,
@@ -352,6 +367,18 @@ export function NoteEditor({
     options: ReferenceCandidate[];
   } | null>(null);
 
+  const tabs = useNoteTabs(studyId, note.id);
+  const announceSaved = useRef(tabs.announceSaved);
+  useEffect(() => {
+    announceSaved.current = tabs.announceSaved;
+  }, [tabs.announceSaved]);
+  // After a 409: the note as the server holds it now, shown beside this tab's text (BIB-37).
+  const [server, setServer] = useState<NoteResponse | null>(null);
+  const [mineAtConflict, setMineAtConflict] = useState('');
+  const [combining, setCombining] = useState(false);
+  // Set below, once the editor exists: what entering a conflict does.
+  const onConflict = useRef<() => void>(() => undefined);
+
   // One autosave per open note, created once (the editor is keyed by note id).
   const [saver] = useState(
     () =>
@@ -359,7 +386,10 @@ export function NoteEditor({
         revision: note.revision,
         content: note.content,
         send: (body, key) => saveNote(studyId, note.id, body, key),
-        onState: setState,
+        onState: (next: SaveState) => {
+          setState(next);
+          if (next.kind === 'conflict') onConflict.current();
+        },
         onSaved: (saved: NoteMutationResponse, content: NoteDocument) => {
           // Previews, the version list and library search reflect the saved text.
           void queryClient.invalidateQueries({ queryKey: noteListsKey(studyId) });
@@ -379,6 +409,8 @@ export function NoteEditor({
               : old,
           );
           void invalidateLibrary(queryClient);
+          // Other tabs with this note open refetch it (ids and revision only).
+          announceSaved.current(saved.revision);
         },
       }),
   );
@@ -465,7 +497,22 @@ export function NoteEditor({
   }, [unsaved]);
 
   // Leaving the note (route change, closing) sends what is unsaved first.
-  useEffect(() => () => saver.dispose(), [saver]);
+  useEffect(() => {
+    saver.mounted();
+    return () => saver.dispose();
+  }, [saver]);
+
+  // Back online, or back in this tab (perhaps after signing in again elsewhere): resend what
+  // waits. Server acknowledgement alone still decides Saved.
+  useEffect(() => {
+    const resume = () => saver.reconnected();
+    window.addEventListener('online', resume);
+    window.addEventListener('focus', resume);
+    return () => {
+      window.removeEventListener('online', resume);
+      window.removeEventListener('focus', resume);
+    };
+  }, [saver]);
 
   const stopped = state.kind === 'conflict' || state.kind === 'locked' || state.kind === 'gone';
   // Read-only once the study or note is locked or gone (the draft stays visible). No update
@@ -507,27 +554,47 @@ export function NoteEditor({
     onClose();
   }
 
-  async function reloadLatest() {
+  // A conflict: snapshot this tab's text and read the server's current note to show beside it.
+  // Nothing is overwritten until the user chooses (BIB-37).
+  useEffect(() => {
+    onConflict.current = () => {
+      setServer(null);
+      setCombining(false);
+      setMineAtConflict(editor ? editor.getText({ blockSeparator: '\n' }) : '');
+      void loadServer().then((fresh) => {
+        if (fresh && saver.current.kind === 'conflict') setServer(fresh);
+      });
+    };
+  });
+
+  /** The note as the server holds it now; null (saying so) when it can't be read. */
+  async function loadServer(): Promise<NoteResponse | null> {
     setReloadProblem(false);
     try {
-      const fresh = await fetchNote(studyId, note.id);
-      queryClient.setQueryData(noteQueryKey(studyId, note.id), fresh);
-      editor?.commands.setContent(fresh.content, { emitUpdate: false });
-      saver.reset(fresh.revision, fresh.content);
-      setCloseProblem(null);
+      return await fetchNote(studyId, note.id);
     } catch {
       setReloadProblem(true);
+      return null;
     }
   }
 
-  async function keepMine() {
-    setReloadProblem(false);
-    try {
-      const fresh = await fetchNote(studyId, note.id);
-      saver.keepMine(fresh.revision);
-    } catch {
-      setReloadProblem(true);
-    }
+  /** "Keep server version": the editor shows the server's note; this tab's text is dropped. */
+  async function reloadLatest() {
+    const fresh = server ?? (await loadServer());
+    if (!fresh) return;
+    queryClient.setQueryData(noteQueryKey(studyId, note.id), fresh);
+    editor?.commands.setContent(fresh.content, { emitUpdate: false });
+    saver.reset(fresh.revision, fresh.content);
+    setCloseProblem(null);
+  }
+
+  /**
+   * "Save my version" or "Save combined version": the editor's text, saved from the server's
+   * current revision as a new version and logged as the conflict's resolution.
+   */
+  async function keepMine(resolution: NoteConflictResolution) {
+    const fresh = server ?? (await loadServer());
+    if (fresh) saver.keepMine(fresh.revision, resolution);
   }
 
   function restoreVersion(content: NoteDocument) {
@@ -799,17 +866,22 @@ export function NoteEditor({
             Retry
           </button>
         ) : null}
-        {state.kind === 'conflict' ? (
+        {state.kind === 'signed_out' ? (
           <>
-            <button type="button" onClick={() => void keepMine()} className="text-accent underline">
-              Keep mine
-            </button>
-            <button
-              type="button"
-              onClick={() => void reloadLatest()}
+            <a
+              href={`/sign-in?next=${encodeURIComponent('/studies')}`}
+              target="_blank"
+              rel="noopener"
               className="text-accent underline"
             >
-              Discard mine and reload latest
+              Sign in again (opens a new tab)
+            </a>
+            <button
+              type="button"
+              onClick={() => saver.reconnected()}
+              className="text-accent underline"
+            >
+              Retry
             </button>
           </>
         ) : null}
@@ -819,6 +891,67 @@ export function NoteEditor({
           </button>
         ) : null}
       </div>
+      {tabs.elsewhere ? <p className="text-sm text-muted">{SAVE_COPY.otherTab}</p> : null}
+      {state.kind === 'conflict' ? (
+        <section aria-label="Resolve conflict" className="flex flex-col gap-3 rounded border p-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <figure className="flex flex-col gap-1">
+              <figcaption className="text-sm font-medium">Your version</figcaption>
+              <p className="whitespace-pre-wrap rounded border border-muted p-2 text-sm">
+                {mineAtConflict}
+              </p>
+            </figure>
+            <figure className="flex flex-col gap-1">
+              <figcaption className="text-sm font-medium">Version saved elsewhere</figcaption>
+              <p className="whitespace-pre-wrap rounded border border-muted p-2 text-sm">
+                {server ? notePlainText(server.content) : 'Loading the saved version…'}
+              </p>
+            </figure>
+          </div>
+          {combining ? (
+            <p className="text-sm">
+              Edit your text in the note above, copying what you need from the version saved
+              elsewhere, then choose Save combined version.
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => void reloadLatest()}
+              className="rounded border border-muted px-3 py-1"
+            >
+              Keep server version
+            </button>
+            <button
+              type="button"
+              onClick={() => void keepMine('keep_mine')}
+              className="rounded border border-muted px-3 py-1"
+            >
+              Save my version
+            </button>
+            {combining ? (
+              <button
+                type="button"
+                onClick={() => void keepMine('combined')}
+                className="rounded border border-accent px-3 py-1 text-accent"
+              >
+                Save combined version
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setCombining(true);
+                  editor?.commands.focus();
+                }}
+                className="rounded border border-muted px-3 py-1"
+              >
+                Combine manually
+              </button>
+            )}
+          </div>
+        </section>
+      ) : null}
       {reloadProblem ? (
         <p role="alert" className="text-sm font-medium text-accent">
           Couldn&apos;t load the latest note. Your text is still here.

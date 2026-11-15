@@ -8,6 +8,7 @@ import { ApiError } from '@/lib/api-client';
 import {
   AUTOSAVE_IDLE_MS,
   AUTOSAVE_MAX_DELAY_MS,
+  AUTOSAVE_RETRY_DELAYS_MS,
   NoteAutosave,
   type SaveState,
 } from './note-autosave';
@@ -79,6 +80,7 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('saves 750 ms after typing stops, and says Saved only once the server acknowledged it', async () => {
@@ -168,9 +170,73 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     expect([states.at(-1), sent.length, saver.unsaved]).toStrictEqual(['conflict', 1, true]);
     saver.keepMine(5);
     expect(sent[1]).toMatchObject({
-      body: { expectedRevision: 5, content: doc('mine, still typing'), checkpoint: true },
+      body: {
+        expectedRevision: 5,
+        content: doc('mine, still typing'),
+        checkpoint: true,
+        resolution: 'keep_mine',
+      },
       key: 'key-2',
     });
+  });
+
+  it('retries an unknown outcome automatically with backoff and the same key, then leaves it to Retry (BIB-35)', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const saver = autosave();
+    saver.edited(doc('x'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    for (const [index, delay] of AUTOSAVE_RETRY_DELAYS_MS.entries()) {
+      sent[index]?.reject(new TypeError('network down'));
+      await settle();
+      expect(states.at(-1)).toBe('failed');
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(sent).toHaveLength(index + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sent[index + 1]).toMatchObject({ body: sent[0]?.body, key: 'key-1' });
+    }
+    sent.at(-1)?.reject(new TypeError('network down'));
+    await settle();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect([sent.length, states.at(-1), saver.unsaved]).toStrictEqual([6, 'failed', true]);
+  });
+
+  it('says Waiting to sync while offline, never Saved, and sends the frozen request once back online (BIB-35)', async () => {
+    const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    const saver = autosave();
+    saver.edited(doc('offline edit'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    online.mockReturnValue(false);
+    sent[0]?.reject(new TypeError('Failed to fetch'));
+    await settle();
+    saver.edited(doc('offline edit, more'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MAX_DELAY_MS * 2);
+    expect([sent.length, states.at(-1), saver.unsaved]).toStrictEqual([1, 'waiting', true]);
+    expect(states).not.toContain('saved');
+    online.mockReturnValue(true);
+    saver.reconnected();
+    expect(sent[1]).toMatchObject({ body: sent[0]?.body, key: 'key-1' });
+    sent[1]?.resolve(response(2));
+    await settle();
+    expect(sent[2]?.body).toStrictEqual({
+      expectedRevision: 2,
+      content: doc('offline edit, more'),
+    });
+    sent[2]?.resolve(response(3));
+    await settle();
+    expect([states.at(-1), saver.unsaved]).toStrictEqual(['saved', false]);
+  });
+
+  it('pauses on 401 with the draft kept, and resends the identical request once reconnected (BIB-37)', async () => {
+    const saver = autosave();
+    saver.edited(doc('mine'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_IDLE_MS);
+    sent[0]?.reject(new ApiError(401, { code: 'UNAUTHENTICATED' }));
+    await settle();
+    saver.edited(doc('mine, more'));
+    await vi.advanceTimersByTimeAsync(AUTOSAVE_MAX_DELAY_MS);
+    expect([sent.length, states.at(-1), saver.unsaved]).toStrictEqual([1, 'signed_out', true]);
+    saver.reconnected();
+    expect(sent[1]).toMatchObject({ body: sent[0]?.body, key: 'key-1' });
   });
 
   it('never sends a note over 50,000 characters and keeps it', async () => {

@@ -81,6 +81,14 @@ export const NOTE_TEXT_INVALID = 'Remove control or invalid characters';
 export const NOTE_MARK_REPEATED = 'Each formatting mark may appear once per text run';
 export const NOTE_EDIT_EMPTY = 'Send new content or ask for a checkpoint';
 export const NOTE_TOO_MANY_REFERENCES = `A note can have at most ${MAX_NOTE_REFERENCES} Bible reference links`;
+export const NOTE_RESOLUTION_NEEDS_CONTENT = 'Send the content that resolves the conflict';
+
+/**
+ * How a note revision conflict was resolved by a save (BIB-37; PRD section 27). "Keep server" writes
+ * nothing, so it has no value here.
+ */
+export const NOTE_CONFLICT_RESOLUTIONS = ['keep_mine', 'combined'] as const;
+export type NoteConflictResolution = (typeof NOTE_CONFLICT_RESOLUTIONS)[number];
 export const NOTE_TARGET_EXCLUSIVE = 'Attach a note to a node or to a passage, not both';
 
 // ---------------------------------------------------------------------------------------------
@@ -436,9 +444,19 @@ export const updateNoteRequestSchema = z
     expectedRevision: expectedRevisionSchema,
     content: noteDocumentSchema.optional(),
     checkpoint: z.literal(true).optional(),
+    /**
+     * BIB-37: this save resolves a revision conflict by the user's explicit choice ("Save my
+     * version" or a manual combination). It needs `content`, always asks for a version, and is
+     * logged as `note_conflict_resolved` instead of `note_autosaved`.
+     */
+    resolution: z.enum(NOTE_CONFLICT_RESOLUTIONS).optional(),
   })
   .refine((body) => body.content !== undefined || body.checkpoint !== undefined, {
     message: NOTE_EDIT_EMPTY,
+  })
+  .refine((body) => body.resolution === undefined || body.content !== undefined, {
+    message: NOTE_RESOLUTION_NEEDS_CONTENT,
+    path: ['content'],
   });
 
 export type UpdateNoteRequest = z.infer<typeof updateNoteRequestSchema>;

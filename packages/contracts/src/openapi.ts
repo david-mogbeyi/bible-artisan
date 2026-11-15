@@ -564,7 +564,7 @@ function buildDocument(): OpenApiDocument {
           },
         },
         patch: {
-          description: `Saves new content (an autosave) and/or a checkpoint. expectedRevision is the note's. A version is written for checkpoint: true, or when the content changed and the newest version is at least ${NOTE_CHECKPOINT_INTERVAL_SECONDS} seconds old by the database clock, never as a copy of the newest version; only the newest ${MAX_NOTE_VERSIONS} versions are kept. contentRevision moves only when a version is written. note_autosaved {noteId, versionId}. Nothing to change is 422 NOTE_UNCHANGED; a note in the trash is 422 NOTE_TRASHED. The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
+          description: `Saves new content (an autosave) and/or a checkpoint. expectedRevision is the note's. A version is written for checkpoint: true, or when the content changed and the newest version is at least ${NOTE_CHECKPOINT_INTERVAL_SECONDS} seconds old by the database clock, never as a copy of the newest version; only the newest ${MAX_NOTE_VERSIONS} versions are kept. contentRevision moves only when a version is written. note_autosaved {noteId, versionId}. resolution (keep_mine | combined) marks a save that resolves a revision conflict by the user's explicit choice: it needs content, always asks for a version, and is logged as note_conflict_resolved {noteId, versionId, resolution} instead. Nothing to change is 422 NOTE_UNCHANGED; a note in the trash is 422 NOTE_TRASHED. The response carries no content. ${NOTE_DOCUMENT_RULES} ${NOTE_MUTATION_RULES}`,
           security: sessionCookie,
           parameters: [idempotencyKeyHeader, studyIdParam, uuidPathParam('noteId')],
           requestBody: jsonBody('UpdateNoteRequest'),

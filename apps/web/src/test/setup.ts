@@ -2,8 +2,49 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach } from 'vitest';
 
+/**
+ * Node's BroadcastChannel reaches every channel of the worker, so a message from one test's tab
+ * could land in the next test. An in-memory stand-in with the same delivery (to every other open
+ * channel of the name, asynchronously), closed after each test (BIB-37's cross-tab coordination).
+ */
+class TestBroadcastChannel extends EventTarget {
+  private static open = new Set<TestBroadcastChannel>();
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  private closed = false;
+
+  constructor(readonly name: string) {
+    super();
+    TestBroadcastChannel.open.add(this);
+  }
+
+  static closeAll(): void {
+    for (const channel of TestBroadcastChannel.open) channel.close();
+  }
+
+  postMessage(data: unknown): void {
+    if (this.closed) throw new Error('BroadcastChannel is closed');
+    const copy: unknown = structuredClone(data);
+    for (const other of TestBroadcastChannel.open) {
+      if (other === this || other.name !== this.name) continue;
+      setTimeout(() => {
+        if (other.closed) return;
+        const event = new MessageEvent('message', { data: copy });
+        other.onmessage?.(event);
+        other.dispatchEvent(event);
+      }, 0);
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    TestBroadcastChannel.open.delete(this);
+  }
+}
+Object.assign(globalThis, { BroadcastChannel: TestBroadcastChannel });
+
 afterEach(() => {
   cleanup();
+  TestBroadcastChannel.closeAll();
 });
 
 // jsdom implements <dialog> without its methods. A minimal model of the browser's, for BIB-22's

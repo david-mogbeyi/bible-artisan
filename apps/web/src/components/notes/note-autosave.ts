@@ -4,6 +4,7 @@ import {
   NOTE_TRASHED,
   NOTE_UNCHANGED,
   NOTE_REFERENCE_INVALID,
+  type NoteConflictResolution,
   noteCharacterCount,
   type NoteDocument,
   type NoteMutationResponse,
@@ -18,6 +19,11 @@ import { classifyNoteFieldErrors, type NoteContentProblem, type NoteDraft } from
 /** PRD section 27: text saves after 750 ms idle, at most five seconds after the first change. */
 export const AUTOSAVE_IDLE_MS = 750;
 export const AUTOSAVE_MAX_DELAY_MS = 5000;
+/**
+ * PRD section 27: an unknown outcome is retried automatically, with the same key, after about 1,
+ * 2, 4, 8 and 30 seconds (with jitter); after that only Retry sends it again.
+ */
+export const AUTOSAVE_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 30_000] as const;
 
 /**
  * What the editor shows about saving (PRD section 27 save indicator). Only `saved` says Saved,
@@ -30,6 +36,16 @@ export type SaveState =
   | { kind: 'saving' }
   /** The outcome is unknown (network, 5xx, 429, 503): Retry resends the identical request. */
   | { kind: 'failed'; error: unknown }
+  /**
+   * BIB-35: the browser is offline. Nothing is sent; the unsaved work (and any request whose
+   * outcome is unknown) is sent once the connection is back. Never says Saved.
+   */
+  | { kind: 'waiting' }
+  /**
+   * BIB-37: the session expired (401). Autosave pauses and the draft stays in this tab; after the
+   * user signs in again (in another tab) the identical request is resent.
+   */
+  | { kind: 'signed_out' }
   /** 409: the note changed elsewhere. Autosave stops; the draft stays. */
   | { kind: 'conflict' }
   /** Over the character limit: nothing is sent; the draft stays. */
@@ -88,6 +104,8 @@ const sameContent = (a: NoteDocument, b: NoteDocument): boolean => canonical(a) 
 /** States in which unsaved work can't be sent by closing (the note stays open). */
 const CLOSE_BLOCKING: ReadonlySet<SaveState['kind']> = new Set([
   'conflict',
+  'waiting',
+  'signed_out',
   'locked',
   'gone',
   'too_long',
@@ -118,6 +136,12 @@ export class NoteAutosave {
   private checkpointWanted = false;
   /** Autosave is stopped by a conflict, a lifecycle refusal or a 404 until the user acts. */
   private stopped = false;
+  /** Set by `keepMine`: the next request resolves a conflict this way (BIB-37). */
+  private resolutionWanted: NoteConflictResolution | null = null;
+  /** Automatic retries of the current unknown outcome so far (reset by any answer). */
+  private retries = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
   private state: SaveState = { kind: 'saved' };
@@ -246,6 +270,11 @@ export class NoteAutosave {
   flush(): void {
     this.clearTimers();
     if (this.stopped || this.inFlight !== null) return;
+    if (!this.isOnline()) {
+      // Offline (PRD section 27): wait for the connection rather than fail; `reconnected` sends.
+      if (this.unsaved || this.checkpointWanted) this.setState({ kind: 'waiting' });
+      return;
+    }
     let attempt = this.frozen;
     if (attempt === null) {
       const draft = this.readLatest();
@@ -253,6 +282,7 @@ export class NoteAutosave {
       const doc = draft.doc;
       if (characterCount(doc) > MAX_NOTE_CHARACTERS) return this.setState({ kind: 'too_long' });
       const checkpoint = this.checkpointWanted;
+      const resolution = this.resolutionWanted;
       if (!checkpoint && sameContent(doc, this.acknowledged)) {
         return this.setState({ kind: 'saved' });
       }
@@ -262,9 +292,11 @@ export class NoteAutosave {
           expectedRevision: this.revision,
           content: doc,
           ...(checkpoint ? { checkpoint: true as const } : {}),
+          ...(resolution ? { resolution } : {}),
         },
       };
       this.checkpointWanted = false;
+      this.resolutionWanted = null;
     }
     this.inFlight = attempt;
     this.frozen = attempt;
@@ -278,14 +310,32 @@ export class NoteAutosave {
 
   /**
    * After a conflict: continue from the server's current revision with this editor's content,
-   * saved as a new checkpoint ("Keep mine": an explicit choice, with a new key).
+   * saved as a new checkpoint and logged as the conflict's resolution ("Save my version", or a
+   * manual combination: an explicit choice, with a new key; BIB-37).
    */
-  keepMine(serverRevision: number): void {
+  keepMine(serverRevision: number, resolution: NoteConflictResolution = 'keep_mine'): void {
     this.revision = serverRevision;
     this.frozen = null;
     this.stopped = false;
     this.checkpointWanted = true;
+    this.resolutionWanted = resolution;
+    // The editor may hold edits made during the conflict (a manual combination): read them.
+    this.dirty = this.dirty || this.read !== undefined;
     this.flush();
+  }
+
+  /**
+   * The connection is back (`online`), or the user may have signed in again (the tab regained
+   * focus): resend what waits. Does nothing in any other state.
+   */
+  reconnected(): void {
+    if (this.state.kind !== 'waiting' && this.state.kind !== 'signed_out') return;
+    this.stopped = false;
+    this.flush();
+  }
+
+  private isOnline(): boolean {
+    return typeof navigator === 'undefined' || navigator.onLine !== false;
   }
 
   /** The editor now shows `content` as the server holds it at `revision` ("Reload latest"). */
@@ -298,6 +348,7 @@ export class NoteAutosave {
     this.frozen = null;
     this.stopped = false;
     this.checkpointWanted = false;
+    this.resolutionWanted = null;
     this.setState({ kind: 'saved' });
   }
 
@@ -308,14 +359,22 @@ export class NoteAutosave {
     this.checkpoint();
   }
 
+  /** The editor is mounted (again, after a Strict Mode remount): automatic retries may run. */
+  mounted(): void {
+    this.disposed = false;
+  }
+
   /** The editor is closing or unmounting: send what is unsaved, then stop the timers. */
   dispose(): void {
     if (this.unsaved && this.inFlight === null) this.flush();
     this.clearTimers();
+    // Nothing is retried on its own once the editor is gone.
+    this.disposed = true;
   }
 
   private succeeded(attempt: Attempt, response: NoteMutationResponse): void {
     this.inFlight = null;
+    this.retries = 0;
     if (this.frozen === attempt) this.frozen = null;
     this.revision = response.revision;
     if (attempt.body.content) this.acknowledged = attempt.body.content;
@@ -326,12 +385,25 @@ export class NoteAutosave {
 
   private failed(attempt: Attempt, error: unknown): void {
     this.inFlight = null;
+    if (!(error instanceof ApiError) && !this.isOnline()) {
+      // The connection dropped: the outcome is unknown, so the request stays frozen for replay.
+      return this.setState({ kind: 'waiting' });
+    }
+    if (error instanceof ApiError && error.status === 401) {
+      // Not committed, but resending the identical request after sign-in is harmless; the draft
+      // stays here and autosave pauses until `reconnected` (BIB-37).
+      this.retries = 0;
+      this.stopped = true;
+      return this.setState({ kind: 'signed_out' });
+    }
     const definite = error instanceof ApiError && error.status >= 400 && error.status < 500;
     const retryable = error instanceof ApiError && error.status === 429;
     if (definite && !retryable && this.frozen === attempt) this.frozen = null;
     if (!(error instanceof ApiError) || error.status >= 500 || retryable) {
-      return this.setState({ kind: 'failed', error });
+      this.setState({ kind: 'failed', error });
+      return this.scheduleRetry(error);
     }
+    this.retries = 0;
     if (error.status === 409) {
       this.stopped = true;
       return this.setState({ kind: 'conflict' });
@@ -379,10 +451,27 @@ export class NoteAutosave {
     }
   }
 
+  /** Backoff with jitter (or the server's Retry-After); after the last step only Retry sends. */
+  private scheduleRetry(error: unknown): void {
+    const base = AUTOSAVE_RETRY_DELAYS_MS[this.retries];
+    if (base === undefined || this.disposed) return;
+    this.retries += 1;
+    const after =
+      error instanceof ApiError && error.retryAfterSeconds !== undefined
+        ? error.retryAfterSeconds * 1000
+        : base * (0.8 + Math.random() * 0.4);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.state.kind === 'failed') this.flush();
+    }, after);
+  }
+
   private clearTimers(): void {
     if (this.idleTimer !== null) clearTimeout(this.idleTimer);
     if (this.maxTimer !== null) clearTimeout(this.maxTimer);
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
     this.idleTimer = null;
     this.maxTimer = null;
+    this.retryTimer = null;
   }
 }
