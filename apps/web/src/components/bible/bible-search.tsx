@@ -185,13 +185,13 @@ export function ReferenceSearch({ translation, navigation, onOpenVerse }: Refere
             />
             <label htmlFor={phraseId}>Exact phrase</label>
           </span>
-          <span className="flex items-center gap-2">
+          <span className="flex min-w-0 max-w-full items-center gap-2">
             <label htmlFor={bookId}>Search in</label>
             <select
               id={bookId}
               value={book}
               onChange={(event) => setBook(event.target.value)}
-              className="rounded border border-muted bg-canvas px-2 py-1"
+              className="min-w-0 rounded border border-muted bg-canvas px-2 py-1"
             >
               <option value="">All books</option>
               {translation.books.map((b) => (

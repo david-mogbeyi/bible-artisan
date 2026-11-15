@@ -63,6 +63,7 @@ import {
   queueNoteSave,
 } from '@/lib/offline-queue';
 import { invalidateLibrary } from '@/lib/studies';
+import { invalidateThread } from '@/lib/thread';
 import { MAKE_NODE_COPY, MakeNodeForm } from './make-node-form';
 import { MENTION_COPY, MentionNodeForm } from './mention-node-form';
 import { NOTE_LINK_REL, NOTE_LINK_TARGET } from './note-content';
@@ -466,8 +467,9 @@ export function NoteEditor({
           if (next.kind === 'conflict') onConflict.current();
         },
         onSaved: (saved: NoteMutationResponse, content: NoteDocument) => {
-          // Previews, the version list and library search reflect the saved text.
+          // Previews, the version list, library search and the thread reflect the saved text.
           void queryClient.invalidateQueries({ queryKey: noteListsKey(studyId) });
+          void invalidateThread(queryClient, studyId);
           void queryClient.invalidateQueries({ queryKey: noteVersionsQueryKey(studyId, note.id) });
           // The cached note becomes exactly what the server acknowledged: the content sent with
           // the revision it produced, never one version's content with another's revision.
@@ -862,6 +864,7 @@ export function NoteEditor({
       await changeNoteState(studyId, note.id, 'trash', attempt.revision, attempt.key);
       trashAttempt.current = null;
       void queryClient.invalidateQueries({ queryKey: noteListsKey(studyId) });
+      void invalidateThread(queryClient, studyId);
       void queryClient.invalidateQueries({ queryKey: noteQueryKey(studyId, note.id) });
       void invalidateLibrary(queryClient);
       onClose();

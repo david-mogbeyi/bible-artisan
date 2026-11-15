@@ -31,6 +31,21 @@ body {
   overflow-wrap: break-word;
 }
 
+/* NFR-ACCESS-003 (BIB-38): a form control never pushes a phone-width page into horizontal scrolling.
+   A select is as wide as its longest option (a node label, a book or translation name) and a
+   fieldset is at least as wide as its content (`min-inline-size: min-content`), so both may
+   shrink to their container instead. In the base layer, so a utility class still wins. */
+@layer base {
+  fieldset {
+    min-inline-size: 0;
+  }
+  select,
+  input,
+  textarea {
+    max-inline-size: 100%;
+  }
+}
+
 :focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;

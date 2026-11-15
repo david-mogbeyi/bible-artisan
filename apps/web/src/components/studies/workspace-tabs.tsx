@@ -1,6 +1,6 @@
 'use client';
 
-import { type KeyboardEvent, type ReactNode, useEffect, useRef } from 'react';
+import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from 'react';
 import { useGraphViewStore } from '@/lib/graph-store';
 
 /** The narrow-screen workspace tabs, in the PRD's order (section 11, Study Workspace). */
@@ -17,6 +17,13 @@ export const WORKSPACE_TAB_LABELS: Record<WorkspaceTab, string> = {
 
 /** The sticky tab list's height, which the page keeps as scroll padding (globals.css). */
 export const STICKY_HEIGHT_VAR = '--workspace-tabs-height';
+
+/**
+ * The tab list sticks to the top only while it takes at most this share of the viewport height.
+ * At 200% text on a phone it wraps to one tab per row (about half the screen at 375 px, most of
+ * it at 320 px), and a sticky list that tall would leave almost no room for the panel (BIB-53).
+ */
+export const MAX_STICKY_SHARE = 0.25;
 
 export const tabId = (base: string, tab: WorkspaceTab) => `${base}-tab-${tab}`;
 export const panelId = (base: string, tab: WorkspaceTab) => `${base}-panel-${tab}`;
@@ -39,20 +46,28 @@ export function WorkspaceTabList({
 }) {
   const refs = useRef(new Map<WorkspaceTab, HTMLButtonElement>());
   const list = useRef<HTMLDivElement>(null);
+  const [sticky, setSticky] = useState(true);
 
-  // BIB-53 (WCAG 2.4.11): the tab list sticks to the top, so the page keeps that much scroll
-  // padding (globals.css) and a focused control is never scrolled in under it. It is measured, as
-  // it wraps to more rows at 200% text or on a phone.
+  // BIB-53 (WCAG 2.4.11): while the tab list sticks to the top, the page keeps that much scroll
+  // padding (globals.css) so a focused control is never scrolled in under it. It is measured, as
+  // it wraps to more rows at 200% text or on a phone; once it would cover more than
+  // MAX_STICKY_SHARE of the viewport it scrolls away with the page instead (and needs no padding).
   useEffect(() => {
     const element = list.current;
     if (!element) return;
     const root = document.documentElement;
-    const observer = new ResizeObserver(() => {
-      root.style.setProperty(STICKY_HEIGHT_VAR, `${element.offsetHeight}px`);
-    });
+    const measure = () => {
+      const height = element.offsetHeight;
+      const fits = height <= window.innerHeight * MAX_STICKY_SHARE;
+      setSticky(fits);
+      root.style.setProperty(STICKY_HEIGHT_VAR, `${fits ? height : 0}px`);
+    };
+    const observer = new ResizeObserver(measure);
     observer.observe(element);
+    window.addEventListener('resize', measure);
     return () => {
       observer.disconnect();
+      window.removeEventListener('resize', measure);
       root.style.removeProperty(STICKY_HEIGHT_VAR);
     };
   }, []);
@@ -87,7 +102,7 @@ export function WorkspaceTabList({
       role="tablist"
       aria-label="Study workspace"
       onKeyDown={onKeyDown}
-      className="sticky top-0 z-10 -mx-4 flex flex-wrap gap-2 border-b border-muted bg-canvas px-4 py-2"
+      className={`${sticky ? 'sticky top-0 z-10 ' : ''}-mx-4 flex flex-wrap gap-2 border-b border-muted bg-canvas px-4 py-2`}
     >
       {WORKSPACE_TABS.map((tab) => {
         const isSelected = tab === selected;

@@ -9,6 +9,7 @@ import {
 import type { QueryClient } from '@tanstack/react-query';
 import { apiFetch } from './api-client';
 import { limitsQueryKey } from './limits';
+import { invalidateThread } from './thread';
 
 /**
  * Graph snapshot and layout data access (BIB-28). These are the library-independent domain DTOs:
@@ -46,12 +47,14 @@ export function savePositions(
 }
 
 /**
- * After a node or relationship change elsewhere on the page, so the canvas shows it, and the
- * safety-cap usage (BIB-52) follows the new counts.
+ * After a node or relationship change elsewhere on the page, so the canvas shows it, the
+ * safety-cap usage (BIB-52) follows the new counts, and the Study Thread shows the event the change
+ * recorded.
  */
 export async function invalidateGraph(queryClient: QueryClient, studyId: string): Promise<void> {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: graphQueryKey(studyId) }),
     queryClient.invalidateQueries({ queryKey: limitsQueryKey(studyId) }),
+    invalidateThread(queryClient, studyId),
   ]);
 }

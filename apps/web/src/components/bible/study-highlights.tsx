@@ -41,6 +41,7 @@ import { classifyError, isRetryable } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
 import { createNote, noteListsKey } from '@/lib/notes';
 import { fetchStudy, invalidateLibrary, studyQueryKey } from '@/lib/studies';
+import { invalidateThread } from '@/lib/thread';
 import { AnchorQuote } from './anchor-quote';
 import type { CodePointRange } from './code-point-runs';
 import { ProblemAlert } from './problem-alert';
@@ -378,6 +379,7 @@ export function CapturedActions({
       adoptRevision(created.studyRevision);
       await queryClient.invalidateQueries({ queryKey: annotationListsKey(study.id) });
       void invalidateLibrary(queryClient);
+      void invalidateThread(queryClient, study.id);
       setOpen(false);
       setLabel('');
       onAnnounce(`${HIGHLIGHT_COLOR_NAMES[color]} highlight saved on ${captured.reference.label}.`);
@@ -406,6 +408,7 @@ export function CapturedActions({
       adoptRevision(created.studyRevision);
       void queryClient.invalidateQueries({ queryKey: noteListsKey(study.id) });
       void invalidateLibrary(queryClient);
+      void invalidateThread(queryClient, study.id);
       setNoted(true);
       onAnnounce(`Note added on ${captured.reference.label}.`);
     } catch (error) {
@@ -554,7 +557,12 @@ function HighlightItem({
     if (editing) formRef.current?.querySelector('input')?.focus();
   }, [editing]);
 
-  const refresh = () => queryClient.invalidateQueries({ queryKey: annotationListsKey(study.id) });
+  // An edit or delete also recorded a Study Thread event.
+  const refresh = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: annotationListsKey(study.id) }),
+      invalidateThread(queryClient, study.id),
+    ]);
 
   const saveEdit = async (event?: FormEvent) => {
     event?.preventDefault();

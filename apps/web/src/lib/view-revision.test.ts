@@ -37,7 +37,7 @@ afterEach(() => {
 const sent = () =>
   fetchMock.mock.calls.map(([url, init]) => ({
     path: new URL(url).pathname.replace(/^\/v1/, ''),
-    body: JSON.parse(init?.body as string) as unknown,
+    body: init?.body === undefined ? undefined : (JSON.parse(init.body as string) as unknown),
   }));
 
 describe('the view-revision lane', () => {
@@ -87,6 +87,7 @@ describe('the view-revision lane', () => {
 
   it('keeps going after a failed write: the next one still runs', async () => {
     const queryClient = new QueryClient();
+    queryClient.setQueryData(graphQueryKey(STUDY_ID), { viewRevision: 1 });
     fetchMock.mockImplementationOnce(() => Promise.reject(new TypeError('offline')));
     fetchMock.mockImplementationOnce(() => Promise.resolve(viewStateReply(2)));
     await expect(
@@ -96,6 +97,59 @@ describe('the view-revision lane', () => {
     expect(sent().map((call) => call.body)).toStrictEqual([
       { expectedRevision: 1, selectedNodeId: NODE_ID },
       { expectedRevision: 1, selectedNodeId: NODE_ID },
+    ]);
+  });
+
+  it('reads the saved revision first when the tab knows none, so the first save does not 409 (the reader opened on its own)', async () => {
+    const queryClient = new QueryClient();
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        jsonResponse(200, {
+          studyId: STUDY_ID,
+          title: 'T',
+          lifecycle: 'active',
+          lastActivityAt: '2026-10-01T12:00:00.000Z',
+          activeQuestion: null,
+          activeBranch: null,
+          lastPassage: null,
+          recentConclusion: null,
+          openQuestions: { items: [], total: 0 },
+          target: {
+            kind: 'study',
+            nodeId: null,
+            referenceId: null,
+            branchId: null,
+            fallback: false,
+          },
+          viewState: {
+            viewRevision: 22,
+            selectedNodeId: null,
+            activeBranchId: null,
+            activeQuestionNodeId: null,
+            readerReferenceId: null,
+            viewport: null,
+            panes: null,
+            contextSavedAt: null,
+          },
+        }),
+      ),
+    );
+    fetchMock.mockImplementationOnce(() => Promise.resolve(viewStateReply(23)));
+    fetchMock.mockImplementationOnce(() => Promise.resolve(viewStateReply(24)));
+
+    await patchViewState(queryClient, STUDY_ID, { selectedNodeId: NODE_ID });
+    // The next save already knows the revision: no second read.
+    await patchViewState(queryClient, STUDY_ID, { selectedNodeId: null });
+    expect(sent()).toStrictEqual([
+      { path: `/studies/${STUDY_ID}/resume`, body: undefined },
+      {
+        path: `/studies/${STUDY_ID}/view-state`,
+        body: { expectedRevision: 22, selectedNodeId: NODE_ID },
+      },
+      {
+        path: `/studies/${STUDY_ID}/view-state`,
+        body: { expectedRevision: 23, selectedNodeId: null },
+      },
     ]);
   });
 });
