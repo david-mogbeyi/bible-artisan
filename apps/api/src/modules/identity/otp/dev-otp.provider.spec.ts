@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DevOtpProvider } from './dev-otp.provider';
+import { DEV_FIXED_OTP_CODE, DevOtpProvider } from './dev-otp.provider';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -44,6 +44,32 @@ describe('DevOtpProvider', () => {
     await expect(provider.verify(providerRef, second)).resolves.toStrictEqual({
       status: 'expired',
     });
+  });
+
+  it('uses the fixed code 000000 in development, still single use', async () => {
+    const provider = new DevOtpProvider('development');
+    const { providerRef } = await provider.send('d@example.test');
+    expect(provider.latestCodeFor('d@example.test')).toBe(DEV_FIXED_OTP_CODE);
+    await expect(provider.verify(providerRef, '111111')).resolves.toStrictEqual({
+      status: 'invalid',
+    });
+    await expect(provider.verify(providerRef, '000000')).resolves.toStrictEqual({
+      status: 'ok',
+      subject: expect.stringMatching(/^dev\|[0-9a-f]{32}$/),
+    });
+    await expect(provider.verify(providerRef, '000000')).resolves.toStrictEqual({
+      status: 'expired',
+    });
+  });
+
+  it('keeps random codes outside development', async () => {
+    const provider = new DevOtpProvider('test');
+    const codes = new Set<string>();
+    for (let i = 0; i < 5; i += 1) {
+      await provider.send(`r${i}@example.test`);
+      codes.add(provider.latestCodeFor(`r${i}@example.test`) ?? '');
+    }
+    expect(codes.size).toBeGreaterThan(1);
   });
 
   it('writes the latest code to the outbox file (owner-only) when configured', async () => {
