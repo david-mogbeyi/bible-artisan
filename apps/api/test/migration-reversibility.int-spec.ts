@@ -61,8 +61,14 @@ const DELETED_WITH_REFUSED =
 const SESSIONS_MIGRATION = '20261115130000_add_study_sessions_and_resume_context.ts';
 const SESSIONS_REFUSED =
   'study session drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-47's export files and BIB-48's account deletion migrations. */
+const EXPORT_MIGRATION = '20261115140000_create_export_file.ts';
+const ACCOUNT_DELETION_MIGRATION = '20261115140001_add_account_deletion.ts';
+const ACCOUNT_DELETION_REFUSED =
+  'account deletion drop refused: accounts or deletion tombstones exist (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
+  'account_deletion',
   'ai_job',
   'ai_result',
   'annotation',
@@ -73,6 +79,7 @@ const DOMAIN_TABLES = [
   'bible_superscription',
   'bible_verse',
   'context_manifest',
+  'export_file',
   'mutation_receipt',
   'node_version',
   'node_version_evidence',
@@ -281,12 +288,12 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
 
-      // No opt-in at all: the newest migration (BIB-33's sessions) is the first `down`
+      // No opt-in at all: the newest migration (BIB-48's account deletion) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: SESSIONS_REFUSED,
+        message: ACCOUNT_DELETION_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -575,11 +582,54 @@ describe('migration reversibility', () => {
     }
   });
 
+  it('reverts and re-applies account deletion (BIB-48) only with the study-data opt-in, and export files (BIB-47); tombstones, the mark and the table come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.slice(-2)).toStrictEqual([EXPORT_MIGRATION, ACCOUNT_DELETION_MIGRATION]);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: ACCOUNT_DELETION_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await columns(['user'])).toContain('user.deletion_requested_at');
+
+      await withStudyDataDropAllowed(() => migrator.down({ to: EXPORT_MIGRATION }));
+      expect(await publicTables(db, ['account_deletion', 'export_file'])).toStrictEqual([]);
+      expect(await columns(['user'])).not.toContain('user.deletion_requested_at');
+
+      await migrator.up();
+      expect(await publicTables(db, ['account_deletion', 'export_file'])).toStrictEqual([
+        'account_deletion',
+        'export_file',
+      ]);
+      expect(await columns(['user', 'account_deletion'])).toStrictEqual(
+        expect.arrayContaining([
+          'user.deletion_requested_at',
+          'account_deletion.user_id',
+          'account_deletion.requested_at',
+          'account_deletion.purged_at',
+        ]),
+      );
+      // The seeded account survived both directions.
+      const survivors = await db.query(`SELECT 1 FROM "user" WHERE id = $1`, {
+        bind: [userId],
+        type: QueryTypes.SELECT,
+      });
+      expect(survivors).toHaveLength(1);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
   it('reverts and re-applies the edge deleted-with column (BIB-31) and established observations (BIB-62) only with the study-data opt-in; the observation markers are cleared and the narrower CHECK comes back', async () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
     try {
-      // A later migration (BIB-33's sessions) steps down first.
+      // Later migrations (BIB-33's sessions, BIB-47's and BIB-48's) step down first.
       await withStudyDataDropAllowed(() => migrator.down({ to: SESSIONS_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(DELETED_WITH_MIGRATION);
@@ -621,7 +671,12 @@ describe('migration reversibility', () => {
       expect(narrower).toMatchObject({ parent: expect.objectContaining({ code: '23514' }) });
 
       await migrator.up();
-      expect(await recordedMigrations(db)).toStrictEqual([...before, SESSIONS_MIGRATION]);
+      expect(await recordedMigrations(db)).toStrictEqual([
+        ...before,
+        SESSIONS_MIGRATION,
+        EXPORT_MIGRATION,
+        ACCOUNT_DELETION_MIGRATION,
+      ]);
       expect(await columns(['study_edge'])).toContain('study_edge.deleted_with_node_id');
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
@@ -715,6 +770,8 @@ describe('migration reversibility', () => {
     try {
       const schemaBefore = await sessionSchema();
       expect(schemaBefore.map((row) => row.name)).toContain('study_session_open_tab_key');
+      // Past the later migrations (BIB-47, BIB-48), which refuse first from latest.
+      await withStudyDataDropAllowed(() => migrator.down({ to: EXPORT_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(SESSIONS_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);

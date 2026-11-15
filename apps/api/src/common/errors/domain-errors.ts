@@ -4,7 +4,9 @@ import {
   type AI_SPEND_CAP_REACHED,
   AI_UNAVAILABLE,
   type AiRuleErrorCode,
+  ACCOUNT_DELETED,
   type AnchorProblemCode,
+  EXPORT_LINK_EXPIRED,
   ANNOTATION_LIMIT_EXCEEDED,
   ANNOTATION_UNCHANGED,
   BRANCH_ERROR_MESSAGES,
@@ -407,5 +409,30 @@ export class AiQuotaError extends Error {
   ) {
     super(AI_ERROR_MESSAGES[code]);
     this.name = 'AiQuotaError';
+  }
+}
+
+/**
+ * An export download link whose signature is valid but which is older than 15 minutes (BIB-47;
+ * PRD section 24). 422: the client asks `GET /v1/exports/:exportId` for a fresh link. A link
+ * with a bad signature, another user's, or an expired export is a plain 404 instead.
+ */
+export class ExportLinkExpiredError extends Error {
+  readonly code = EXPORT_LINK_EXPIRED;
+  constructor() {
+    super('This download link has expired. Request a new one');
+    this.name = 'ExportLinkExpiredError';
+  }
+}
+
+/**
+ * Sign-in for an account whose deletion was confirmed (BIB-48; FR-PRIVACY-001: "sign-in is
+ * disabled immediately"). 422 with a fixed message; the challenge is not consumed.
+ */
+export class AccountDeletedError extends Error {
+  readonly code = ACCOUNT_DELETED;
+  constructor() {
+    super('This account was deleted and can no longer sign in');
+    this.name = 'AccountDeletedError';
   }
 }

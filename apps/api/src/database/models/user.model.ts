@@ -55,4 +55,8 @@ export class User extends Model {
     defaultValue: DataType.NOW,
   })
   declare createdAt: Date;
+
+  /** BIB-48: when the owner confirmed account deletion (database clock); null while active. */
+  @Column({ field: 'deletion_requested_at', type: DataType.DATE, allowNull: true })
+  declare deletionRequestedAt: Date | null;
 }

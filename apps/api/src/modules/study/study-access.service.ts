@@ -81,6 +81,20 @@ export class StudyAccessService {
   }
 
   /**
+   * Every study of the owner still inside its recovery window (active, archived and trashed),
+   * oldest first: the account export (BIB-48). A study past its window is absent here too.
+   */
+  async ownedStudies(ownerId: string): Promise<Study[]> {
+    return Study.findAll({
+      where: { ownerId, ...withinRecoveryWindow() },
+      order: [
+        ['createdAt', 'ASC'],
+        ['id', 'ASC'],
+      ],
+    });
+  }
+
+  /**
    * Nodes of the owner's study `studyId` with these ids, soft-deleted ones included (BIB-23: a
    * note keeps its target after the node is deleted, for orphaned-note review). Callers resolve
    * the study first (`requireOwnedStudy`, or the mutation's lock); the query is still scoped by

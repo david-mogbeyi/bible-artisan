@@ -99,6 +99,12 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'export_file_study_owner_fk',
+        table: 'export_file',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'node_version_study_owner_fk',
         table: 'node_version',
         columns: ['owner_id', 'study_id'],

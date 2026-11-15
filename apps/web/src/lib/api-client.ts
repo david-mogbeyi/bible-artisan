@@ -3,6 +3,14 @@ import type { z } from 'zod';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000/v1';
 
+/**
+ * An absolute URL for a path the API returned (e.g. an export's `/v1/exports/…/download?…`), for
+ * a top-level navigation such as a file download that `apiFetch` cannot make.
+ */
+export function apiHref(path: string): string {
+  return new URL(path, API_URL).href;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,

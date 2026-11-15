@@ -78,6 +78,66 @@ describe('buildOpenApiDocument', () => {
         default: errorResponse,
       },
     });
+    // BIB-47 / BIB-48: study and account exports.
+    const EXPORT_RULES = ['no expectedRevision', '24 hours', '15 minutes', SAME_404];
+    const phrases = (list: string[]): unknown =>
+      expect.stringMatching(new RegExp(list.map((phrase) => `(?=[\\s\\S]*${phrase})`).join('')));
+    const created = {
+      201: { description: 'The export, ready to download', content: json('ExportResponse') },
+      default: errorResponse,
+    };
+    const exportId = uuidParam('exportId');
+    const exportPaths = {
+      '/studies/{studyId}/exports': {
+        post: {
+          description: phrases(['versioned JSON', 'Markdown', 'rights', ...EXPORT_RULES]),
+          security: [{ sessionCookie: [] }],
+          parameters: [studyId],
+          requestBody: { required: true, content: json('CreateExportRequest') },
+          responses: created,
+        },
+      },
+      '/me/exports': {
+        post: {
+          description: phrases(['whole account', ...EXPORT_RULES]),
+          security: [{ sessionCookie: [] }],
+          requestBody: { required: true, content: json('CreateExportRequest') },
+          responses: created,
+        },
+      },
+      '/exports/{exportId}': {
+        get: {
+          description: phrases(['fresh download link', ...EXPORT_RULES]),
+          security: [{ sessionCookie: [] }],
+          parameters: [exportId],
+          responses: {
+            200: { description: 'The export', content: json('ExportResponse') },
+            default: errorResponse,
+          },
+        },
+      },
+      '/exports/{exportId}/download': {
+        get: {
+          description: phrases(['attachment', '422 EXPORT_LINK_EXPIRED', ...EXPORT_RULES]),
+          security: [{ sessionCookie: [] }],
+          parameters: [
+            exportId,
+            { name: 'expires', in: 'query', required: true, schema: { type: 'string' } },
+            { name: 'signature', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            200: {
+              description: 'The export file',
+              content: {
+                'application/json': { schema: { type: 'object' } },
+                'text/markdown': { schema: { type: 'string' } },
+              },
+            },
+            default: errorResponse,
+          },
+        },
+      },
+    };
     const doc = buildOpenApiDocument();
     expect({ openapi: doc.openapi, servers: doc.servers, paths: doc.paths }).toStrictEqual({
       openapi: '3.0.0',
@@ -181,6 +241,21 @@ describe('buildOpenApiDocument', () => {
               200: {
                 description: 'Current user',
                 content: { 'application/json': { schema: ref('MeResponse') } },
+              },
+              default: errorResponse,
+            },
+          },
+          // BIB-48.
+          delete: {
+            description: expect.stringMatching(
+              /(?=[\s\S]*fresh code)(?=[\s\S]*OTP_EXPIRED)(?=[\s\S]*ACCOUNT_DELETED)(?=[\s\S]*seven days)(?=[\s\S]*tombstone)/,
+            ),
+            security: [{ sessionCookie: [] }],
+            requestBody: { required: true, content: json('DeleteAccountRequest') },
+            responses: {
+              202: {
+                description: 'Deletion confirmed; the session cookie is cleared',
+                content: json('DeleteAccountResponse'),
               },
               default: errorResponse,
             },
@@ -901,6 +976,7 @@ describe('buildOpenApiDocument', () => {
             },
           },
         },
+        ...exportPaths,
       },
     });
     expect(doc.components.securitySchemes).toStrictEqual({
@@ -1033,6 +1109,10 @@ describe('buildOpenApiDocument', () => {
       'GraphResponse',
       'SavePositionsRequest',
       'SavePositionsResponse',
+      'CreateExportRequest',
+      'ExportResponse',
+      'DeleteAccountRequest',
+      'DeleteAccountResponse',
       'NoteBlock',
       'NoteListItem',
     ]);
