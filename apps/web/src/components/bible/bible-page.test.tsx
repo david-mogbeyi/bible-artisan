@@ -502,7 +502,6 @@ describe('BiblePage in a study (BIB-24)', () => {
     const visit = {
       kind: 'visit',
       clientMutationId: expect.any(String),
-      sessionId: expect.any(String),
       occurredAt: expect.any(String),
     };
     expect(bodiesTo('/activity')).toStrictEqual([

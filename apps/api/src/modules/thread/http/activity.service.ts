@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
+import { z } from 'zod';
 import {
   ACTIVITY_MAX_DELAY_DAYS,
+  type EndSessionResponse,
   PHRASE_SELECTED,
+  TAB_INSTANCE_HEADER,
   type RecordActivityResponse,
   recordActivityRequestSchema,
   SCRIPTURE_OPENED,
@@ -136,13 +139,47 @@ export class ActivityService {
             branchId: body.branchId ?? null,
             versionId: null,
             parentVisitEventId: body.parentVisitEventId ?? null,
-            sessionId: body.sessionId ?? null,
             clientMutationId: body.clientMutationId,
           });
           return { status: 201, body: { ...response(event, eventType) } };
         },
       },
     );
+  }
+
+  /**
+   * `POST /studies/:id/sessions/end` (BIB-33): the explicit exit of the request tab's session
+   * (`X-Tab-Instance-Id`, required: 400 without it). Revision-free like activity; idempotent with
+   * an optional Idempotency-Key. With no open session for the tab it writes nothing and answers
+   * 200 with `sessionId: null`.
+   */
+  endSession(
+    ownerId: string,
+    studyId: string,
+    request: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    if (!request.tabInstanceId) {
+      throw new ValidationError('Invalid request', { [TAB_INSTANCE_HEADER]: ['Must be a UUID'] });
+    }
+    parseBody(z.strictObject({}), request.body ?? {});
+    return this.mutations.execute(ownerId, request, {
+      studyId,
+      bumpsContentRevision: false,
+      navigation: true,
+      work: async (m) => {
+        const ended = await m.endTabSession();
+        if (!ended) {
+          m.unchanged();
+          const body: EndSessionResponse = { sessionId: null, lastEventSequence: null };
+          return { status: 200, body };
+        }
+        const body: EndSessionResponse = {
+          sessionId: ended.sessionId,
+          lastEventSequence: ended.sequence,
+        };
+        return { status: 200, body };
+      },
+    });
   }
 
   private occurredAt(value: string | undefined): Date {

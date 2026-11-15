@@ -153,6 +153,12 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'study_session_study_owner_fk',
+        table: 'study_session',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'study_tag_study_owner_fk',
         table: 'study_tag',
         columns: ['owner_id', 'study_id'],
@@ -334,7 +340,7 @@ describe('schema (composite-key owner isolation)', () => {
         WHERE contype = 'f'
           AND conrelid::regclass::text IN
               ('study', 'study_node', 'study_event', 'study_branch', 'mutation_receipt', 'auth_session',
-               'tag', 'study_tag')
+               'tag', 'study_tag', 'study_session')
         ORDER BY conname`,
       { type: QueryTypes.SELECT },
     );
@@ -352,6 +358,8 @@ describe('schema (composite-key owner isolation)', () => {
       { name: 'study_node_study_owner_fk', action: 'c' },
       { name: 'study_original_question_node_fk', action: 'a' },
       { name: 'study_owner_id_fkey', action: 'c' },
+      { name: 'study_session_last_visit_fk', action: 'a' },
+      { name: 'study_session_study_owner_fk', action: 'c' },
       { name: 'study_starting_reference_id_fkey', action: 'a' },
       { name: 'study_tag_study_owner_fk', action: 'c' },
       { name: 'study_tag_tag_owner_fk', action: 'c' },

@@ -101,10 +101,3 @@ export function groupThreadCards(items: readonly StudyEventItem[]): ThreadCard[]
   }
   return cards;
 }
-
-/** A per-tab session id (memory only), so a tab's visits share a session. */
-let tabSessionId: string | null = null;
-export function threadSessionId(): string {
-  tabSessionId ??= crypto.randomUUID();
-  return tabSessionId;
-}

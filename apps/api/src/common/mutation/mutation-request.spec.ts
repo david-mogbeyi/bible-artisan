@@ -51,7 +51,20 @@ describe('mutationRequestInfo', () => {
       body: { a: 1 },
       // BIB-55: the request's correlation id (a fresh UUID when the client sent none).
       correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      // BIB-33: no tab header, no session.
+      tabInstanceId: null,
     });
+  });
+
+  it('takes a valid tab instance id lower-cased and ignores a malformed one', () => {
+    const info = (tab: string) =>
+      mutationRequestInfo({
+        ...matched,
+        headers: { ...matched.headers, 'x-tab-instance-id': tab },
+        params: {},
+      }).tabInstanceId;
+    expect(info(STUDY.toUpperCase())).toBe(STUDY);
+    expect(info('not-a-uuid')).toBeNull();
   });
 
   it('prefixes a router mount path', () => {

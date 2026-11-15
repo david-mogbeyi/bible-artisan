@@ -1,5 +1,9 @@
 import { createParamDecorator, type ExecutionContext } from '@nestjs/common';
-import { IDEMPOTENCY_KEY_HEADER, idempotencyKeySchema } from '@bible-artisan/contracts';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  idempotencyKeySchema,
+  TAB_INSTANCE_HEADER,
+} from '@bible-artisan/contracts';
 import { ValidationError } from '../errors/domain-errors';
 import { correlationIdOf } from '../../modules/observability/correlation';
 import { isUuid } from '../validation/uuid';
@@ -23,6 +27,17 @@ export interface MutationRequestInfo {
    * action's events group into one thread card. Not part of the fingerprint.
    */
   correlationId?: string;
+  /**
+   * The browser tab's `X-Tab-Instance-Id` (BIB-33), lower-cased, or null when absent or not a
+   * UUID: a meaningful event from that tab starts or continues the tab's study session. Not part
+   * of the fingerprint (a retry from another tab is the same request).
+   */
+  tabInstanceId?: string | null;
+}
+
+/** `X-Tab-Instance-Id` → lower-cased UUID, or null. Lenient: a bad value only means no session. */
+export function parseTabInstanceId(header: string | string[] | undefined): string | null {
+  return typeof header === 'string' && isUuid(header) ? header.toLowerCase() : null;
 }
 
 interface RequestLike {
@@ -63,6 +78,7 @@ export function mutationRequestInfo(request: RequestLike): MutationRequestInfo {
     params: normalizedParams(request.params ?? {}),
     body: request.body,
     correlationId: correlationIdOf(request),
+    tabInstanceId: parseTabInstanceId(request.headers[TAB_INSTANCE_HEADER.toLowerCase()]),
   };
 }
 

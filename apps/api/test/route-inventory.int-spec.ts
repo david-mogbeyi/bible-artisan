@@ -372,6 +372,28 @@ const ROUTES: Record<string, Access> = {
       test: 'GET /v1/studies/:studyId/events/:eventId gives another user the same neutral 404 as an absent or malformed id',
     },
   },
+  // Sessions (BIB-33) and resume (BIB-34).
+  'POST /v1/studies/:studyId/sessions/end': {
+    access: 'private',
+    crossUserTest: {
+      file: 'sessions.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/sessions/end gives another user the same neutral 404 as an absent or malformed study, ending nothing',
+    },
+  },
+  'GET /v1/studies/:studyId/resume': {
+    access: 'private',
+    crossUserTest: {
+      file: 'resume.int-spec.ts',
+      test: 'GET /v1/studies/:studyId/resume gives another user the same neutral 404 as an absent or malformed study',
+    },
+  },
+  'PATCH /v1/studies/:studyId/view-state': {
+    access: 'private',
+    crossUserTest: {
+      file: 'resume.int-spec.ts',
+      test: "PATCH /v1/studies/:studyId/view-state gives another user the same neutral 404 as an absent or malformed study, and refuses Alice's node in Bob's study, writing nothing",
+    },
+  },
   // Graph snapshot and layout (BIB-28): Bob's calls on Alice's study, absent, malformed and
   // past-window studies, and Alice's node under his own study.
   'GET /v1/studies/:studyId/graph': {

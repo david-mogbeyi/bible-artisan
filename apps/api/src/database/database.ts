@@ -22,6 +22,7 @@ import { StudyViewState } from './models/study-view-state.model';
 import { StudyBranch } from './models/study-branch.model';
 import { StudyBranchMember } from './models/study-branch-member.model';
 import { StudyEvent } from './models/study-event.model';
+import { StudySession } from './models/study-session.model';
 import { StudyNode } from './models/study-node.model';
 import { StudyTag } from './models/study-tag.model';
 import { Study } from './models/study.model';
@@ -103,6 +104,7 @@ export function createDatabase(
       AiJob,
       ContextManifest,
       AiResult,
+      StudySession,
     ],
     logging: false,
     // Explicit rather than Sequelize's defaults (max 5, 60 s acquire): max matches the previous

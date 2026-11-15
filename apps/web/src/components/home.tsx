@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { ApiStatus } from '@/components/api-status';
 import { RequireAuth } from '@/components/require-auth';
+import { ContinueStudying } from '@/components/studies/continue-studying';
 import { RecentStudies } from '@/components/studies/recent-studies';
 import { signOut } from '@/lib/auth';
 
@@ -13,7 +14,7 @@ const SIGN_OUT_ERROR = "You're still signed in. Something went wrong signing out
 
 /**
  * Home (authorized). New Study starts one (BIB-19); Recent studies and the library link come from
- * BIB-21; Continue Studying arrives with BIB-34.
+ * BIB-21; Continue studying (the deterministic resume card) is BIB-34's.
  */
 export function Home() {
   const router = useRouter();
@@ -58,6 +59,7 @@ export function Home() {
               Settings
             </Link>
           </nav>
+          <ContinueStudying />
           <RecentStudies />
           {logout.isError ? (
             <div

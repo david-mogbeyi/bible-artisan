@@ -124,8 +124,15 @@ export function ThreadPanel({ study }: { study: StudyResponse }) {
       ) : null}
       {cards.length > 0 ? (
         <ol aria-label="Thread events" className="flex flex-col gap-3">
-          {cards.map((card) => (
-            <li key={card.key}>
+          {cards.map((card, index) => (
+            <li key={card.key} className="flex flex-col gap-3">
+              {/* BIB-33: where one study session (a tab's period of activity) gives way to
+                  another, in reading order. Sessions are recorded only, never inferred. */}
+              {startsNewSession(cards[index - 1], card) ? (
+                <p className="border-t border-muted pt-2 text-sm text-muted">
+                  {order === 'desc' ? 'Earlier study session' : 'Later study session'}
+                </p>
+              ) : null}
               <ThreadCardView card={card} study={study} />
             </li>
           ))}
@@ -143,6 +150,13 @@ export function ThreadPanel({ study }: { study: StudyResponse }) {
       ) : null}
     </section>
   );
+}
+
+/** True when both cards record a session and they differ (BIB-33). */
+function startsNewSession(previous: ThreadCard | undefined, card: ThreadCard): boolean {
+  const before = previous?.primary.sessionId ?? null;
+  const now = card.primary.sessionId;
+  return before !== null && now !== null && before !== now;
 }
 
 function ThreadCardView({ card, study }: { card: ThreadCard; study: StudyResponse }) {

@@ -57,6 +57,10 @@ const ESTABLISHED_OBSERVATIONS_REFUSED =
 const DELETED_WITH_MIGRATION = '20261115120002_add_edge_deleted_with_node.ts';
 const DELETED_WITH_REFUSED =
   'edge deleted-with drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-33 / BIB-34's sessions and saved resume context migration. */
+const SESSIONS_MIGRATION = '20261115130000_add_study_sessions_and_resume_context.ts';
+const SESSIONS_REFUSED =
+  'study session drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'ai_job',
@@ -277,12 +281,12 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
 
-      // No opt-in at all: the newest migration (BIB-31's edge deleted-with) is the first `down`
+      // No opt-in at all: the newest migration (BIB-33's sessions) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: DELETED_WITH_REFUSED,
+        message: SESSIONS_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -575,6 +579,8 @@ describe('migration reversibility', () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
     try {
+      // A later migration (BIB-33's sessions) steps down first.
+      await withStudyDataDropAllowed(() => migrator.down({ to: SESSIONS_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(DELETED_WITH_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -615,7 +621,7 @@ describe('migration reversibility', () => {
       expect(narrower).toMatchObject({ parent: expect.objectContaining({ code: '23514' }) });
 
       await migrator.up();
-      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await recordedMigrations(db)).toStrictEqual([...before, SESSIONS_MIGRATION]);
       expect(await columns(['study_edge'])).toContain('study_edge.deleted_with_node_id');
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
@@ -655,12 +661,15 @@ describe('migration reversibility', () => {
         'study_node_position_pkey',
         'study_node_position_pkey',
         'study_node_position_study_owner_fk',
+        // BIB-34's saved-context CHECKs (a later migration, stepped down first below).
+        'study_view_state_pane_state_check',
         'study_view_state_pkey',
         'study_view_state_pkey',
         'study_view_state_revision_check',
         'study_view_state_study_key',
         'study_view_state_study_key',
         'study_view_state_study_owner_fk',
+        'study_view_state_viewport_check',
       ]);
       // Past BIB-60's step (which refuses first, from latest), the layout's own guard refuses.
       await withStudyDataDropAllowed(() => migrator.down({ to: MEMBERSHIP_MIGRATION }));
@@ -682,6 +691,44 @@ describe('migration reversibility', () => {
       expect(await recordedMigrations(db)).toStrictEqual(before.slice(0, -1));
       await migrator.up();
       expect(await layoutSchema()).toStrictEqual(schemaBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies study sessions and the saved resume context (BIB-33, BIB-34) only with the study-data opt-in', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const sessionSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid IN ('study_session'::regclass, 'study_view_state'::regclass)
+         UNION ALL
+         SELECT indexname FROM pg_indexes WHERE tablename IN ('study_session', 'study_view_state')
+         UNION ALL
+         SELECT 'study_view_state.' || column_name FROM information_schema.columns
+          WHERE table_name = 'study_view_state'
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      const schemaBefore = await sessionSchema();
+      expect(schemaBefore.map((row) => row.name)).toContain('study_session_open_tab_key');
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(SESSIONS_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: SESSIONS_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await publicTables(db, ['study_session'])).toStrictEqual([]);
+      expect(await recordedMigrations(db)).toStrictEqual(before.slice(0, -1));
+      await migrator.up();
+      expect(await sessionSchema()).toStrictEqual(schemaBefore);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();

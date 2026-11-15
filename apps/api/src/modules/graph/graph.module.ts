@@ -10,6 +10,9 @@ import { GraphController } from './graph.controller';
 import { GraphService } from './graph.service';
 import { NodesController } from './nodes.controller';
 import { NodesService } from './nodes.service';
+import { ResumeController } from './resume.controller';
+import { ResumeService } from './resume.service';
+import { ThreadModule } from '../thread/thread.module';
 
 /**
  * Graph bounded context (PRD §26). Owns node creation, edits and reads (`/studies/:id/nodes`,
@@ -26,11 +29,20 @@ import { NodesService } from './nodes.service';
  * (`changeBranchMembers` composes into other mutations, BIB-33). Conclusion versions, their
  * evidence snapshots and "Established by me" (BIB-30, `conclusions.ts`): `node_version` and
  * `node_version_evidence`; only the owner's node PATCH changes a status or sets the marker.
+ * Resume (BIB-34, `GET /studies/:id/resume`, `PATCH /studies/:id/view-state`): the saved
+ * workspace context on `study_view_state` and the deterministic resume card; the last visit comes
+ * from Thread's `ThreadService.lastVisit`.
  */
 @Module({
-  imports: [MutationModule, StudyModule, BibleContentModule],
-  controllers: [NodesController, EdgesController, GraphController, BranchesController],
-  providers: [NodesService, EdgesService, GraphService, BranchesService],
+  imports: [MutationModule, StudyModule, BibleContentModule, ThreadModule],
+  controllers: [
+    NodesController,
+    EdgesController,
+    GraphController,
+    BranchesController,
+    ResumeController,
+  ],
+  providers: [NodesService, EdgesService, GraphService, BranchesService, ResumeService],
   exports: [NodesService],
 })
 export class GraphModule {}

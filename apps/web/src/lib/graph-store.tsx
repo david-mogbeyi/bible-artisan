@@ -98,7 +98,9 @@ export interface GraphViewState {
 
 export type GraphViewStore = StoreApi<GraphViewState>;
 
-export function createGraphViewStore(): GraphViewStore {
+export function createGraphViewStore(
+  initial: { soloBranchId?: string | null } = {},
+): GraphViewStore {
   return createStore<GraphViewState>()((set, get) => ({
     selectedNodeIds: [],
     selectionSource: 'canvas',
@@ -107,7 +109,7 @@ export function createGraphViewStore(): GraphViewStore {
     viewMode: defaultViewMode(),
     hiddenTypes: new Set(),
     focus: null,
-    soloBranchId: null,
+    soloBranchId: initial.soloBranchId ?? null,
     collapsedBranchIds: [],
     localPositions: {},
     pendingIds: new Set(),
@@ -202,9 +204,19 @@ export function createGraphViewStore(): GraphViewStore {
 
 const GraphViewContext = createContext<GraphViewStore | null>(null);
 
-/** One store per study page, shared by its Graph and Nodes sections. */
-export function GraphViewProvider({ children }: { children: ReactNode }) {
-  const [store] = useState(createGraphViewStore);
+/**
+ * One store per study page, shared by its Graph and Nodes sections. `initialSoloBranchId` (BIB-34,
+ * the page URL's `?branch=`): the branch a resume restores, shown alone until the user changes it;
+ * an id that is not a branch of the snapshot is dropped by `keepBranches`.
+ */
+export function GraphViewProvider({
+  children,
+  initialSoloBranchId = null,
+}: {
+  children: ReactNode;
+  initialSoloBranchId?: string | null;
+}) {
+  const [store] = useState(() => createGraphViewStore({ soloBranchId: initialSoloBranchId }));
   return <GraphViewContext.Provider value={store}>{children}</GraphViewContext.Provider>;
 }
 

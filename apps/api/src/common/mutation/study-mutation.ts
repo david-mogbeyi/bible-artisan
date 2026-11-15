@@ -66,6 +66,8 @@ export class StudyMutation {
     readonly correlationId: string | null = null,
     /** A navigation mutation (BIB-55): no revision check, never a content change. */
     readonly navigation = false,
+    /** The request's browser tab (BIB-33): meaningful events join that tab's study session. */
+    readonly tabInstanceId: string | null = null,
   ) {}
 
   get transaction(): Transaction {
@@ -187,7 +189,19 @@ export class StudyMutation {
     return this.thread.appendEvent(this.lock, {
       ...input,
       correlationId: input.correlationId ?? this.correlationId,
+      tabInstanceId: this.tabInstanceId,
     });
+  }
+
+  /**
+   * Ends the request tab's open session in this study (BIB-33's explicit exit), appending its
+   * `session_ended` event. Null, writing nothing, when the request has no tab or the tab has no
+   * open session (the caller then declares `unchanged()`).
+   */
+  async endTabSession(): Promise<{ sessionId: string; sequence: string } | null> {
+    this.assertWritable();
+    if (!this.tabInstanceId) return null;
+    return this.thread.endTabSession(this.lock, this.tabInstanceId, this.correlationId);
   }
 
   /**
