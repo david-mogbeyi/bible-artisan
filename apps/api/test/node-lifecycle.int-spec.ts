@@ -597,6 +597,10 @@ describe('node lifecycle: establish observations, duplicate, delete and restore'
           type: 'observation',
           revision: 2,
           removedEdgeCount: 2,
+          removedEdges: [
+            { edgeId: e1, revision: 2 },
+            { edgeId: e2, revision: 2 },
+          ],
           promotedCanonicalNodeId: null,
           mainQuestionCleared: false,
           establishmentClearedNodeIds: [],
@@ -683,6 +687,10 @@ describe('node lifecycle: establish observations, duplicate, delete and restore'
           warnings: [],
           canonicalNodeId: null,
           restoredEdgeIds: [e1, e2],
+          restoredEdges: [
+            { edgeId: e1, revision: 3 },
+            { edgeId: e2, revision: 3 },
+          ],
           skippedEdges: [],
           establishmentClearedNodeIds: [],
         },
@@ -774,7 +782,7 @@ describe('node lifecycle: establish observations, duplicate, delete and restore'
       const restored = await send(alice, 'post', restorePath(studyId, x), { expectedRevision: 2 });
       expect(restored.body).toMatchObject({
         restoredEdgeIds: [xz],
-        skippedEdges: [{ edgeId: xy, reason: 'endpoint_deleted' }],
+        skippedEdges: [{ edgeId: xy, revision: 3, reason: 'endpoint_deleted' }],
       });
       const handed = await StudyEdge.findByPk(xy, { rejectOnEmpty: true });
       expect([handed.deletedAt !== null, handed.deletedWithNodeId]).toStrictEqual([true, y]);
@@ -795,10 +803,72 @@ describe('node lifecycle: establish observations, duplicate, delete and restore'
       const dupe = await send(alice, 'post', restorePath(studyId, z), { expectedRevision: 2 });
       expect(dupe.body).toMatchObject({
         restoredEdgeIds: [],
-        skippedEdges: [{ edgeId: xz, reason: 'duplicate' }],
+        restoredEdges: [],
+        skippedEdges: [{ edgeId: xz, revision: 4, reason: 'duplicate' }],
       });
+      // The skipped edge is untouched and still names z, so it stays recoverable.
       const kept = await StudyEdge.findByPk(xz, { rejectOnEmpty: true });
-      expect([kept.deletedAt !== null, kept.deletedWithNodeId]).toStrictEqual([true, null]);
+      expect([kept.deletedAt !== null, kept.deletedWithNodeId, kept.revision]).toStrictEqual([
+        true,
+        z,
+        4,
+      ]);
+      // Once the identical one is gone, the edge restore route brings it back with the revision
+      // the node restore reported.
+      const twin = await StudyEdge.findOne({
+        where: { studyId, deletedAt: null, sourceNodeId: x, targetNodeId: z },
+        rejectOnEmpty: true,
+      });
+      await send(alice, 'delete', edgePath(studyId, twin.id), { expectedRevision: 1 });
+      const back = await send(alice, 'post', `${edgePath(studyId, xz)}/restore`, {
+        expectedRevision: 4,
+      });
+      expect([back.status, (back.body as { id: string }).id]).toStrictEqual([200, xz]);
+    });
+
+    it('leaves a relationship skipped at the edge cap deleted but recoverable: a later delete and restore of the node, or the edge restore route once there is room, brings it back', async () => {
+      const { studyId } = await createStudy(alice);
+      const x = await thought(alice, studyId, 'X');
+      const y = await thought(alice, studyId, 'Y');
+      const xy = await connect(alice, studyId, x, y, 'explains');
+      await send(alice, 'delete', deletePath(studyId, x), { expectedRevision: 1 });
+      // 80 filler nodes give 6,320 ordered pairs: fill the study to the 6,000-edge cap.
+      await db.query(
+        `INSERT INTO study_node (study_id, owner_id, type, origin, body)
+         SELECT $1, $2, 'thought', 'user', 'Filler' FROM generate_series(1, 80)`,
+        { bind: [studyId, alice.user.id] },
+      );
+      await db.query(
+        `INSERT INTO study_edge (study_id, owner_id, source_node_id, target_node_id, type, origin)
+         SELECT $1, $2, s.id, t.id, 'supports', 'user'
+           FROM study_node s JOIN study_node t ON s.id <> t.id
+          WHERE s.study_id = $1 AND t.study_id = $1 AND s.body = 'Filler' AND t.body = 'Filler'
+          LIMIT 6000`,
+        { bind: [studyId, alice.user.id] },
+      );
+
+      const restored = await send(alice, 'post', restorePath(studyId, x), { expectedRevision: 2 });
+      expect(restored.body).toMatchObject({
+        restoredEdgeIds: [],
+        restoredEdges: [],
+        skippedEdges: [{ edgeId: xy, revision: 2, reason: 'limit' }],
+      });
+      const kept = await StudyEdge.findByPk(xy, { rejectOnEmpty: true });
+      expect([kept.deletedAt !== null, kept.deletedWithNodeId]).toStrictEqual([true, x]);
+
+      // Room frees up: deleting and restoring the node again retries the skipped edge.
+      await db.query(
+        `UPDATE study_edge SET deleted_at = now() WHERE id = (
+           SELECT id FROM study_edge WHERE study_id = $1 AND deleted_at IS NULL LIMIT 1)`,
+        { bind: [studyId] },
+      );
+      await send(alice, 'delete', deletePath(studyId, x), { expectedRevision: 3 });
+      const again = await send(alice, 'post', restorePath(studyId, x), { expectedRevision: 4 });
+      expect(again.body).toMatchObject({
+        restoredEdgeIds: [xy],
+        restoredEdges: [{ edgeId: xy, revision: 3 }],
+        skippedEdges: [],
+      });
     });
 
     it('promotes the oldest live duplicate when a canonical passage is deleted, and restores the old canonical as its duplicate, never two live canonicals', async () => {

@@ -4,6 +4,7 @@ import {
   type CreateNodeResponse,
   NODE_ORIGIN_NAMES,
   NODE_TYPE_NAMES,
+  type NodeRestoreResponse,
   type StudyResponse,
 } from '@bible-artisan/contracts';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,7 +23,13 @@ import { useGraphView, useGraphViewStore } from '@/lib/graph-store';
 import { listNodes, nodeStateText, nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
 import { AddNodeForm } from './add-node-form';
-import { DeletedNodes, deletedText, restoredText, useNodeRestore } from './deleted-nodes';
+import {
+  DeletedNodes,
+  deletedText,
+  restoredText,
+  SkippedRelationships,
+  useNodeRestore,
+} from './deleted-nodes';
 import { NodeDetail } from './node-detail';
 
 /** The status after a delete (BIB-31): what was deleted, with Restore. */
@@ -102,6 +109,7 @@ export function NodesSection({
   /** The open detail's edit holds unsaved changes (NodeDetail's `onUnsavedChange`). */
   const [detailUnsaved, setDetailUnsaved] = useState(false);
   const [deletedStatus, setDeletedStatus] = useState<DeletedStatus | null>(null);
+  const [skipped, setSkipped] = useState<NodeRestoreResponse['skippedEdges']>([]);
   const deletedStatusRef = useRef<HTMLDivElement>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const returnToAdd = useRef(false);
@@ -217,6 +225,7 @@ export function NodesSection({
     onLocked: lockAndAlert,
     onRestored: (result, label) => {
       setDeletedStatus(null);
+      setSkipped(result.skippedEdges);
       select(result.id, true);
       setAnnouncement(restoredText(result, label, labelOf));
     },
@@ -332,6 +341,21 @@ export function NodesSection({
       )}
 
       <DeletedNodes studyId={study.id} editable={editable} restore={restore} />
+
+      {skipped.length > 0 ? (
+        <SkippedRelationships
+          key={skipped.map((edge) => edge.edgeId).join()}
+          studyId={study.id}
+          edges={skipped}
+          editable={editable}
+          nameOf={(id) => {
+            const node = items.find((item) => item.id === id);
+            return node ? `${NODE_TYPE_NAMES[node.type]}: ${node.label}` : null;
+          }}
+          onDismiss={() => setSkipped([])}
+          onLocked={lockAndAlert}
+        />
+      ) : null}
 
       {deletedStatus ? (
         <div

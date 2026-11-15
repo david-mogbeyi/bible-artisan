@@ -6,7 +6,10 @@ import {
   edgeKey,
   inverseOf,
   MAX_UNDO,
+  nodeDeleteRevisions,
   nodeKey,
+  type RevisionUpdates,
+  type UndoEntry,
   useUndoRecorder,
 } from '@/lib/undo';
 import { jsonResponse, renderWithQuery } from '@/test/render';
@@ -20,7 +23,7 @@ const T = '2026-10-01T12:00:00.000Z';
 const nodeBody = (revision: number) => ({
   id: OBS,
   studyId: STUDY_ID,
-  type: 'observation',
+  type: 'observation' as const,
   origin: 'user',
   revision,
   referenceId: null,
@@ -31,21 +34,26 @@ const nodeBody = (revision: number) => ({
   previousVersionId: null,
   warnings: [],
 });
-const deleted = (revision: number) => ({
+const deleted = (revision: number, removedEdges: { edgeId: string; revision: number }[] = []) => ({
   id: OBS,
   studyId: STUDY_ID,
-  type: 'observation',
+  type: 'observation' as const,
   revision,
-  removedEdgeCount: 0,
+  removedEdgeCount: removedEdges.length,
+  removedEdges,
   promotedCanonicalNodeId: null,
   mainQuestionCleared: false,
   establishmentClearedNodeIds: [],
   lastEventSequence: '10',
 });
-const restored = (revision: number) => ({
+const restored = (
+  revision: number,
+  restoredEdges: { edgeId: string; revision: number }[] = [],
+) => ({
   ...nodeBody(revision),
   canonicalNodeId: null,
-  restoredEdgeIds: [],
+  restoredEdgeIds: restoredEdges.map((e) => e.edgeId),
+  restoredEdges,
   skippedEdges: [],
   establishmentClearedNodeIds: [],
 });
@@ -95,6 +103,17 @@ function RecordAdd() {
   return null;
 }
 
+/** Records the given commands in order, once, on mount. */
+function Record({ commands }: { commands: [UndoEntry, RevisionUpdates][] }) {
+  const record = useUndoRecorder();
+  useEffect(() => {
+    for (const [entry, revisions] of commands) record(entry, revisions);
+    // Once, on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return null;
+}
+
 const mutations = () => requests.filter((r) => r.method !== 'GET');
 
 describe('UndoControls (BIB-63)', () => {
@@ -138,6 +157,8 @@ describe('UndoControls (BIB-63)', () => {
         currentRevision: 4,
       }),
     );
+    // Another tab edited the relationship since (live revision 4). The undo must send the revision
+    // this tab acknowledged (3, from the restore), never read and send the live one.
     renderWithQuery(
       <>
         <RecordAdd />
@@ -156,6 +177,71 @@ describe('UndoControls (BIB-63)', () => {
   });
 });
 
+describe('UndoControls after a node delete and restore (relationship revisions)', () => {
+  it('keeps each relationship revision the delete and restore reported, so another tab’s change to the relationship is a 409, never overwritten', async () => {
+    reply(
+      `POST /studies/${STUDY_ID}/nodes/${OBS}/restore`,
+      jsonResponse(200, restored(3, [{ edgeId: EDGE, revision: 3 }])),
+    );
+    reply(
+      `DELETE /studies/${STUDY_ID}/edges/${EDGE}`,
+      jsonResponse(409, {
+        code: 'REVISION_CONFLICT',
+        message: 'Revision conflict',
+        retryable: false,
+        correlationId: 'c',
+        currentRevision: 4,
+      }),
+    );
+    renderWithQuery(
+      <>
+        <Record
+          commands={[
+            [
+              { label: 'Add relationship', action: { op: 'removeEdge', edgeId: EDGE } },
+              { [edgeKey(EDGE)]: 1 },
+            ],
+            [
+              { label: 'Delete observation', action: { op: 'restoreNode', nodeId: OBS } },
+              nodeDeleteRevisions(deleted(2, [{ edgeId: EDGE, revision: 2 }])),
+            ],
+          ]}
+        />
+        <UndoControls studyId={STUDY_ID} editable />
+      </>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo: Delete observation' }));
+    expect(await screen.findByText(UNDO_COPY.undid('Delete observation'))).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Undo: Add relationship' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(UNDO_COPY.conflict('Add relationship'));
+    expect(requests.filter((r) => r.path.includes('/edges'))).toStrictEqual([
+      {
+        method: 'DELETE',
+        path: `/studies/${STUDY_ID}/edges/${EDGE}`,
+        body: { expectedRevision: 3 },
+      },
+    ]);
+  });
+
+  it('refuses a relationship undo whose revision this tab doesn’t know instead of sending the live one', async () => {
+    renderWithQuery(
+      <>
+        <Record
+          commands={[
+            [{ label: 'Add relationship', action: { op: 'removeEdge', edgeId: EDGE } }, {}],
+          ]}
+        />
+        <UndoControls studyId={STUDY_ID} editable />
+      </>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Undo: Add relationship' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(UNDO_COPY.untracked('Add relationship'));
+    expect(requests.filter((r) => r.path.includes('/edges'))).toStrictEqual([]);
+  });
+});
+
 describe('undo store', () => {
   it('keeps the last 50 commands, clears redo on a new command, and inverts actions both ways', () => {
     const store = createUndoStore();
@@ -163,7 +249,7 @@ describe('undo store', () => {
       store.getState().record(
         {
           label: `Remove relationship ${i}`,
-          action: { op: 'restoreEdge', edgeId: EDGE, sourceNodeId: OBS },
+          action: { op: 'restoreEdge', edgeId: EDGE },
         },
         { [edgeKey(EDGE)]: i + 1 },
       );
@@ -176,22 +262,20 @@ describe('undo store', () => {
       .getState()
       .record(
         { label: 'Add thought', action: { op: 'deleteNode', nodeId: OBS } },
-        { [nodeKey(OBS)]: 1, '*edges': null },
+        { [nodeKey(OBS)]: 1, [edgeKey(EDGE)]: null },
       );
     expect(store.getState().redo).toStrictEqual([]);
     expect(store.getState().revisions).toStrictEqual({ [nodeKey(OBS)]: 1 });
     const edit = {
       op: 'editEdge' as const,
       edgeId: EDGE,
-      sourceNodeId: OBS,
       body: { type: 'supports' as const, note: null },
       inverse: { type: 'parallels' as const, note: 'n' },
     };
     expect(inverseOf(inverseOf(edit))).toStrictEqual(edit);
-    expect(inverseOf({ op: 'removeEdge', edgeId: EDGE, sourceNodeId: OBS })).toStrictEqual({
+    expect(inverseOf({ op: 'removeEdge', edgeId: EDGE })).toStrictEqual({
       op: 'restoreEdge',
       edgeId: EDGE,
-      sourceNodeId: OBS,
     });
   });
 });

@@ -3,6 +3,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TRANSLATION } from '@/test/bible-fixtures';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
+import { SKIPPED_EDGES_COPY } from './deleted-nodes';
 import { NODE_ACTION_COPY } from './node-actions';
 import { NodesSection } from './nodes-section';
 
@@ -249,6 +250,7 @@ describe('node detail actions', () => {
         type: 'observation',
         revision: 2,
         removedEdgeCount: 1,
+        removedEdges: [{ edgeId: EDGE, revision: 2 }],
         promotedCanonicalNodeId: null,
         mainQuestionCleared: false,
         establishmentClearedNodeIds: [CON],
@@ -261,6 +263,7 @@ describe('node detail actions', () => {
         ...mutation(OBS, { revision: 3 }),
         canonicalNodeId: null,
         restoredEdgeIds: [EDGE],
+        restoredEdges: [{ edgeId: EDGE, revision: 3 }],
         skippedEdges: [],
         establishmentClearedNodeIds: [],
       }),
@@ -301,6 +304,83 @@ describe('node detail actions', () => {
       body: { expectedRevision: 2 },
       key: expect.stringMatching(/^[0-9a-f-]{36}$/),
     });
+  });
+
+  it('lists a relationship the restore skipped at the limit and restores it on its own through the edge restore route with the reported revision', async () => {
+    reply(
+      `GET ${NODES}?state=deleted`,
+      jsonResponse(200, {
+        items: [{ ...OBS_SUMMARY, revision: 2, deletedAt: T }],
+      }),
+    );
+    reply(
+      `POST ${NODES}/${OBS}/restore`,
+      jsonResponse(200, {
+        ...mutation(OBS, { revision: 3 }),
+        canonicalNodeId: null,
+        restoredEdgeIds: [],
+        restoredEdges: [],
+        skippedEdges: [
+          {
+            edgeId: EDGE,
+            revision: 2,
+            reason: 'limit',
+            sourceNodeId: OBS,
+            targetNodeId: CON,
+            type: 'supports',
+          },
+        ],
+        establishmentClearedNodeIds: [],
+      }),
+    );
+    reply(`GET ${NODES}/${OBS}`, jsonResponse(200, { ...OBSERVATION, revision: 3 }));
+    const limited = {
+      code: 'EDGE_LIMIT_EXCEEDED',
+      message: 'A study can hold at most 6,000 relationships',
+      retryable: false,
+      correlationId: 'c',
+    };
+    reply(
+      `POST /studies/${STUDY_ID}/edges/${EDGE}/restore`,
+      jsonResponse(422, limited),
+      jsonResponse(200, {
+        id: EDGE,
+        studyId: STUDY_ID,
+        sourceNodeId: OBS,
+        targetNodeId: CON,
+        type: 'supports',
+        origin: 'user',
+        revision: 3,
+        createdAt: T,
+        updatedAt: T,
+        lastEventSequence: '12',
+        establishmentClearedNodeIds: [],
+      }),
+    );
+    renderWithQuery(<NodesSection study={STUDY} onReload={() => Promise.resolve()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Deleted nodes' }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Restore Observation: Paul appeals' }),
+    );
+    const group = await screen.findByRole('group', { name: SKIPPED_EDGES_COPY.heading });
+    expect(textOf(group)).toContain(SKIPPED_EDGES_COPY.limit);
+    const restoreEdge = within(group).getByRole('button', {
+      name: 'Restore relationship: Observation: Paul appeals supports Conclusion: Conscience bears witness',
+    });
+    fireEvent.click(restoreEdge);
+    expect(await within(group).findByText(SKIPPED_EDGES_COPY.stillLimit)).toBeTruthy();
+    fireEvent.click(restoreEdge);
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: SKIPPED_EDGES_COPY.heading })).toBeNull(),
+    );
+    expect(
+      sent('POST')
+        .filter((r) => r.path.includes('/edges/'))
+        .map((r) => [r.path, r.body]),
+    ).toStrictEqual([
+      [`/studies/${STUDY_ID}/edges/${EDGE}/restore`, { expectedRevision: 2 }],
+      [`/studies/${STUDY_ID}/edges/${EDGE}/restore`, { expectedRevision: 2 }],
+    ]);
   });
 
   it('hides the marker, Duplicate and Delete on a read-only study but still shows the marker text', async () => {
