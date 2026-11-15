@@ -7,7 +7,7 @@ import type {
 import type { QueryClient } from '@tanstack/react-query';
 import { ApiError } from './api-client';
 import { graphQueryKey } from './graph';
-import { resumeQueryKey, saveViewState } from './resume';
+import { fetchResume, resumeQueryKey, saveViewState } from './resume';
 
 /**
  * One study's **view revision** (BIB-28, BIB-34) is shared by position saves
@@ -49,6 +49,19 @@ export function currentViewRevision(queryClient: QueryClient, studyId: string): 
   );
 }
 
+/**
+ * True when the tab holds no view revision of the study at all: no graph snapshot, resume read or
+ * earlier save. `currentViewRevision` would then guess 1, which is stale for any study whose
+ * layout was ever saved (the reader opened on its own, `/bible?study=…`).
+ */
+function viewRevisionUnknown(queryClient: QueryClient, studyId: string): boolean {
+  return (
+    queryClient.getQueryData(graphQueryKey(studyId)) === undefined &&
+    queryClient.getQueryData(resumeQueryKey(studyId)) === undefined &&
+    learned.get(queryClient)?.get(studyId) === undefined
+  );
+}
+
 /** Records a view revision the server reported, so the next write in the lane sends it. */
 export function noteViewRevision(queryClient: QueryClient, studyId: string, revision: number) {
   const known = learned.get(queryClient) ?? new Map<string, number>();
@@ -67,8 +80,10 @@ function conflictRevision(error: unknown): number | null {
 
 /**
  * Saves part of the view state (a field left out keeps its saved value) in the study's lane, on
- * the newest view revision. A 409 means another tab saved meanwhile: the patch is the user's own
- * latest choice, so it is resent once on the current revision.
+ * the newest view revision. When the tab knows no revision yet, it reads the resume state first
+ * (one GET instead of a certain 409); a `keepalive` save never waits, so it still leaves before
+ * the page goes. A 409 means another tab saved meanwhile: the patch is the user's own latest
+ * choice, so it is resent once on the current revision.
  */
 export function patchViewState(
   queryClient: QueryClient,
@@ -79,6 +94,16 @@ export function patchViewState(
   return inViewLane(studyId, async () => {
     const attempt = (expectedRevision: number) =>
       saveViewState(studyId, { expectedRevision, ...patch }, crypto.randomUUID(), options);
+    if (!options.keepalive && viewRevisionUnknown(queryClient, studyId)) {
+      // Best effort: should the read fail, the save still goes and a 409 is resent as before.
+      await queryClient
+        .fetchQuery({
+          queryKey: resumeQueryKey(studyId),
+          queryFn: () => fetchResume(studyId),
+          retry: false,
+        })
+        .catch(() => undefined);
+    }
     let saved: SaveViewStateResponse;
     try {
       saved = await attempt(currentViewRevision(queryClient, studyId));

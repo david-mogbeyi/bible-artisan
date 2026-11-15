@@ -5,7 +5,7 @@ import { GRAPH } from '@/test/graph-fixtures';
 import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery } from '@/test/render';
 import { StudyPage } from './study-page';
-import { STICKY_HEIGHT_VAR } from './workspace-tabs';
+import { MAX_STICKY_SHARE, STICKY_HEIGHT_VAR } from './workspace-tabs';
 
 const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
 const NODE_ID = 'bbbbbbbb-2222-4333-8444-555555555555';
@@ -88,6 +88,27 @@ let posts: { path: string; body: unknown }[];
 let savedPanes: Record<string, boolean> | null;
 let viewSaves: unknown[];
 let graph: { nodes: unknown[] };
+/** The Study Thread's events (`GET /events`), newest first. */
+let threadEvents: unknown[];
+
+/** The `question_created` event a node creation records. */
+const QUESTION_EVENT = {
+  id: '00000000-0000-4000-8000-000000000006',
+  sequence: '6',
+  type: 'question_created',
+  visibility: 'visible',
+  actorKind: 'user',
+  occurredAt: T,
+  recordedAt: T,
+  sessionId: null,
+  displayText: 'Asked "What is conscience?"',
+  targetRef: { kind: 'node', id: NODE_ID, label: 'What is conscience?', deleted: false },
+  originRef: null,
+  branchId: null,
+  parentVisitEventId: null,
+  correlationId: null,
+  delayedSync: false,
+};
 
 beforeEach(() => {
   search = new URLSearchParams();
@@ -95,6 +116,7 @@ beforeEach(() => {
   posts = [];
   savedPanes = null;
   viewSaves = [];
+  threadEvents = [];
   vi.stubGlobal(
     'fetch',
     vi.fn((input: string, init: RequestInit = {}) => {
@@ -102,6 +124,7 @@ beforeEach(() => {
       const method = init.method ?? 'GET';
       if (method === 'POST' && path === `/studies/${STUDY_ID}/nodes`) {
         posts.push({ path, body: JSON.parse(init.body as string) });
+        threadEvents = [QUESTION_EVENT, ...threadEvents];
         return Promise.resolve(jsonResponse(201, { ...CREATED, studyRevision: 5 }));
       }
       if (method === 'PATCH' && path === `/studies/${STUDY_ID}/view-state`) {
@@ -161,7 +184,7 @@ beforeEach(() => {
         return Promise.resolve(jsonResponse(200, graph));
       }
       if (path === `/studies/${STUDY_ID}/events`) {
-        return Promise.resolve(jsonResponse(200, { items: [], nextCursor: null }));
+        return Promise.resolve(jsonResponse(200, { items: threadEvents, nextCursor: null }));
       }
       if (path === `/studies/${STUDY_ID}/nodes`) {
         return Promise.resolve(jsonResponse(200, { items: graph.nodes }));
@@ -232,6 +255,32 @@ describe('StudyPage below 900 px (BIB-38)', () => {
     expect(root.style.getPropertyValue(STICKY_HEIGHT_VAR)).toBe('');
   });
 
+  it('stops the tab list sticking once it would cover more than a quarter of the viewport (BIB-53)', async () => {
+    stubViewport(true);
+    // jsdom has no layout: the tab list's height as it wraps at 200% text on a 375 x 812 phone.
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(379);
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 812 });
+    try {
+      renderWithQuery(<StudyPage />);
+      const tablist = await screen.findByRole('tablist', { name: 'Study workspace' });
+      const root = document.documentElement;
+      await waitFor(() => expect(tablist.className).not.toMatch(/\bsticky\b/));
+      expect(root.style.getPropertyValue(STICKY_HEIGHT_VAR)).toBe('0px');
+
+      // A taller viewport (the phone turned, or text made smaller) has room for it again.
+      Object.defineProperty(window, 'innerHeight', {
+        configurable: true,
+        value: Math.ceil(379 / MAX_STICKY_SHARE),
+      });
+      fireEvent(window, new Event('resize'));
+      await waitFor(() => expect(tablist.className).toMatch(/\bsticky\b/));
+      expect(root.style.getPropertyValue(STICKY_HEIGHT_VAR)).toBe('379px');
+    } finally {
+      vi.restoreAllMocks();
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 });
+    }
+  });
+
   it('moves between tabs with the arrow keys, Home and End, keeping one tab in the Tab order', async () => {
     stubViewport(true);
     renderWithQuery(<StudyPage />);
@@ -281,6 +330,32 @@ describe('StudyPage below 900 px (BIB-38)', () => {
       ]),
     );
     expect(await within(panel).findByText(/Added .* to the study\.|Question added/)).toBeTruthy();
+  });
+
+  it('shows a captured question in the already-open Study Thread without a reload', async () => {
+    stubViewport(true);
+    renderWithQuery(<StudyPage />);
+    await screen.findByRole('tablist', { name: 'Study workspace' });
+    fireEvent.click(tab('Thread'));
+    expect(
+      await within(screen.getByRole('tabpanel')).findByRole('heading', { name: 'Study thread' }),
+    ).toBeTruthy();
+    expect(screen.queryByText('Asked "What is conscience?"')).toBeNull();
+
+    fireEvent.click(tab('Notes'));
+    const notes = screen.getByRole('tabpanel');
+    fireEvent.click(await within(notes).findByRole('button', { name: 'Add node' }));
+    fireEvent.click(within(notes).getByRole('radio', { name: 'Question' }));
+    fireEvent.change(within(notes).getByLabelText('Statement'), {
+      target: { value: 'What is conscience?' },
+    });
+    fireEvent.click(within(notes).getByRole('button', { name: 'Create' }));
+    expect(await within(notes).findByText(/Added .* to the study\.|Question added/)).toBeTruthy();
+
+    fireEvent.click(tab('Thread'));
+    expect(
+      await within(screen.getByRole('tabpanel')).findByText('Asked "What is conscience?"'),
+    ).toBeTruthy();
   });
 
   it("switches to the Notes tab when Graph Preview's List View opens a node's detail", async () => {

@@ -27,6 +27,7 @@ import {
   notesQueryKey,
 } from '@/lib/notes';
 import { invalidateLibrary, studyQueryKey } from '@/lib/studies';
+import { invalidateThread } from '@/lib/thread';
 import { NoteContent } from './note-content';
 import { NoteEditor, type NoteEditorHandle } from './note-editor';
 import { NoteScriptureTarget, noteTargetText } from './note-target';
@@ -122,7 +123,12 @@ export function NotesPanel({
     returnFocusTo.current = null;
   }, [openId, live.data]);
 
-  const refreshLists = () => queryClient.invalidateQueries({ queryKey: noteListsKey(study.id) });
+  // A note change also recorded a Study Thread event.
+  const refreshLists = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: noteListsKey(study.id) }),
+      invalidateThread(queryClient, study.id),
+    ]);
 
   /**
    * Leaves the open note the way its Close button does: unsaved work is saved first, and a draft
@@ -291,7 +297,7 @@ export function NotesPanel({
 
       {editable ? (
         <div className="flex flex-wrap items-end gap-3">
-          <label htmlFor={ids.target} className="flex flex-col text-sm">
+          <label htmlFor={ids.target} className="flex min-w-0 max-w-full flex-col text-sm">
             Attach to
             <select
               id={ids.target}

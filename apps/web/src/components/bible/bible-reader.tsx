@@ -758,9 +758,9 @@ function TranslationPicker({
     <form
       onSubmit={submit}
       aria-label="Choose a translation"
-      className="flex flex-wrap items-end gap-2"
+      className="flex min-w-0 max-w-full flex-wrap items-end gap-2"
     >
-      <div className="flex flex-col gap-1">
+      <div className="flex min-w-0 max-w-full flex-col gap-1">
         <label htmlFor={id} className="text-sm">
           Translation
         </label>
