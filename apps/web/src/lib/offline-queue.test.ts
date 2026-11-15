@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api-client';
 import {
   clearOfflineQueue,
+  dropFailedEntry,
   listQueued,
   OFFLINE_QUEUE_MAX_AGE_MS,
   OFFLINE_QUEUE_MAX_PER_STUDY,
@@ -143,6 +144,26 @@ describe('offline queue (BIB-36, PRD section 27)', () => {
       ['key-1', 'key-1'],
       'conflict',
     ]);
+  });
+
+  it('moves a refused entry aside instead of overwriting it, and Discard removes only that one', async () => {
+    await queue(1, { draft: doc('refused') });
+    const [entry] = await listQueued(ACCOUNT);
+    await replayNoteSave(entry!, () => Promise.reject(new ApiError(409, {})), { isDefinite });
+    expect(await queue(1, { draft: doc('newer') })).toBe('queued');
+    const entries = await listQueued(ACCOUNT);
+    const refused = entries.find((e) => e.failed);
+    const newer = entries.find((e) => !e.failed);
+    expect([
+      [refused?.failed, refused?.attempt?.body.content],
+      [newer?.failed, newer?.draft],
+    ]).toStrictEqual([
+      ['conflict', doc('refused')],
+      [undefined, doc('newer')],
+    ]);
+    await dropFailedEntry(newer!.id);
+    await dropFailedEntry(refused!.id);
+    expect((await listQueued(ACCOUNT)).map((e) => e.draft)).toStrictEqual([doc('newer')]);
   });
 
   it('clears every account on sign-out', async () => {

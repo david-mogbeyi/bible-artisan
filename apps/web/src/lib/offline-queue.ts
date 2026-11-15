@@ -160,14 +160,19 @@ export async function queueNoteSave(input: QueueNoteInput): Promise<QueueWrite> 
     const id = noteEntryId(input.noteId);
     const entries = await allEntries(database);
     const previous = entries.find((entry) => entry.id === id);
-    const others = entries.filter((entry) => entry.id !== id);
+    // An entry whose replay was refused is kept for download only: a newer edit of the same
+    // note never overwrites it, it moves aside (under its own id) and still counts.
+    const parked: QueuedNoteSave | null = previous?.failed
+      ? { ...previous, id: `${id}:failed:${previous.queuedAt}:${previous.attempt?.key ?? ''}` }
+      : null;
+    const others = [...entries.filter((entry) => entry.id !== id), ...(parked ? [parked] : [])];
     const base = {
       id,
       kind: 'note' as const,
       accountId: input.accountId,
       studyId: input.studyId,
       noteId: input.noteId,
-      queuedAt: previous?.queuedAt ?? Date.now(),
+      queuedAt: (parked ? null : previous?.queuedAt) ?? Date.now(),
       revision: input.revision,
       attempt: input.attempt,
       draft: input.draft,
@@ -181,7 +186,8 @@ export async function queueNoteSave(input: QueueNoteInput): Promise<QueueWrite> 
     if (studyCount > OFFLINE_QUEUE_MAX_PER_STUDY || accountBytes > OFFLINE_QUEUE_MAX_BYTES) {
       return 'full';
     }
-    await database.put(STORE, entry);
+    const tx = database.transaction(STORE, 'readwrite');
+    await Promise.all([...(parked ? [tx.store.put(parked)] : []), tx.store.put(entry), tx.done]);
     changed();
     return 'queued';
   } catch {
@@ -205,6 +211,24 @@ export async function dropQueuedNote(noteId: string, onlyKey?: string | null): P
     }
     await tx.done;
     if (entry) changed();
+  } catch {
+    // Best effort: the entry expires on its own.
+  }
+}
+
+/**
+ * Discards an edit that couldn't sync, by its entry id; only while that entry is still marked
+ * failed, so a newer edit written under the same id meanwhile is never removed.
+ */
+export async function dropFailedEntry(id: string): Promise<void> {
+  const open = db();
+  if (!open) return;
+  try {
+    const tx = (await open).transaction(STORE, 'readwrite');
+    const entry = await tx.store.get(id);
+    if (entry?.failed) await tx.store.delete(id);
+    await tx.done;
+    if (entry?.failed) changed();
   } catch {
     // Best effort: the entry expires on its own.
   }

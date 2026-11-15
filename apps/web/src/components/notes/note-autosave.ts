@@ -240,6 +240,24 @@ export class NoteAutosave {
     this.unpersist();
   }
 
+  /**
+   * The offline queue already holds this note's unsynced work (an editor closed while offline;
+   * BIB-36): continue from it rather than from the note as loaded, so its frozen request is
+   * resent first with its key and later edits build on it, and a later offline write rewrites the
+   * entry with that request still in it instead of replacing it. Only before anything was edited
+   * here; returns the content the editor should show, or null when it did not adopt.
+   */
+  adopt(snapshot: OfflineSnapshot): NoteDocument | null {
+    if (this.stopped || this.inFlight !== null || this.unsaved) return null;
+    const content = snapshot.draft ?? snapshot.attempt?.body.content ?? this.acknowledged;
+    this.revision = snapshot.attempt?.body.expectedRevision ?? snapshot.revision;
+    this.frozen = snapshot.attempt;
+    this.latest = { ok: true, doc: content };
+    this.dirty = false;
+    this.persisted = true;
+    return content;
+  }
+
   /** The editor changed to `doc` (already converted; null when it can't be saved). */
   edited(doc: NoteDocument | null): void {
     this.latest = doc === null ? { ok: false, problem: 'structure' } : { ok: true, doc };

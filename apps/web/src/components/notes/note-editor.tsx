@@ -55,7 +55,13 @@ import {
   saveNote,
 } from '@/lib/notes';
 import { useNoteTabs } from '@/lib/note-tabs';
-import { claimNote, downloadDrafts, dropQueuedNote, queueNoteSave } from '@/lib/offline-queue';
+import {
+  claimNote,
+  downloadDrafts,
+  dropQueuedNote,
+  getQueuedNote,
+  queueNoteSave,
+} from '@/lib/offline-queue';
 import { invalidateLibrary } from '@/lib/studies';
 import { MAKE_NODE_COPY, MakeNodeForm } from './make-node-form';
 import { MENTION_COPY, MentionNodeForm } from './mention-node-form';
@@ -529,6 +535,25 @@ export function NoteEditor({
   useEffect(() => {
     if (editor) saver.attachReader(() => toNoteDraft(editor.getJSON()));
   }, [editor, saver]);
+
+  // Work this note still has in the offline queue (an editor closed while offline) is where
+  // editing continues: shown, and sent first, never overwritten by this editor's own entry.
+  // An entry kept only for download (its replay was refused) is left to the download notice.
+  useEffect(() => {
+    if (!editor) return;
+    let live = true;
+    void getQueuedNote(note.id).then((entry) => {
+      const accountId = queryClient.getQueryData<MeResponse>(ME_QUERY_KEY)?.id;
+      if (!live || !entry || entry.failed || entry.accountId !== accountId) return;
+      const content = saver.adopt(entry);
+      if (!content) return;
+      editor.commands.setContent(content, { emitUpdate: false });
+      saver.flush();
+    });
+    return () => {
+      live = false;
+    };
+  }, [editor, saver, note.id, queryClient]);
 
   // The note as loaded changed (a refetch, another tab's save) while nothing here is unsaved:
   // show it, and save from its revision. Older copies are ignored.
