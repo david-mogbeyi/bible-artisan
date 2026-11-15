@@ -72,6 +72,7 @@ export class AiAccessService {
    * The study must still be one a request could be made for: a study trashed (or gone past its
    * recovery window, or purged) after the request is `STUDY_UNAVAILABLE`, so none of its content
    * is sent and no result is published. Archived studies stay allowed, as for a new request.
+   * With `transaction`, the study row is also locked FOR SHARE (see `requireOwnedStudy`).
    */
   async jobBlocker(
     job: { ownerId: string; studyId: string; consentVersion: string },
@@ -84,23 +85,26 @@ export class AiAccessService {
     if (!this.consentIsCurrent(consent) || consent.consentVersion !== job.consentVersion) {
       return 'CONSENT_REVOKED';
     }
-    const row = await StudyAiSetting.findOne({
-      where: { ownerId: job.ownerId, studyId: job.studyId },
-      attributes: ['aiEnabled'],
-      ...(transaction ? { transaction } : {}),
-    });
-    if (row && !row.aiEnabled) return 'AI_DISABLED_FOR_STUDY';
     try {
+      // In the publishing transaction the study row is held FOR SHARE until commit, so a
+      // concurrent trash (which locks it FOR UPDATE) either committed first and is seen here, or
+      // waits until the result is stored and then cancels nothing that is still running.
       const study = await this.studies.requireOwnedStudy(
         job.ownerId,
         job.studyId,
-        transaction ? { transaction } : {},
+        transaction ? { transaction, lock: 'share' } : {},
       );
       if (study.lifecycle === 'trashed') return 'STUDY_UNAVAILABLE';
     } catch (error) {
       if (error instanceof NotFoundError) return 'STUDY_UNAVAILABLE';
       throw error;
     }
+    const row = await StudyAiSetting.findOne({
+      where: { ownerId: job.ownerId, studyId: job.studyId },
+      attributes: ['aiEnabled'],
+      ...(transaction ? { transaction } : {}),
+    });
+    if (row && !row.aiEnabled) return 'AI_DISABLED_FOR_STUDY';
     return null;
   }
 }

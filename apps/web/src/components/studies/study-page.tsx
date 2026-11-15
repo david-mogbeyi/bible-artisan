@@ -1,6 +1,6 @@
 'use client';
 
-import type { StudyResponse } from '@bible-artisan/contracts';
+import { PANE_NAMES, type PaneName, type StudyResponse } from '@bible-artisan/contracts';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { useCallback, useId, useState } from 'react';
@@ -19,7 +19,9 @@ import { classifyError } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
 import { createStudyExport } from '@/lib/exports';
 import { GraphViewProvider } from '@/lib/graph-store';
+import { fetchResume, resumeQueryKey } from '@/lib/resume';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
+import { useEndSessionOnLeave } from '@/lib/study-session';
 import { useNarrowViewport } from '@/lib/viewport';
 import { StudyEditor } from './study-editor';
 import { StudyLifecycleActions } from './study-lifecycle-actions';
@@ -30,7 +32,17 @@ import {
   type WorkspaceTab,
   WorkspacePanel,
   WorkspaceTabList,
+  WORKSPACE_TABS,
 } from './workspace-tabs';
+
+/** The saved open pane, when it is one of the workspace's tabs (BIB-34). */
+function savedTab(panes: Partial<Record<PaneName, boolean>> | null): WorkspaceTab | null {
+  if (!panes) return null;
+  return WORKSPACE_TABS.find((tab) => panes[tab] === true) ?? null;
+}
+
+const isPaneName = (tab: WorkspaceTab): tab is WorkspaceTab & PaneName =>
+  (PANE_NAMES as readonly string[]).includes(tab);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function uuidOrNull(value: string | null): string | null {
@@ -132,7 +144,27 @@ function StudyDetails({
   const narrow = useNarrowViewport();
   const idBase = useId();
   // A link to a node (`?node=`) opens where its detail is: the Nodes list on the Notes tab.
-  const [tab, setTab] = useState<WorkspaceTab>(nodeParam ? 'notes' : 'reader');
+  // Null until something opens a tab: then the saved pane (BIB-34), else Reader, is shown.
+  const [openedTab, setTab] = useState<WorkspaceTab | null>(nodeParam ? 'notes' : null);
+  /** The tab the user picked (saved as the open pane); null until they pick one. */
+  const [pickedTab, setPickedTab] = useState<WorkspaceTab | null>(null);
+  const pickTab = useCallback((next: WorkspaceTab) => {
+    setTab(next);
+    setPickedTab(next);
+  }, []);
+  // BIB-34: the saved view state (the same read as Home's resume card), restored once: the open
+  // pane, the canvas viewport and the reader's passage. Best effort: without it the page opens
+  // as before.
+  const saved = useQuery({
+    queryKey: resumeQueryKey(study.id),
+    queryFn: () => fetchResume(study.id),
+    retry: false,
+  });
+  const viewState = saved.data?.viewState ?? null;
+  // A link to a node, or a tab opened on this page, wins over the saved pane.
+  const tab: WorkspaceTab = openedTab ?? savedTab(viewState?.panes ?? null) ?? 'reader';
+  // BIB-33: leaving the study ends this tab's session in it at once.
+  useEndSessionOnLeave(study.id, study.lifecycle === 'active');
   const unsavedTabs = new Set<WorkspaceTab>();
   if (unsavedEdits) unsavedTabs.add('reader');
   if (unsavedNote) unsavedTabs.add('notes');
@@ -144,7 +176,7 @@ function StudyDetails({
       {/* BIB-52: warnings from 80% of a safety cap, and what still works at one (every tab). */}
       <StudyLimitsNotice studyId={study.id} />
       {narrow ? (
-        <WorkspaceTabList idBase={idBase} selected={tab} onSelect={setTab} unsaved={unsavedTabs} />
+        <WorkspaceTabList idBase={idBase} selected={tab} onSelect={pickTab} unsaved={unsavedTabs} />
       ) : null}
       <WorkspacePanel {...panel} tab="reader">
         <StudyLifecycleActions
@@ -212,12 +244,13 @@ function StudyDetails({
         ) : null}
       </WorkspacePanel>
       <GraphViewProvider initialSoloBranchId={branchParam}>
-        {/* BIB-34: saves the selection and branch the user picks, for Resume. */}
+        {/* BIB-34: saves the selection, branch, viewport and pane the user picks, for Resume. */}
         <ViewStateSaver
           studyId={study.id}
           active={study.lifecycle === 'active'}
           openedNodeId={uuidOrNull(nodeParam)}
           openedBranchId={branchParam}
+          openPane={pickedTab && isPaneName(pickedTab) ? pickedTab : null}
         />
         <FollowNodeDetail enabled={narrow} onOpen={openNotes} />
         <WorkspacePanel {...panel} tab="graph">
@@ -227,7 +260,11 @@ function StudyDetails({
           {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide.
               BIB-29: or the same graph as List View (the default below 900 px). */}
           <div className="w-[min(72rem,calc(100vw-2rem))] self-center">
-            <GraphSection study={study} onReload={onReload} />
+            <GraphSection
+              study={study}
+              onReload={onReload}
+              savedViewport={viewState?.viewport ?? null}
+            />
           </div>
         </WorkspacePanel>
         <WorkspacePanel {...panel} tab="notes">
@@ -249,7 +286,11 @@ function StudyDetails({
       <nav aria-label="Study" className="flex flex-wrap gap-4">
         {/* BIB-24: the reader with this study's highlights (opaque ids only in the URL). */}
         <Link
-          href={bibleHref(study.startingReference?.id ?? null, study.id)}
+          // BIB-34: back to the reader's saved passage, else the starting passage.
+          href={bibleHref(
+            viewState?.readerReferenceId ?? study.startingReference?.id ?? null,
+            study.id,
+          )}
           className="text-accent underline"
         >
           Read in this study

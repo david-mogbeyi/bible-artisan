@@ -1,4 +1,6 @@
 import {
+  type EndSessionResponse,
+  endSessionResponseSchema,
   IDEMPOTENCY_KEY_HEADER,
   type RecordActivityRequest,
   type RecordActivityResponse,
@@ -73,6 +75,24 @@ export function recordActivity(
     method: 'POST',
     headers: { [IDEMPOTENCY_KEY_HEADER]: body.clientMutationId },
     body: JSON.stringify(body),
+  });
+}
+
+/**
+ * `POST /studies/:id/sessions/end` (BIB-33): ends this tab's open session in the study. Sent as
+ * the page goes, so it uses `fetch` with `keepalive` through `apiFetch`, not `sendBeacon`: a beacon
+ * cannot send the JSON content type, the tab header or the Idempotency-Key, and every /v1 mutation
+ * must be JSON from an allowed Origin (the CSRF rules), which this request still is.
+ */
+export function endStudySession(
+  studyId: string,
+  { keepalive = false }: { keepalive?: boolean } = {},
+): Promise<EndSessionResponse> {
+  return apiFetch(`${studyPath(studyId)}/sessions/end`, endSessionResponseSchema, {
+    method: 'POST',
+    keepalive,
+    headers: { [IDEMPOTENCY_KEY_HEADER]: crypto.randomUUID() },
+    body: '{}',
   });
 }
 

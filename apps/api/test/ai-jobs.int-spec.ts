@@ -15,6 +15,7 @@ import { AiResult } from '../src/database/models/ai-result.model';
 import { ContextManifest } from '../src/database/models/context-manifest.model';
 import { Study } from '../src/database/models/study.model';
 import { User } from '../src/database/models/user.model';
+import { AiAccessService } from '../src/modules/ai/ai-access.service';
 import { AiJobRunnerService } from '../src/modules/ai/ai-job-runner.service';
 import { AI_PROVIDER, AI_RUNTIME, type AiRuntime } from '../src/modules/ai/provider/ai-provider';
 import { FakeAiProvider } from '../src/modules/ai/provider/fake-ai.provider';
@@ -613,13 +614,24 @@ describe('AI consent and jobs (BIB-39, BIB-40)', () => {
       expect(res.status).toBe(200);
     }
 
-    it('a study trashed after the request is never sent: the job is cancelled with no provider call', async () => {
+    it('trashing a study cancels its waiting jobs in the same transaction, leaving other studies alone, and nothing is sent', async () => {
       const owner = await optedIn();
       const studyId = await createStudy(owner);
+      const otherStudyId = await createStudy(owner);
       const { jobId } = await requested(owner, studyId);
+      const { jobId: otherJobId } = await requested(owner, otherStudyId);
       await trash(owner, studyId);
-      expect(await runner.runOnce()).toBe(jobId);
-      expect(fake.calls).toBe(0);
+      // Cancelled by the trash itself, before any worker pass.
+      const cancelled = await job(jobId);
+      expect([cancelled.state, cancelled.errorCode, cancelled.leaseToken]).toStrictEqual([
+        'cancelled',
+        'STUDY_UNAVAILABLE',
+        null,
+      ]);
+      expect((await job(otherJobId)).state).toBe('queued');
+      // The worker never leases it: the next job it runs is the other study's.
+      expect(await runner.runOnce()).toBe(otherJobId);
+      expect(fake.calls).toBe(1);
       const stored = await job(jobId);
       expect([stored.state, stored.errorCode]).toStrictEqual(['cancelled', 'STUDY_UNAVAILABLE']);
       expect(await ContextManifest.count({ where: { jobId } })).toBe(0);
@@ -636,6 +648,28 @@ describe('AI consent and jobs (BIB-39, BIB-40)', () => {
       const stored = await job(jobId);
       expect([stored.state, stored.errorCode]).toStrictEqual(['cancelled', 'STUDY_UNAVAILABLE']);
       expect(await AiResult.count({ where: { jobId } })).toBe(0);
+    });
+
+    it('publishing holds the study row FOR SHARE, so a concurrent trash waits for the result to commit', async () => {
+      const owner = await optedIn();
+      const studyId = await createStudy(owner);
+      const { jobId } = await requested(owner, studyId);
+      const stored = await job(jobId);
+      const access = app.get(AiAccessService);
+      await db.transaction(async (transaction) => {
+        expect(await access.jobBlocker(stored, transaction)).toBeNull();
+        // A lifecycle change locks the study FOR UPDATE: it cannot get the row until commit.
+        await expect(
+          db.transaction((other) =>
+            db.query('SELECT id FROM study WHERE id = $1 FOR UPDATE NOWAIT', {
+              bind: [studyId],
+              transaction: other,
+            }),
+          ),
+        ).rejects.toMatchObject({ parent: { code: '55P03' } });
+      });
+      // Released at commit.
+      await trash(owner, studyId);
     });
 
     it('marks a finished job stale once the study content moves past its basis', async () => {

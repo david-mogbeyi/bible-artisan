@@ -68,10 +68,14 @@ const STUDY = {
 };
 
 let studyReplies: Array<Response | Error>;
+/** `GET /resume` (BIB-34): the saved view state, or none (404) by default. */
+let resumeReply: () => Response;
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   studyReplies = [];
+  resumeReply = () =>
+    jsonResponse(404, { code: 'NOT_FOUND', message: 'x', retryable: false, correlationId: 'x' });
   fetchMock = vi.fn((input: string) => {
     if (input.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
     // The page's notes panel (BIB-23): no notes in these tests.
@@ -85,6 +89,7 @@ beforeEach(() => {
     if (input.endsWith('/graph')) return Promise.resolve(jsonResponse(200, EMPTY_GRAPH));
     // The page's safety-cap notice (BIB-52): everything well below the caps in these tests.
     if (input.endsWith('/limits')) return Promise.resolve(jsonResponse(200, LIMITS_OK));
+    if (input.endsWith('/resume')) return Promise.resolve(resumeReply());
     if (input.includes('/nodes')) return Promise.resolve(jsonResponse(200, { items: [] }));
     if (input.endsWith(`/studies/${STUDY_ID}`)) {
       const next = studyReplies.shift();
@@ -125,6 +130,40 @@ describe('StudyPage', () => {
       `/bible?ref=${ROMANS.id}&study=${STUDY.id}`,
     ]);
     expect(screen.getByText('What is conscience?')).toBeTruthy();
+  });
+
+  it("opens the reader at the passage saved in the study's view state (BIB-34)", async () => {
+    const JOHN_ID = '99999999-2222-4333-8444-555555555555';
+    resumeReply = () =>
+      jsonResponse(200, {
+        studyId: STUDY.id,
+        title: STUDY.title,
+        lifecycle: 'active',
+        lastActivityAt: '2026-10-01T12:00:00.000Z',
+        activeQuestion: null,
+        activeBranch: null,
+        lastPassage: null,
+        recentConclusion: null,
+        openQuestions: { items: [], total: 0 },
+        target: { kind: 'study', nodeId: null, referenceId: null, branchId: null, fallback: false },
+        viewState: {
+          viewRevision: 4,
+          selectedNodeId: null,
+          activeBranchId: null,
+          activeQuestionNodeId: null,
+          readerReferenceId: JOHN_ID,
+          viewport: { x: 10, y: 20, zoom: 1.5 },
+          panes: { thread: true },
+          contextSavedAt: null,
+        },
+      });
+    studyReplies.push(jsonResponse(200, STUDY));
+    renderWithQuery(<StudyPage />);
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: 'Read in this study' }).getAttribute('href')).toBe(
+        `/bible?ref=${JOHN_ID}&study=${STUDY.id}`,
+      ),
+    );
   });
 
   it('shows "None yet" for a blank study\'s passage, question and tags', async () => {

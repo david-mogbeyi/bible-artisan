@@ -84,12 +84,17 @@ function stubViewport(narrow: boolean) {
 }
 
 let posts: { path: string; body: unknown }[];
+/** BIB-34: the saved open pane (`GET /resume`), or none. */
+let savedPanes: Record<string, boolean> | null;
+let viewSaves: unknown[];
 let graph: { nodes: unknown[] };
 
 beforeEach(() => {
   search = new URLSearchParams();
   graph = EMPTY_GRAPH;
   posts = [];
+  savedPanes = null;
+  viewSaves = [];
   vi.stubGlobal(
     'fetch',
     vi.fn((input: string, init: RequestInit = {}) => {
@@ -99,7 +104,57 @@ beforeEach(() => {
         posts.push({ path, body: JSON.parse(init.body as string) });
         return Promise.resolve(jsonResponse(201, { ...CREATED, studyRevision: 5 }));
       }
+      if (method === 'PATCH' && path === `/studies/${STUDY_ID}/view-state`) {
+        viewSaves.push(JSON.parse(init.body as string));
+        return Promise.resolve(
+          jsonResponse(200, {
+            viewState: {
+              viewRevision: 2,
+              selectedNodeId: null,
+              activeBranchId: null,
+              activeQuestionNodeId: null,
+              readerReferenceId: null,
+              viewport: null,
+              panes: { thread: true },
+              contextSavedAt: null,
+            },
+            lastEventSequence: '3',
+          }),
+        );
+      }
       if (method !== 'GET') return Promise.reject(new TypeError('unexpected write'));
+      if (path === `/studies/${STUDY_ID}/resume` && savedPanes) {
+        return Promise.resolve(
+          jsonResponse(200, {
+            studyId: STUDY_ID,
+            title: 'T',
+            lifecycle: 'active',
+            lastActivityAt: '2026-10-01T12:00:00.000Z',
+            activeQuestion: null,
+            activeBranch: null,
+            lastPassage: null,
+            recentConclusion: null,
+            openQuestions: { items: [], total: 0 },
+            target: {
+              kind: 'study',
+              nodeId: null,
+              referenceId: null,
+              branchId: null,
+              fallback: false,
+            },
+            viewState: {
+              viewRevision: 1,
+              selectedNodeId: null,
+              activeBranchId: null,
+              activeQuestionNodeId: null,
+              readerReferenceId: null,
+              viewport: null,
+              panes: savedPanes,
+              contextSavedAt: null,
+            },
+          }),
+        );
+      }
       if (path === '/me') return Promise.resolve(jsonResponse(200, ME));
       if (path === `/studies/${STUDY_ID}`) return Promise.resolve(jsonResponse(200, STUDY));
       if (path === `/studies/${STUDY_ID}/graph`) {
@@ -152,6 +207,19 @@ describe('StudyPage below 900 px (BIB-38)', () => {
     expect(
       screen.getByText('Starting passage').closest('[role="tabpanel"]')?.hasAttribute('hidden'),
     ).toBe(true);
+  });
+
+  it('reopens the pane saved in the view state, and saves the tab the user picks (BIB-34)', async () => {
+    stubViewport(true);
+    savedPanes = { summary: true };
+    renderWithQuery(<StudyPage />);
+    await screen.findByRole('tablist', { name: 'Study workspace' });
+    await waitFor(() => expect(tab('Summary').getAttribute('aria-selected')).toBe('true'));
+    expect(viewSaves).toStrictEqual([]);
+
+    fireEvent.click(tab('Thread'));
+    await waitFor(() => expect(viewSaves).toHaveLength(1), { timeout: 3000 });
+    expect(viewSaves).toStrictEqual([{ expectedRevision: 1, panes: { thread: true } }]);
   });
 
   it('keeps the sticky tab list height as page scroll padding, so focus is never hidden under it (BIB-53)', async () => {

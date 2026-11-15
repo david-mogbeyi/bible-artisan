@@ -1,6 +1,6 @@
 'use client';
 
-import type { StudyNodeType } from '@bible-artisan/contracts';
+import type { StudyNodeType, Viewport } from '@bible-artisan/contracts';
 import { createContext, type ReactNode, useContext, useState } from 'react';
 import { createStore, type StoreApi, useStore } from 'zustand';
 import { type FocusOption, MIN_EDIT_WIDTH, type Positions, type XY } from './graph-view';
@@ -61,6 +61,11 @@ export interface GraphViewState {
   localPositions: Positions;
   /** Node ids whose local position still has to be saved (the pending-save queue), oldest first. */
   pendingIds: ReadonlySet<string>;
+  /**
+   * The canvas viewport the user last panned or zoomed to (BIB-34), saved as view state; null
+   * until they do. Presentation only, in canvas units, never React Flow's serialization.
+   */
+  viewport: Viewport | null;
   /** The latest arrangement's ids still queued: they are saved together, in one request. */
   pendingGroup: ReadonlySet<string>;
 
@@ -95,6 +100,8 @@ export interface GraphViewState {
   requeue: (ids: readonly string[]) => void;
   /** Forgets local positions (and queued saves) of these nodes: the server's layout wins. */
   forget: (ids: readonly string[]) => void;
+  /** The user moved or zoomed the canvas. */
+  setViewport: (viewport: Viewport) => void;
 }
 
 export type GraphViewStore = StoreApi<GraphViewState>;
@@ -115,6 +122,7 @@ export function createGraphViewStore(
     localPositions: {},
     pendingIds: new Set(),
     pendingGroup: new Set(),
+    viewport: null,
 
     select: (ids, source, { focusDetail = false } = {}) =>
       set(({ history }) => ({
@@ -200,6 +208,7 @@ export function createGraphViewStore(
           pendingGroup: new Set([...pendingGroup].filter((id) => !gone.has(id))),
         };
       }),
+    setViewport: (viewport) => set({ viewport }),
   }));
 }
 

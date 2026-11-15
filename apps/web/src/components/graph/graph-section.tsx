@@ -7,6 +7,7 @@ import {
   NODE_TYPE_NAMES,
   STUDY_NODE_TYPES,
   type StudyResponse,
+  type Viewport,
 } from '@bible-artisan/contracts';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -124,10 +125,13 @@ function useWideViewport(): boolean {
 export function GraphSection({
   study,
   onReload,
+  savedViewport = null,
 }: {
   study: StudyResponse;
   /** Re-reads the study (the locked alert's Reload). */
   onReload?: () => Promise<unknown>;
+  /** BIB-34: the viewport saved in the study's view state, restored once (else fit all). */
+  savedViewport?: Viewport | null;
 }) {
   const headingId = useId();
   const graph = useQuery({
@@ -154,7 +158,12 @@ export function GraphSection({
             <p className="text-muted">{GRAPH_COPY.empty}</p>
           ) : (
             <ReactFlowProvider>
-              <GraphCanvas study={study} graph={graph.data} onReload={onReload} />
+              <GraphCanvas
+                study={study}
+                graph={graph.data}
+                onReload={onReload}
+                savedViewport={savedViewport}
+              />
             </ReactFlowProvider>
           )}
         </>
@@ -190,10 +199,12 @@ function GraphCanvas({
   study,
   graph,
   onReload,
+  savedViewport,
 }: {
   study: StudyResponse;
   graph: GraphResponse;
   onReload: (() => Promise<unknown>) | undefined;
+  savedViewport: Viewport | null;
 }) {
   const store = useGraphViewStore();
   const flow = useReactFlow();
@@ -231,6 +242,22 @@ function GraphCanvas({
   const focusList = useRef(false);
   const saver = usePositionSaver(study.id, lock);
   const { save } = saver;
+
+  // BIB-34: the saved viewport, restored once when it is known, unless the user already moved
+  // the canvas. It may arrive after the canvas fit itself to the graph.
+  const restoredViewport = useRef(false);
+  useEffect(() => {
+    if (!savedViewport || restoredViewport.current || viewMode !== 'graph') return;
+    restoredViewport.current = true;
+    if (store.getState().viewport === null) void flow.setViewport(savedViewport);
+  }, [flow, savedViewport, store, viewMode]);
+  /** Only the user's own pans and zooms (a programmatic move has no event) are saved. */
+  const onMoveEnd = useCallback(
+    (event: MouseEvent | TouchEvent | null, viewport: Viewport) => {
+      if (event) store.getState().setViewport(viewport);
+    },
+    [store],
+  );
 
   // Everything derived is keyed on the snapshot's content, not the whole response: a position
   // save (new positions and view revision) rebuilds nothing but the moved nodes (graph-view.ts).
@@ -798,7 +825,9 @@ function GraphCanvas({
                 onNodesChange={onNodesChange}
                 minZoom={0.25}
                 maxZoom={2}
-                fitView
+                fitView={!savedViewport}
+                {...(savedViewport ? { defaultViewport: savedViewport } : {})}
+                onMoveEnd={onMoveEnd}
                 nodesDraggable={movable && !preview}
                 nodesConnectable={connectable}
                 connectionMode={ConnectionMode.Strict}
@@ -892,13 +921,17 @@ const zoomSelector = (state: { transform: [number, number, number] }) =>
 /** Native buttons for the canvas viewport, so none of it needs a mouse or a gesture. */
 function ZoomControls() {
   const flow = useReactFlow();
+  const store = useGraphViewStore();
   const zoom = useFlowStore(zoomSelector);
   const selectedIds = useGraphView((s) => s.selectedNodeIds);
+  /** A button's move is the user's: saved as view state once it lands (BIB-34). */
+  const moved = (done: Promise<boolean>) =>
+    void done.then(() => store.getState().setViewport(flow.getViewport()));
   return (
     <>
       <button
         type="button"
-        onClick={() => void flow.zoomOut()}
+        onClick={() => moved(flow.zoomOut())}
         className="rounded border border-muted px-2 py-1"
       >
         Zoom out
@@ -908,14 +941,14 @@ function ZoomControls() {
       </span>
       <button
         type="button"
-        onClick={() => void flow.zoomIn()}
+        onClick={() => moved(flow.zoomIn())}
         className="rounded border border-muted px-2 py-1"
       >
         Zoom in
       </button>
       <button
         type="button"
-        onClick={() => void flow.fitView()}
+        onClick={() => moved(flow.fitView())}
         className="rounded border border-muted px-2 py-1"
       >
         Fit all
@@ -923,7 +956,7 @@ function ZoomControls() {
       <button
         type="button"
         disabled={selectedIds.length === 0}
-        onClick={() => void flow.fitView({ nodes: selectedIds.map((id) => ({ id })) })}
+        onClick={() => moved(flow.fitView({ nodes: selectedIds.map((id) => ({ id })) }))}
         className="rounded border border-muted px-2 py-1 disabled:opacity-50"
       >
         Fit selection
