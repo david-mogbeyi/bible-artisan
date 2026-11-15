@@ -8,6 +8,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REASONING_COPY, ReasoningPath } from '@/components/nodes/reasoning-path';
 import { useGraphView } from '@/lib/graph-store';
+import { threadQueryKey } from '@/lib/thread';
 import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { INSIGHTS_COPY, StudyInsights } from './study-insights';
@@ -359,6 +360,58 @@ describe('StudyInsights (BIB-44, BIB-45)', () => {
           body: { expectedRevision: 1 },
         },
       ]),
+    );
+  });
+});
+
+describe('StudyInsights dismissal', () => {
+  it('dismisses a question proposal explicitly and marks the Study Thread stale, so it shows the dismissal', async () => {
+    const question: AiProposal = {
+      id: PRO,
+      studyId: STUDY_ID,
+      capability: 'questions',
+      status: 'proposed',
+      text: 'What does the Spirit witness to?',
+      rationale: 'The study has no question about the witness yet.',
+      evidence: [],
+      revision: 1,
+      basisRevision: 3,
+      modelId: 'fake-model-1',
+      createdAt: T,
+      decidedAt: null,
+      acceptedNodeId: null,
+    };
+    const AI = `/studies/${STUDY_ID}/ai`;
+    reply(`GET ${AI}/suggestions?capability=tensions`, jsonResponse(200, { items: [] }));
+    reply(
+      `GET ${AI}/proposals?capability=questions`,
+      jsonResponse(200, { items: [question] }),
+      jsonResponse(200, { items: [] }),
+    );
+    reply(`GET ${AI}/proposals?capability=passages`, jsonResponse(200, { items: [] }));
+    reply(
+      `POST ${AI}/proposals/${PRO}/reject`,
+      jsonResponse(200, {
+        proposalId: PRO,
+        status: 'rejected',
+        revision: 2,
+        lastEventSequence: '9',
+      }),
+    );
+    const { queryClient } = renderWithQuery(<StudyInsights studyId={STUDY_ID} active />);
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    fireEvent.click(screen.getByRole('button', { name: INSIGHTS_COPY.open }));
+    const card = (
+      await screen.findByText('The study has no question about the witness yet.', { exact: false })
+    ).closest('li') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: /^Dismiss/ }));
+    await waitFor(() =>
+      expect(requests.filter((r) => r.method === 'POST')).toStrictEqual([
+        { method: 'POST', path: `${AI}/proposals/${PRO}/reject`, body: { expectedRevision: 1 } },
+      ]),
+    );
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: threadQueryKey(STUDY_ID) }),
     );
   });
 });

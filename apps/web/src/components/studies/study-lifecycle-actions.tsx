@@ -18,6 +18,7 @@ import {
   type StudyLifecycleChange,
   studyQueryKey,
 } from '@/lib/studies';
+import { invalidateThread } from '@/lib/thread';
 
 export const ARCHIVED_BANNER = 'Archived. This study is read-only until you unarchive it.';
 export const CHANGED_ELSEWHERE = 'This study changed elsewhere. Reload to see the latest.';
@@ -128,6 +129,8 @@ export function StudyLifecycleActions({
       );
       // The study leaves one Show listing for another, and its last activity moved.
       void invalidateLibrary(queryClient);
+      // The change recorded a Study Thread event (Archived / Unarchived the study).
+      void invalidateThread(queryClient, study.id);
       setAnnouncement(DONE[attempt.change]);
     },
     onError: (error, attempt) => {

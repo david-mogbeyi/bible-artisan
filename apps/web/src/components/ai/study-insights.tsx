@@ -20,6 +20,7 @@ import { ApiError } from '@/lib/api-client';
 import { bibleHref } from '@/lib/bible';
 import { edgeSentence, invalidateEdgeChange } from '@/lib/edges';
 import { invalidateNodeChange, listNodes, nodeOptionText, nodesQueryKey } from '@/lib/nodes';
+import { invalidateThread } from '@/lib/thread';
 
 export const INSIGHTS_COPY = {
   open: 'Show AI suggestions for this study',
@@ -304,6 +305,8 @@ function InsightItem({
       const key = keyFor(JSON.stringify(['reject', body]));
       if (item.kind === 'tension') await rejectAiSuggestion(studyId, id, body, key);
       else await rejectProposal(studyId, id, body, key);
+      // The rejection recorded a Study Thread event.
+      void invalidateThread(queryClient, studyId);
     },
     onSuccess: () => onDecided(INSIGHTS_COPY.decided),
     onError,

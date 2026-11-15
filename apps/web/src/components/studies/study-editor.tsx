@@ -27,6 +27,7 @@ import { invalidateGraph } from '@/lib/graph';
 import { ApiError } from '@/lib/api-client';
 import { nodesQueryKey } from '@/lib/nodes';
 import { invalidateLibrary, studyQueryKey, updateStudy } from '@/lib/studies';
+import { invalidateThread } from '@/lib/thread';
 
 export const CONFLICT =
   'This study changed somewhere else, so nothing was saved. Your edits are kept here.';
@@ -327,6 +328,9 @@ export function StudyEditor({
       // Every committed edit moves last activity, and may change the title, pin or tags the
       // library lists and orders by (BIB-21).
       void invalidateLibrary(queryClient);
+      // It also recorded a Study Thread event (a rename, a new main question), which an open
+      // Thread shows without a reload.
+      void invalidateThread(queryClient, study.id);
       // A new main question is a new Question node, and the first one may root the initial
       // branch: refresh the node list (the Nodes section and the Notes "Attach to" select).
       if (attempt.body.mainQuestion !== undefined) {

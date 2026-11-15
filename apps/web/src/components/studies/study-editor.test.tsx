@@ -61,6 +61,28 @@ const edited = (state: Record<string, unknown>, lastEventSequence = '2') => {
   return { ...rest, lastEventSequence };
 };
 
+/** The Study Thread's events (`GET /events`), newest first. */
+let threadEvents: unknown[];
+
+/** The `study_renamed` event a title change records. */
+const RENAMED_EVENT = {
+  id: '00000000-0000-4000-8000-000000000002',
+  sequence: '2',
+  type: 'study_renamed',
+  visibility: 'visible',
+  actorKind: 'user',
+  occurredAt: '2026-10-01T12:05:00.000Z',
+  recordedAt: '2026-10-01T12:05:00.000Z',
+  sessionId: null,
+  displayText: 'Renamed the study',
+  targetRef: null,
+  originRef: null,
+  branchId: null,
+  parentVisitEventId: null,
+  correlationId: null,
+  delayedSync: false,
+};
+
 let studyReplies: Array<Response | Error>;
 let patchReplies: Array<Response | Error | Promise<Response>>;
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -68,13 +90,14 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   studyReplies = [];
   patchReplies = [];
+  threadEvents = [];
   fetchMock = vi.fn((input: string, init?: RequestInit) => {
     if (input.endsWith('/me')) return Promise.resolve(jsonResponse(200, ME));
     // The page's notes panel (BIB-23): no notes in these tests.
     if (input.includes('/notes')) return Promise.resolve(jsonResponse(200, { items: [] }));
-    // The page's thread (BIB-32): nothing recorded in these tests.
+    // The page's thread (BIB-32): what the test recorded, usually nothing.
     if (input.includes('/events')) {
-      return Promise.resolve(jsonResponse(200, { items: [], nextCursor: null }));
+      return Promise.resolve(jsonResponse(200, { items: threadEvents, nextCursor: null }));
     }
     // The page's Nodes section (BIB-25): no nodes in these tests.
     // The page's Graph section (BIB-28): an empty graph in these tests.
@@ -205,6 +228,25 @@ describe('StudyEditor', () => {
     ).toStrictEqual([true, true]);
     // The study's own cache is updated in place, never thrown away.
     expect(view.queryClient.getQueryState(studyQueryKey(STUDY_ID))?.isInvalidated).toBe(false);
+  });
+
+  it('shows the rename in the already-open Study Thread without a reload', async () => {
+    await openStudy();
+    const thread = await screen.findByRole('heading', { name: 'Study thread' });
+    const threadRegion = thread.closest('section') as HTMLElement;
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([i]) => String(i).includes('/events'))).toBe(true),
+    );
+    expect(within(threadRegion).queryByText('Renamed the study')).toBeNull();
+
+    fireEvent.change(field('Title'), { target: { value: 'Conscience renamed' } });
+    patchReplies.push(
+      jsonResponse(200, edited({ title: 'Conscience renamed', revision: 2, contentRevision: 2 })),
+    );
+    threadEvents = [RENAMED_EVENT];
+    fireEvent.click(save());
+    expect(await screen.findByText('Saved.')).toBeTruthy();
+    expect(await within(threadRegion).findByText('Renamed the study')).toBeTruthy();
   });
 
   it('refetches the node list after a new main question commits, and only then', async () => {
