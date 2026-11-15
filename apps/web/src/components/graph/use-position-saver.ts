@@ -241,12 +241,15 @@ export function usePositionSaver(studyId: string, onLocked: () => void) {
 
   // Leaving: the page (pagehide) or the study (unmount, a route change) sends the queued moves
   // now rather than dropping them with the debounce. The request starts synchronously, with
-  // keepalive so it outlives the page.
+  // keepalive so it outlives the page. On `pagehide` it listens in the capture phase, so it runs
+  // before the view-state saver's listener: both writes share the study's view lane, and a write
+  // queued behind another one in the lane never leaves a page that is going. The move is the
+  // user's data; a waiting view-state save is the one left behind.
   useEffect(() => {
     const leave = () => void flushRef.current({ keepalive: true });
-    window.addEventListener('pagehide', leave);
+    window.addEventListener('pagehide', leave, { capture: true });
     return () => {
-      window.removeEventListener('pagehide', leave);
+      window.removeEventListener('pagehide', leave, { capture: true });
       leave();
     };
   }, []);
