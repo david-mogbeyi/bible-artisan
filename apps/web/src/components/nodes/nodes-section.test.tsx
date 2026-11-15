@@ -249,7 +249,12 @@ describe('NodesSection', () => {
     reply(`POST ${NODES}`, jsonResponse(201, { ...mutation(), studyRevision: 5 }));
     reply(
       `GET ${NODE}`,
-      jsonResponse(200, { type: 'thought', ...common(), text: 'Maybe a\nsecond witness' }),
+      jsonResponse(200, {
+        type: 'thought',
+        ...common(),
+        text: 'Maybe a\nsecond witness',
+        derivedFromNote: null,
+      }),
     );
     const { queryClient } = renderSection();
     await openAdd();
@@ -571,7 +576,10 @@ describe('NodesSection', () => {
       new TypeError('offline'),
       jsonResponse(201, { ...mutation(), studyRevision: 6 }),
     );
-    reply(`GET ${NODE}`, jsonResponse(200, { type: 'thought', ...common(), text: 'Kept' }));
+    reply(
+      `GET ${NODE}`,
+      jsonResponse(200, { type: 'thought', ...common(), text: 'Kept', derivedFromNote: null }),
+    );
     const { onReload } = renderSection();
     await openAdd();
     fireEvent.change(screen.getByLabelText('Text'), { target: { value: 'Kept' } });
@@ -669,6 +677,7 @@ describe('NodesSection', () => {
       text: 'First look',
       observationKind: 'textual_observation',
       establishedAt: null,
+      derivedFromNote: null,
     };
     reply(
       `GET ${NODES}`,
@@ -817,7 +826,7 @@ describe('NodesSection', () => {
   });
 
   it('keeps the draft on a 409 and replaces it only after Reload is confirmed; says when nothing changed', async () => {
-    const thought = { type: 'thought', ...common(), text: 'Mine' };
+    const thought = { type: 'thought', ...common(), text: 'Mine', derivedFromNote: null };
     reply(`GET ${NODES}`, jsonResponse(200, { items: [summary({ label: 'Mine' })] }));
     reply(
       `GET ${NODE}`,
@@ -859,9 +868,33 @@ describe('NodesSection', () => {
     ]);
   });
 
+  it('says when a node was derived from a note, and when that note is in the trash (BIB-57)', async () => {
+    const NOTE_ID = 'eeeeeeee-2222-4333-8444-555555555555';
+    reply(`GET ${NODES}`, jsonResponse(200, { items: [summary()] }));
+    reply(
+      `GET ${NODE}`,
+      jsonResponse(200, {
+        type: 'thought',
+        ...common(),
+        text: 'T',
+        derivedFromNote: { id: NOTE_ID, trashed: true },
+      }),
+    );
+    renderSection();
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Thought · You Maybe a second witness' }),
+    );
+    const region = await screen.findByRole('region', { name: 'Thought' });
+    expect(within(region).getByText('Provenance')).toBeTruthy();
+    expect(within(region).getByText('Derived from a note in the trash')).toBeTruthy();
+  });
+
   it('is read-only for an archived study: nodes and details are readable, with no Add node or Edit', async () => {
     reply(`GET ${NODES}`, jsonResponse(200, { items: [summary()] }));
-    reply(`GET ${NODE}`, jsonResponse(200, { type: 'thought', ...common(), text: 'T' }));
+    reply(
+      `GET ${NODE}`,
+      jsonResponse(200, { type: 'thought', ...common(), text: 'T', derivedFromNote: null }),
+    );
     renderSection({ ...STUDY, lifecycle: 'archived' });
     fireEvent.click(
       await screen.findByRole('button', { name: 'Thought · You Maybe a second witness' }),
@@ -1009,7 +1042,10 @@ describe('NodesSection', () => {
 
     it('drops the revisit status once another node is selected, and does not bring it back', async () => {
       const other = summary();
-      reply(`GET ${NODE}`, jsonResponse(200, { type: 'thought', ...common(), text: 'T' }));
+      reply(
+        `GET ${NODE}`,
+        jsonResponse(200, { type: 'thought', ...common(), text: 'T', derivedFromNote: null }),
+      );
       await focusExisting([existing, other]);
       fireEvent.click(screen.getByRole('button', { name: 'Thought · You Maybe a second witness' }));
       await screen.findByRole('region', { name: 'Thought' });

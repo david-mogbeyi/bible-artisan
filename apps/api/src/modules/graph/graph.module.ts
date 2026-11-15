@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MutationModule } from '../../common/mutation/mutation.module';
 import { BibleContentModule } from '../bible-content/bible-content.module';
+import { NotesModule } from '../notes/notes.module';
 import { StudyModule } from '../study/study.module';
 import { BranchesController } from './branches.controller';
 import { BranchesService } from './branches.service';
@@ -31,10 +32,11 @@ import { ThreadModule } from '../thread/thread.module';
  * `node_version_evidence`; only the owner's node PATCH changes a status or sets the marker.
  * Resume (BIB-34, `GET /studies/:id/resume`, `PATCH /studies/:id/view-state`): the saved
  * workspace context on `study_view_state` and the deterministic resume card; the last visit comes
- * from Thread's `ThreadService.lastVisit`.
+ * from Thread's `ThreadService.lastVisit`. A node converted from a note (BIB-57) checks and reads
+ * that note through `NotesService`.
  */
 @Module({
-  imports: [MutationModule, StudyModule, BibleContentModule, ThreadModule],
+  imports: [MutationModule, StudyModule, BibleContentModule, ThreadModule, NotesModule],
   controllers: [
     NodesController,
     EdgesController,

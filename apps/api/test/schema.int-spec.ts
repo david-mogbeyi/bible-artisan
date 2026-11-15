@@ -360,6 +360,7 @@ describe('schema (composite-key owner isolation)', () => {
       { name: 'study_event_study_owner_fk', action: 'c' },
       { name: 'study_main_question_node_fk', action: 'a' },
       { name: 'study_node_canonical_node_fk', action: 'a' },
+      { name: 'study_node_derived_from_note_fk', action: 'a' },
       { name: 'study_node_scripture_reference_id_fkey', action: 'a' },
       { name: 'study_node_study_owner_fk', action: 'c' },
       { name: 'study_original_question_node_fk', action: 'a' },

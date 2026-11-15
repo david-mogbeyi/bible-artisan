@@ -125,6 +125,7 @@ beforeEach(() => {
                   text: node.label,
                   observationKind: 'textual_observation',
                   establishedAt: null,
+                  derivedFromNote: null,
                 }
               : {
                   type: 'source',

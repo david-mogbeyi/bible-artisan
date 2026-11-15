@@ -66,6 +66,10 @@ const EXPORT_MIGRATION = '20261115140000_create_export_file.ts';
 const ACCOUNT_DELETION_MIGRATION = '20261115140001_add_account_deletion.ts';
 const ACCOUNT_DELETION_REFUSED =
   'account deletion drop refused: accounts or deletion tombstones exist (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-57's node derived-from-note migration. */
+const DERIVED_FROM_MIGRATION = '20261115140057_add_node_derived_from_note.ts';
+const DERIVED_FROM_REFUSED =
+  'node derived-from drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'account_deletion',
@@ -288,12 +292,12 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
 
-      // No opt-in at all: the newest migration (BIB-48's account deletion) is the first `down`
+      // No opt-in at all: the newest migration (BIB-57's node derived-from) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: ACCOUNT_DELETION_REFUSED,
+        message: DERIVED_FROM_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -586,6 +590,8 @@ describe('migration reversibility', () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
     try {
+      // The newer BIB-57 step goes down first.
+      await withStudyDataDropAllowed(() => migrator.down({ to: DERIVED_FROM_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.slice(-2)).toStrictEqual([EXPORT_MIGRATION, ACCOUNT_DELETION_MIGRATION]);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -629,7 +635,7 @@ describe('migration reversibility', () => {
     const userId = await seedStudyData();
     const migrator = createMigrator(db);
     try {
-      // Later migrations (BIB-33's sessions, BIB-47's and BIB-48's) step down first.
+      // Later migrations (BIB-33's sessions, BIB-47's, BIB-48's and BIB-57's) step down first.
       await withStudyDataDropAllowed(() => migrator.down({ to: SESSIONS_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(DELETED_WITH_MIGRATION);
@@ -676,8 +682,48 @@ describe('migration reversibility', () => {
         SESSIONS_MIGRATION,
         EXPORT_MIGRATION,
         ACCOUNT_DELETION_MIGRATION,
+        DERIVED_FROM_MIGRATION,
       ]);
       expect(await columns(['study_edge'])).toContain('study_edge.deleted_with_node_id');
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies the node derived-from-note column (BIB-57) only with the study-data opt-in; the FK, CHECK and index come back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    const derivedSchema = async () =>
+      db.query<{ name: string }>(
+        `SELECT conname AS name FROM pg_constraint
+          WHERE conrelid = 'study_node'::regclass AND conname LIKE 'study\\_node\\_derived%'
+         UNION ALL
+         SELECT indexname FROM pg_indexes WHERE indexname LIKE 'study\\_node\\_derived%'
+          ORDER BY name`,
+        { type: QueryTypes.SELECT },
+      );
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(DERIVED_FROM_MIGRATION);
+      const schemaBefore = await derivedSchema();
+      expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'study_node_derived_from_note_check',
+        'study_node_derived_from_note_fk',
+        'study_node_derived_from_note_idx',
+      ]);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: DERIVED_FROM_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await columns(['study_node'])).not.toContain('study_node.derived_from_note_id');
+      expect(await derivedSchema()).toStrictEqual([]);
+      await migrator.up();
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await derivedSchema()).toStrictEqual(schemaBefore);
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();
@@ -1006,6 +1052,7 @@ describe('migration reversibility', () => {
         'study_node_body_check',
         'study_node_canonical_check',
         'study_node_conclusion_check',
+        'study_node_derived_from_note_check',
         'study_node_established_check',
         'study_node_identity_immutable',
         'study_node_observation_check',

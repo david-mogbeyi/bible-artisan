@@ -11,6 +11,7 @@ import {
   MAX_NOTES_PER_STUDY,
   NOTE_CHECKPOINT_INTERVAL_SECONDS,
   NOTE_LIMIT_EXCEEDED,
+  NOTE_MENTION_INVALID,
   NOTE_NOT_TRASHED,
   NOTE_REFERENCE_INVALID,
   NOTE_SCHEMA_VERSION,
@@ -18,6 +19,7 @@ import {
   NOTE_TRASHED,
   NOTE_UNCHANGED,
   noteCharacterCount,
+  noteNodeMentions,
   type NoteDocument,
   type NoteListResponse,
   type NoteMutationResponse,
@@ -123,6 +125,10 @@ interface TargetSource {
   anchor: { kind: AnchorKind; problem: AnchorProblemCode | null } | null;
 }
 
+/** The (nodeId, label) pairs of a document's node mentions, as comparable keys (BIB-58). */
+const mentionKeys = (doc: NoteDocument): Set<string> =>
+  new Set(noteNodeMentions(doc).map((mention) => JSON.stringify([mention.nodeId, mention.label])));
+
 /** The (referenceId, label) pairs of a document's reference links, as comparable keys. */
 const linkKeys = (doc: NoteDocument): Set<string> =>
   new Set(noteReferenceLinks(doc).map((link) => JSON.stringify([link.referenceId, link.label])));
@@ -192,6 +198,43 @@ export class NotesService {
   }
 
   /**
+   * Every NEW or changed `nodeMention` (BIB-58) must name a live node of this study (the locked
+   * study and the session owner) and carry exactly that node's current label (`nodeLabel`, as the
+   * node list shows it), checked with one batched lookup through the Study context inside the
+   * mutation. Never repaired: anything else is 422 `NOTE_MENTION_INVALID`, the same for another
+   * user's, another study's, a deleted and an absent node. A mention already in the stored note
+   * (same id and label) is kept as stored, so a node edited or deleted later never blocks a save.
+   */
+  private async verifyMentions(
+    m: StudyMutation,
+    content: NoteDocument,
+    current?: NoteDocument,
+  ): Promise<void> {
+    const kept = current ? mentionKeys(current) : new Set<string>();
+    const mentions = noteNodeMentions(content).filter(
+      (mention) => !kept.has(JSON.stringify([mention.nodeId, mention.label])),
+    );
+    if (mentions.length === 0) return;
+    const nodes = await this.access.ownedNodesIncludingDeleted(
+      m.ownerId,
+      m.studyId,
+      mentions.map((mention) => mention.nodeId),
+    );
+    const references = await this.references.storedReferences(
+      nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
+    );
+    const live = new Map(
+      nodes.filter((node) => node.deletedAt === null).map((node) => [node.id, node]),
+    );
+    for (const mention of mentions) {
+      const node = live.get(mention.nodeId);
+      if (!node || nodeLabel(node, references) !== mention.label) {
+        throw new NoteRuleError(NOTE_MENTION_INVALID);
+      }
+    }
+  }
+
+  /**
    * A Scripture target (BIB-24): the anchor is re-checked against the corpus through the Bible
    * content context (checksums, offsets, quote), never trusted from the client and never
    * adjusted; anything but `resolved` is 422 with the anchor code. Runs inside the mutation, so a
@@ -227,6 +270,7 @@ export class NotesService {
         if (targetNodeId !== null) await this.requireLiveTarget(m, targetNodeId);
         await requireRoomForLiveNote(m);
         await this.verifyReferences(note.content);
+        await this.verifyMentions(m, note.content);
         const scripture = body.targetAnchor ? await this.checkedTarget(body.targetAnchor) : null;
 
         const created = await m.createChild(Note, {
@@ -286,7 +330,10 @@ export class NotesService {
         if (current.deletedAt !== null) throw new NoteRuleError(NOTE_TRASHED);
 
         const contentChanged = next !== null && !sameDocument(next.content, current.richTextJson);
-        if (contentChanged) await this.verifyReferences(next.content, current.richTextJson);
+        if (contentChanged) {
+          await this.verifyReferences(next.content, current.richTextJson);
+          await this.verifyMentions(m, next.content, current.richTextJson);
+        }
         const latest = await NoteVersion.findOne({
           where: { noteId: current.id, studyId: m.studyId, ownerId: m.ownerId },
           order: [['versionNumber', 'DESC']],
@@ -501,7 +548,24 @@ export class NotesService {
       createdAt: note.createdAt.toISOString(),
       updatedAt: note.updatedAt.toISOString(),
       deletedAt: note.deletedAt?.toISOString() ?? null,
+      deletedMentionNodeIds: await this.deletedMentions(ownerId, studyId, note.richTextJson),
     };
+  }
+
+  /**
+   * BIB-58: the mentioned nodes that are not live nodes of this study now, in first-mention order
+   * (one lookup through the Study context). Shown as deleted by readers, never re-pointed.
+   */
+  private async deletedMentions(
+    ownerId: string,
+    studyId: string,
+    content: NoteDocument,
+  ): Promise<string[]> {
+    const ids = [...new Set(noteNodeMentions(content).map((mention) => mention.nodeId))];
+    if (ids.length === 0) return [];
+    const nodes = await this.access.ownedNodesIncludingDeleted(ownerId, studyId, ids);
+    const live = new Set(nodes.filter((node) => node.deletedAt === null).map((node) => node.id));
+    return ids.filter((id) => !live.has(id));
   }
 
   /** `GET …/notes/:noteId/versions`: the kept checkpoints, newest first, without content. */
@@ -572,6 +636,38 @@ export class NotesService {
       if (error instanceof NotFoundError) throw new NoteRuleError(NOTE_TARGET_NOT_FOUND);
       throw error;
     }
+  }
+
+  /**
+   * BIB-57: the note an Observation or Thought is being converted from, read inside the Graph
+   * mutation (study lock held). Absent, another study's or another owner's is 404; a note in the
+   * note trash is 422 `NOTE_TRASHED`. Its target's state does not matter. The note is not changed.
+   */
+  async requireConvertibleNote(m: StudyMutation, noteId: string): Promise<void> {
+    if (!isResourceId(noteId)) throw new NotFoundError();
+    const note = await Note.findOne({
+      where: { id: noteId, studyId: m.studyId, ownerId: m.ownerId },
+      attributes: ['id', 'deletedAt'],
+    });
+    if (!note) throw new NotFoundError();
+    if (note.deletedAt !== null) throw new NoteRuleError(NOTE_TRASHED);
+  }
+
+  /**
+   * BIB-57: whether each of these notes of one (already resolved) study is in the note trash, for a
+   * node's "Derived from a note". Ids only, never text.
+   */
+  async noteTrashState(
+    ownerId: string,
+    studyId: string,
+    noteIds: readonly string[],
+  ): Promise<Map<string, boolean>> {
+    if (noteIds.length === 0) return new Map();
+    const notes = await Note.findAll({
+      where: { id: [...new Set(noteIds)], studyId, ownerId },
+      attributes: ['id', 'deletedAt'],
+    });
+    return new Map(notes.map((note) => [note.id, note.deletedAt !== null]));
   }
 
   /** A note of this (already resolved) study and owner, live or trashed; otherwise 404. */

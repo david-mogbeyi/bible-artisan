@@ -209,6 +209,13 @@ export function NodeDetail({
         <Row label="Type">{NODE_TYPE_NAMES[data.type]}</Row>
         <Row label="Origin">{NODE_ORIGIN_NAMES[data.origin]}</Row>
         {state ? <Row label={state.label}>{state.value}</Row> : null}
+        {(data.type === 'observation' || data.type === 'thought') && data.derivedFromNote ? (
+          <Row label="Provenance">
+            {data.derivedFromNote.trashed
+              ? 'Derived from a note in the trash'
+              : 'Derived from a note'}
+          </Row>
+        ) : null}
         <Content node={data} studyId={studyId} />
         <Row label="Created">{formatNodeTime(data.createdAt)}</Row>
         <Row label="Updated">{formatNodeTime(data.updatedAt)}</Row>

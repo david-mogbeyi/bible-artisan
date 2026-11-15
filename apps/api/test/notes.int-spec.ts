@@ -365,6 +365,7 @@ describe('notes (BIB-23)', () => {
           createdAt: note.createdAt,
           updatedAt: note.updatedAt,
           deletedAt: null,
+          deletedMentionNodeIds: [],
         },
       ]);
       expect(read.headers['cache-control']).toBe('no-store');

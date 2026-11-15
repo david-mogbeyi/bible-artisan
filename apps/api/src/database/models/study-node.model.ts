@@ -101,6 +101,15 @@ export class StudyNode extends Model {
   @Column({ field: 'established_at', type: DataType.DATE, allowNull: true })
   declare establishedAt: Date | null;
 
+  /**
+   * The note an Observation or Thought was converted from (BIB-57), else NULL. Composite FK
+   * `study_node_derived_from_note_fk` to `note (owner_id, study_id, id)`; CHECK
+   * `study_node_derived_from_note_check` keeps it to observations and thoughts. Set once at
+   * creation and never changed by an edit.
+   */
+  @Column({ field: 'derived_from_note_id', type: DataType.UUID, allowNull: true })
+  declare derivedFromNoteId: string | null;
+
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 1 })
   declare revision: number;
 

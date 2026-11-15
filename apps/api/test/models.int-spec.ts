@@ -444,6 +444,7 @@ describe('Sequelize models against the real schema', () => {
       payloadJson: null,
       canonicalNodeId: null,
       establishedAt: null,
+      derivedFromNoteId: null,
     };
     for (const row of rows) {
       const node = await StudyNode.create({ studyId: study.id, ownerId: owner.id, ...row });
@@ -1078,6 +1079,43 @@ describe('Sequelize models against the real schema', () => {
     ).rejects.toBeInstanceOf(DatabaseError);
     await Study.destroy({ where: { id: study.id } });
     expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it('writes StudyNode.derivedFromNoteId through the model; only for an observation or a thought, and only a note of the same study (BIB-57)', async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const noteOf = (studyId: string) =>
+      Note.create({
+        studyId,
+        ownerId: owner.id,
+        richTextJson: { type: 'doc', content: [{ type: 'paragraph' }] },
+        plainText: '',
+        searchText: '',
+      });
+    const note = await noteOf(study.id);
+    const foreign = await noteOf(other.id);
+    const thought = await StudyNode.create({ ...scope, ...THOUGHT, derivedFromNoteId: note.id });
+    expect((await StudyNode.findByPk(thought.id, { rejectOnEmpty: true })).derivedFromNoteId).toBe(
+      note.id,
+    );
+    expect((await StudyNode.create({ ...scope, ...THOUGHT })).derivedFromNoteId).toBeNull();
+    await expect(
+      StudyNode.create({ ...scope, ...THOUGHT, derivedFromNoteId: foreign.id }),
+    ).rejects.toBeInstanceOf(ForeignKeyConstraintError);
+    await expect(
+      StudyNode.create({
+        ...scope,
+        type: 'question',
+        origin: 'user',
+        title: 'Q',
+        questionStatus: 'open',
+        derivedFromNoteId: note.id,
+      }),
+    ).rejects.toBeInstanceOf(DatabaseError);
+    await Study.destroy({ where: { id: study.id } });
+    expect(await StudyNode.count({ where: { studyId: study.id } })).toBe(0);
   });
 
   it('creates a NodeVersion and its NodeVersionEvidence and a StudyNode.establishedAt through the models and reads them back with DB defaults; they cannot cross studies, break their CHECKs or be updated; a study delete cascades (BIB-30)', async () => {

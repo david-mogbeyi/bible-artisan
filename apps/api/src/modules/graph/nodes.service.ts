@@ -4,6 +4,7 @@ import {
   createNodeRequestSchema,
   type CreateNodeResponse,
   type DeletedNodeListResponse,
+  type DerivedFromNote,
   duplicateNodeRequestSchema,
   type DuplicateNodeResponse,
   ESTABLISHMENT_ALONE,
@@ -52,6 +53,7 @@ import { NodeVersionEvidence } from '../../database/models/node-version-evidence
 import { StudyEdge } from '../../database/models/study-edge.model';
 import { StudyNode } from '../../database/models/study-node.model';
 import { ReferenceService } from '../bible-content/reference/reference.service';
+import { NotesService } from '../notes/notes.service';
 import { StudyAccessService } from '../study/study-access.service';
 import { QUESTION_CREATED } from '../study/study-events';
 import { type NewNodeValues, StudyGraphService } from '../study/study-graph.service';
@@ -121,9 +123,15 @@ function newNodeValues(body: CreateNodeBody): NodeValues {
         origin: 'user',
         body: body.text,
         observationKind: body.observationKind,
+        derivedFromNoteId: body.derivedFromNoteId ?? null,
       };
     case 'thought':
-      return { type: 'thought', origin: 'user', body: body.text };
+      return {
+        type: 'thought',
+        origin: 'user',
+        body: body.text,
+        derivedFromNoteId: body.derivedFromNoteId ?? null,
+      };
     case 'conclusion':
       return {
         type: 'conclusion',
@@ -179,6 +187,11 @@ function sourceColumns({ title, ...payload }: SourceCitation) {
   return { title, payloadJson: payload };
 }
 
+/** BIB-57: a converted node's created event names its note (id only); others carry nothing. */
+function derivedFrom(node: StudyNode): { derivedFromNoteId?: string } {
+  return node.derivedFromNoteId === null ? {} : { derivedFromNoteId: node.derivedFromNoteId };
+}
+
 function createdEvent(node: StudyNode, branchId: string | null, versionId: string | null = null) {
   switch (node.type) {
     case 'scripture':
@@ -198,10 +211,14 @@ function createdEvent(node: StudyNode, branchId: string | null, versionId: strin
     case 'observation':
       return {
         eventType: NODE_EVENTS.observation,
-        payload: { nodeId: node.id, observationKind: node.observationKind },
+        payload: {
+          nodeId: node.id,
+          observationKind: node.observationKind,
+          ...derivedFrom(node),
+        },
       };
     case 'thought':
-      return { eventType: NODE_EVENTS.thought, payload: { nodeId: node.id } };
+      return { eventType: NODE_EVENTS.thought, payload: { nodeId: node.id, ...derivedFrom(node) } };
     case 'conclusion':
       return { eventType: NODE_EVENTS.conclusion, payload: { nodeId: node.id, versionId } };
     case 'source':
@@ -296,6 +313,7 @@ export class NodesService {
     private readonly studyRevisions: StudyRevisionService,
     private readonly graph: StudyGraphService,
     private readonly references: ReferenceService,
+    private readonly notes: NotesService,
   ) {}
 
   /**
@@ -326,6 +344,9 @@ export class NodesService {
       work: async (m) => {
         const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
         if (body.type === 'scripture') return this.addScripture(m, body, studyRevision);
+        if ((body.type === 'observation' || body.type === 'thought') && body.derivedFromNoteId) {
+          await this.notes.requireConvertibleNote(m, body.derivedFromNoteId);
+        }
         const { node, event, versionId } = await this.insertNode(m, newNodeValues(body));
         const response: CreateNodeResponse = {
           ...mutationBody(node, event.sequence, {
@@ -832,6 +853,15 @@ export class NodesService {
     }));
   }
 
+  /** BIB-57: the note a node was converted from, and whether it is in the note trash now. */
+  private async derivedFromNote(node: StudyNode): Promise<DerivedFromNote> {
+    const noteId = node.derivedFromNoteId;
+    if (noteId === null) return null;
+    const trashed = await this.notes.noteTrashState(node.ownerId, node.studyId, [noteId]);
+    // The composite FK keeps the note in this study; it only disappears with the study itself.
+    return { id: noteId, trashed: trashed.get(noteId) ?? false };
+  }
+
   /** `GET /studies/:studyId/nodes/:nodeId`: one live node with its full typed content. */
   async get(ownerId: string, studyId: string, nodeId: string): Promise<NodeResponse> {
     const node = await this.access.requireOwnedNode(ownerId, studyId, nodeId);
@@ -865,9 +895,15 @@ export class NodesService {
           text: required(node.body),
           observationKind: required(node.observationKind),
           establishedAt: node.establishedAt?.toISOString() ?? null,
+          derivedFromNote: await this.derivedFromNote(node),
         };
       case 'thought':
-        return { type: 'thought', ...common, text: required(node.body) };
+        return {
+          type: 'thought',
+          ...common,
+          text: required(node.body),
+          derivedFromNote: await this.derivedFromNote(node),
+        };
       case 'conclusion': {
         const support =
           supportCounts(await liveEvidence({ studyId, ownerId }, [node.id]), [node.id]).get(
