@@ -359,6 +359,16 @@ describe('NoteAutosave (BIB-23, PRD section 27)', () => {
     await vi.advanceTimersByTimeAsync(AUTOSAVE_MAX_DELAY_MS);
     expect(sent).toHaveLength(1);
   });
+  it('does not report state to the unmounted editor when the request sent on close settles', async () => {
+    const saver = autosave();
+    saver.edited(doc('leaving'));
+    saver.dispose();
+    const reported = states.length;
+    sent[0]?.reject(new Error('network'));
+    await settle();
+    expect(states).toHaveLength(reported);
+  });
+
   it('treats 422 NOTE_UNCHANGED as acknowledged: Saved, and no further request', async () => {
     const saver = autosave(doc('kept'));
     saver.edited(doc('same as the server'));

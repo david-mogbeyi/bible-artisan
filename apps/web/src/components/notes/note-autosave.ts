@@ -517,7 +517,9 @@ export class NoteAutosave {
 
   private setState(state: SaveState): void {
     this.state = state;
-    this.options.onState(state);
+    // Once the editor is gone (unmounted, or a test environment torn down), a late answer to the
+    // request sent on close must not touch its React state.
+    if (!this.disposed) this.options.onState(state);
     const closing = this.closing;
     if (!closing) return;
     const done = (state.kind === 'saved' || state.kind === 'already_versioned') && !this.unsaved;
