@@ -585,6 +585,7 @@ describe('migration reversibility', () => {
       expect(await recordedMigrations(db)).toStrictEqual(before);
       await withStudyDataDropAllowed(() => migrator.down());
       expect(await columns(['study_edge'])).not.toContain('study_edge.deleted_with_node_id');
+      expect((await recordedMigrations(db)).at(-1)).toBe(ESTABLISHED_OBSERVATIONS_MIGRATION);
 
       await db.query(
         `INSERT INTO study_node (study_id, owner_id, type, origin, body, observation_kind, established_at)

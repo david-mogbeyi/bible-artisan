@@ -78,7 +78,13 @@ const SIMPLE: Record<string, (input: DisplayInput) => string> = {
   scripture_revisited: (i) => `Returned to ${passage(i.payload.referenceLabel, i.target)}`,
   scripture_opened: visitText,
   observation_created: (i) => `Recorded ${name(i.target, 'an observation')}`,
-  observation_updated: (i) => `Edited ${name(i.target, 'an observation')}`,
+  observation_updated: (i) =>
+    i.payload.previousEstablished === true
+      ? `Edited ${name(i.target, 'an observation')} (“Established by me” cleared)`
+      : `Edited ${name(i.target, 'an observation')}`,
+  observation_established: (i) => `Marked ${name(i.target, 'an observation')} “Established by me”`,
+  node_deleted: (i) => `Deleted ${name(i.target, 'a node')}`,
+  node_restored: (i) => `Restored ${name(i.target, 'a node')}`,
   thought_created: (i) => `Wrote ${name(i.target, 'a thought')}`,
   thought_updated: (i) => `Edited ${name(i.target, 'a thought')}`,
   source_created: (i) => `Added the source ${name(i.target, 'a source')}`,
