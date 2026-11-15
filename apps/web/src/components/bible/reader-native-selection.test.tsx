@@ -62,6 +62,10 @@ async function renderReader() {
     />,
   );
   await screen.findByRole('heading', { name: 'Psalms 3' });
+  // The heading can be found between React's commit and its effects; the selection listeners
+  // attach in an effect. Leaving `act` flushes them (and any frame already asked for), so a
+  // pointerdown fired next is always seen instead of only when the machine is idle.
+  await nextFrame();
   mapper.mockClear();
 }
 

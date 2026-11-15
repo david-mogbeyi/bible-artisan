@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NODES_COPY, NodesSection } from '@/components/nodes/nodes-section';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { GRAPH_COPY, GraphSection } from './graph-section';
+import { POSITION_SAVE_DEBOUNCE_MS } from './use-position-saver';
 
 const STUDY_ID = 'aaaaaaaa-2222-4333-8444-555555555555';
 const Q = '10000000-2222-4333-8444-555555555555';
@@ -464,19 +465,28 @@ describe('GraphSection (BIB-28)', () => {
     const source = /^Source: A commentary/;
     fireEvent.click(canvasNode(source));
     await waitFor(() => expect(textOf(canvasNode(source))).toContain('Selected'));
+    // Hold the move's 300 ms debounce with fake timers: on a busy machine the selection steps
+    // below can take longer than that in real time, and the move would then go out on its own.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     fireEvent.keyDown(canvasNode(source), { key: 'ArrowRight' });
     fireEvent.keyUp(canvasNode(source), { key: 'ArrowRight' });
-    // Within the 300 ms debounce, arrange two other nodes.
+    // Within the 300 ms debounce, arrange two other nodes. (waitFor needs real timers, so each
+    // step settles by running whatever is due now on the held clock, inside act.)
+    const settle = () => act(() => vi.advanceTimersByTimeAsync(0));
     fireEvent.click(canvasNode('Question: What is conscience?, Open'));
-    await waitFor(() =>
-      expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
-    );
+    await settle();
+    expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected');
     fireEvent.keyDown(document, { key: 'Shift' });
     fireEvent.click(canvasNode(OBS), { shiftKey: true });
     fireEvent.keyUp(document, { key: 'Shift' });
-    await waitFor(() => expect(textOf(status())).toContain('2 selected'));
+    await settle();
+    expect(textOf(status())).toContain('2 selected');
     fireEvent.click(screen.getByRole('button', { name: 'Arrange selection' }));
+    expect(saves()).toStrictEqual([]);
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    // Apply sends at once and cancels the move's debounce; run anything due now, then go real.
+    await settle();
+    vi.useRealTimers();
     expect(await screen.findByText('Layout saved')).toBeTruthy();
     expect(saves()).toHaveLength(1);
     const sent = saves()[0]?.body as { positions: { nodeId: string }[] };
@@ -676,7 +686,14 @@ describe('GraphSection (BIB-28)', () => {
     await waitFor(() =>
       expect(textOf(canvasNode('Question: What is conscience?, Open'))).toContain('Selected'),
     );
+    // Drive the 300 ms save debounce with fake timers, so the save goes out at once whatever the
+    // machine's load: the alert's wait below then covers only the reply, not the debounce too.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     fireEvent.keyDown(canvasNode('Question: What is conscience?, Open'), { key: 'ArrowRight' });
+    expect(saves()).toStrictEqual([]);
+    await act(() => vi.advanceTimersByTimeAsync(POSITION_SAVE_DEBOUNCE_MS));
+    vi.useRealTimers();
+    expect(saves()).toHaveLength(1);
     expect(textOf(await screen.findByRole('alert'))).toContain(GRAPH_COPY.locked);
     expect(screen.queryByRole('button', { name: 'Arrange selection' })).toBeNull();
     expect(canvasNode('Question: What is conscience?, Open').classList.contains('draggable')).toBe(

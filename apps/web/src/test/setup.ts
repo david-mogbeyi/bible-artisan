@@ -1,6 +1,12 @@
 import '@testing-library/jest-dom/vitest';
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
 import { afterEach } from 'vitest';
+
+// findBy*/waitFor poll until their condition holds and return at once, so a longer ceiling costs a
+// passing test nothing. The 1 s default is shorter than a 300 ms debounce plus a few renders take
+// when the machine is busy (`pnpm check:local` runs lint, typecheck and every package's tests
+// together), which failed passing tests at random. Assertions are unchanged.
+configure({ asyncUtilTimeout: 3000 });
 
 /**
  * Node's BroadcastChannel reaches every channel of the worker, so a message from one test's tab
