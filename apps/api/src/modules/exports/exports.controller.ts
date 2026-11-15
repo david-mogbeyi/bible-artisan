@@ -1,5 +1,7 @@
-import { Body, Controller, Get, Header, HttpCode, Param, Post, Query, Res } from '@nestjs/common';
+import { Controller, Get, Header, Param, Post, Query, Res } from '@nestjs/common';
 import type { ExportResponse } from '@bible-artisan/contracts';
+import { MutationRequest, type MutationRequestInfo } from '../../common/mutation/mutation-request';
+import { MutationResult } from '../../common/mutation/mutation.service';
 import { ParseResourceIdPipe } from '../../common/validation/resource-id';
 import { CurrentUserId } from '../identity/current-user.decorator';
 import { ExportsService } from './exports.service';
@@ -11,31 +13,29 @@ interface HeaderResponse {
 /**
  * Study and account exports (BIB-47, BIB-48). The owner is always the session's; another user's,
  * an absent, a malformed and an expired id are the same 404. Creating an export changes no study
- * data, so it takes no expectedRevision and writes no StudyEvent.
+ * data, so it takes no expectedRevision and writes no StudyEvent. Both create routes take an
+ * optional Idempotency-Key (a retry replays the same export), cap the file size (413) and rate
+ * limit per owner (429); `ExportsService` explains the order.
  */
 @Controller()
 export class ExportsController {
   constructor(private readonly exports: ExportsService) {}
 
   @Post('studies/:studyId/exports')
-  @HttpCode(201)
-  @Header('Cache-Control', 'no-store')
   createStudyExport(
     @CurrentUserId() ownerId: string,
     @Param('studyId', ParseResourceIdPipe) studyId: string,
-    @Body() body: unknown,
-  ): Promise<ExportResponse> {
-    return this.exports.createStudyExport(ownerId, studyId, body);
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.exports.createStudyExport(ownerId, studyId, mutation);
   }
 
   @Post('me/exports')
-  @HttpCode(201)
-  @Header('Cache-Control', 'no-store')
   createAccountExport(
     @CurrentUserId() ownerId: string,
-    @Body() body: unknown,
-  ): Promise<ExportResponse> {
-    return this.exports.createAccountExport(ownerId, body);
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.exports.createAccountExport(ownerId, mutation);
   }
 
   @Get('exports/:exportId')

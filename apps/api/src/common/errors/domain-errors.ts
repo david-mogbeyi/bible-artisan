@@ -7,6 +7,7 @@ import {
   ACCOUNT_DELETED,
   type AnchorProblemCode,
   EXPORT_LINK_EXPIRED,
+  EXPORT_TOO_LARGE,
   ANNOTATION_LIMIT_EXCEEDED,
   ANNOTATION_UNCHANGED,
   BRANCH_ERROR_MESSAGES,
@@ -424,6 +425,22 @@ export class ExportLinkExpiredError extends Error {
   constructor() {
     super('This download link has expired. Request a new one');
     this.name = 'ExportLinkExpiredError';
+  }
+}
+
+/**
+ * A rendered export is larger than `MAX_EXPORT_BYTES` (PRD section 24: 413 payload too large).
+ * Checked before anything is stored, so no file and no receipt is written. Fixed message naming
+ * the limit, never the content.
+ */
+export class ExportTooLargeError extends Error {
+  readonly code = EXPORT_TOO_LARGE;
+  constructor(maxBytes: number) {
+    const MiB = 1024 * 1024;
+    const limit =
+      maxBytes >= MiB ? `${Math.floor(maxBytes / MiB)} MB` : `${Math.floor(maxBytes / 1024)} KB`;
+    super(`An export can be at most ${limit}`);
+    this.name = 'ExportTooLargeError';
   }
 }
 

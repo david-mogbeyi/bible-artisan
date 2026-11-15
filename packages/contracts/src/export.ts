@@ -10,7 +10,9 @@ import { z } from 'zod';
  * - `GET /v1/exports/:exportId/download?expires=…&signature=…` returns the file.
  *
  * Small studies export synchronously behind the same response contract (PRD section 24), so a
- * created export is already `ready`. The download link is signed and expires after 15 minutes;
+ * created export is already `ready`. Both create routes accept an `Idempotency-Key`: a retry with
+ * the same key and body replays the first response (the same export), the same key with another
+ * body is 422 IDEMPOTENCY_KEY_REUSED. The download link is signed and expires after 15 minutes;
  * the stored file expires 24 hours after it was made and is then purged.
  */
 
@@ -27,6 +29,24 @@ export const EXPORT_OBJECT_TTL_HOURS = 24;
 
 /** 422: the download link's signature is valid but it is older than 15 minutes. */
 export const EXPORT_LINK_EXPIRED = 'EXPORT_LINK_EXPIRED';
+
+/**
+ * Largest export file the API stores: 50 MiB of UTF-8. A bigger rendered export is refused with
+ * 413 EXPORT_TOO_LARGE and nothing is stored. PRD section 24 lists 413 for payloads that are too
+ * large but names no export size; NFR-SCALE-002's 500MB is the whole account's derived storage,
+ * far more than one `text` row should hold or one request should render in memory. 50 MiB is
+ * orders of magnitude above a study at its safety caps (2,000 nodes, 6,000 edges) in practice.
+ */
+export const MAX_EXPORT_BYTES = 50 * 1024 * 1024;
+/** 413: the rendered export is larger than `MAX_EXPORT_BYTES`. */
+export const EXPORT_TOO_LARGE = 'EXPORT_TOO_LARGE';
+
+/**
+ * Per-owner export rate limit (PRD section 24: 429 with Retry-After): at most 20 study and
+ * account exports together in any rolling hour, counted from the owner's `export_file` rows.
+ * A replay of an earlier request's Idempotency-Key is not a new export and is never limited.
+ */
+export const EXPORT_RATE_LIMIT = { maxExports: 20, windowSeconds: 60 * 60 } as const;
 
 /** Version of the JSON export document. Bump on any incompatible change to its shape. */
 export const EXPORT_SCHEMA_VERSION = 1;

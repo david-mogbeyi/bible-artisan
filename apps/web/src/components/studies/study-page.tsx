@@ -127,7 +127,7 @@ function StudyDetails({
       <ExportControls
         label="Export this study"
         description="Saved changes only. The download link works for 15 minutes; the file is kept for 24 hours."
-        create={(format) => createStudyExport(study.id, format)}
+        create={(format, idempotencyKey) => createStudyExport(study.id, format, idempotencyKey)}
         copy={EXPORT_COPY}
       />
       {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
