@@ -70,9 +70,9 @@ import { type LayoutSaveStatus, usePositionSaver } from './use-position-saver';
 
 export const GRAPH_COPY = {
   loading: 'Loading the graph…',
-  empty: 'No nodes yet. Add a passage or question in Nodes below.',
+  empty: 'No nodes yet. Add a passage or question in the Nodes list.',
   readOnly: "Read-only study: the layout can't be changed.",
-  narrow: 'Moving nodes needs a wider screen. Everything is in the Nodes list below.',
+  narrow: 'Moving nodes needs a wider screen. Everything is also in the Nodes list.',
   instructions:
     'Tab moves between nodes. Enter opens a node. Arrow keys move the selected node. Escape clears the selection. Shift+click adds to the selection. Everything here is also in the Nodes list below.',
   /** Read-only (archived, trashed or narrow): nothing about moving; the reason is described too. */

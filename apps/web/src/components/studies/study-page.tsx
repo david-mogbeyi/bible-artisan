@@ -3,7 +3,7 @@
 import type { StudyResponse } from '@bible-artisan/contracts';
 import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useCallback, useId, useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
 import { StudyInsights } from '@/components/ai/study-insights';
@@ -20,9 +20,16 @@ import { bibleHref } from '@/lib/bible';
 import { createStudyExport } from '@/lib/exports';
 import { GraphViewProvider } from '@/lib/graph-store';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
+import { useNarrowViewport } from '@/lib/viewport';
 import { StudyEditor } from './study-editor';
 import { StudyLifecycleActions } from './study-lifecycle-actions';
 import { ViewStateSaver } from './view-state-saver';
+import {
+  FollowNodeDetail,
+  type WorkspaceTab,
+  WorkspacePanel,
+  WorkspaceTabList,
+} from './workspace-tabs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function uuidOrNull(value: string | null): string | null {
@@ -50,6 +57,11 @@ const LOAD_COPY: ProblemCopy = {
  * (BIB-32) follows the notes, then the living summary (BIB-43) and the study-wide AI suggestions
  * (BIB-44/45, collapsed). A missing or another user's study, or one past its trash window, shows the same
  * neutral unavailable state.
+ *
+ * BIB-38: below 900 px the same regions become Reader, Notes, Thread, Summary and Graph Preview
+ * tabs (PRD section 11). Every region stays mounted, so unsaved notes and edits survive a tab
+ * switch or a rotation across the breakpoint; the Notes tab carries the Nodes list, whose Add node
+ * form captures a question or thought without the canvas.
  */
 export function StudyPage() {
   const params = useParams<{ studyId: string }>();
@@ -116,72 +128,86 @@ function StudyDetails({
   const branchParam = uuidOrNull(searchParams.get('branch'));
   const showOriginal =
     study.originalQuestion !== null && study.originalQuestion.nodeId !== study.mainQuestion?.nodeId;
+  const narrow = useNarrowViewport();
+  const idBase = useId();
+  // A link to a node (`?node=`) opens where its detail is: the Nodes list on the Notes tab.
+  const [tab, setTab] = useState<WorkspaceTab>(nodeParam ? 'notes' : 'reader');
+  const unsavedTabs = new Set<WorkspaceTab>();
+  if (unsavedEdits) unsavedTabs.add('reader');
+  if (unsavedNote) unsavedTabs.add('notes');
+  const panel = { idBase, narrow, selected: tab };
+  const openNotes = useCallback(() => setTab('notes'), []);
   return (
     <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12">
       <h1 className="font-serif text-4xl break-words">{study.title}</h1>
-      <StudyLifecycleActions
-        study={study}
-        onReload={onReload}
-        unsavedEdits={unsavedEdits || unsavedNote}
-      />
-      <ExportControls
-        label="Export this study"
-        description="Saved changes only. The download link works for 15 minutes; the file is kept for 24 hours."
-        create={(format, idempotencyKey) => createStudyExport(study.id, format, idempotencyKey)}
-        copy={EXPORT_COPY}
-      />
-      {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
-      {study.description ? (
-        <p className="break-words whitespace-pre-wrap">{study.description}</p>
+      {narrow ? (
+        <WorkspaceTabList idBase={idBase} selected={tab} onSelect={setTab} unsaved={unsavedTabs} />
       ) : null}
-      <dl className="flex flex-col gap-4">
-        <div>
-          <dt className="font-medium">Starting passage</dt>
-          <dd>
-            {study.startingReference ? (
-              <Link
-                href={bibleHref(study.startingReference.id, study.id)}
-                className="text-accent underline"
-              >
-                {study.startingReference.label}
-              </Link>
-            ) : (
-              <span className="text-muted">None yet</span>
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt className="font-medium">Main question</dt>
-          <dd className="break-words whitespace-pre-wrap">
-            {study.mainQuestion ? (
-              study.mainQuestion.text
-            ) : (
-              <span className="text-muted">None yet</span>
-            )}
-          </dd>
-        </div>
-        {showOriginal && study.originalQuestion ? (
-          <div>
-            <dt className="font-medium">Original question</dt>
-            <dd className="break-words whitespace-pre-wrap">{study.originalQuestion.text}</dd>
-          </div>
+      <WorkspacePanel {...panel} tab="reader">
+        <StudyLifecycleActions
+          study={study}
+          onReload={onReload}
+          unsavedEdits={unsavedEdits || unsavedNote}
+        />
+        <ExportControls
+          label="Export this study"
+          description="Saved changes only. The download link works for 15 minutes; the file is kept for 24 hours."
+          create={(format, idempotencyKey) => createStudyExport(study.id, format, idempotencyKey)}
+          copy={EXPORT_COPY}
+        />
+        {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
+        {study.description ? (
+          <p className="break-words whitespace-pre-wrap">{study.description}</p>
         ) : null}
-        <div>
-          <dt className="font-medium">Tags</dt>
-          <dd>
-            {study.tags.length > 0 ? (
-              study.tags.map((tag) => tag.name).join(', ')
-            ) : (
-              <span className="text-muted">None yet</span>
-            )}
-          </dd>
-        </div>
-      </dl>
-      {/* Read-only while archived or in the trash: the server refuses edits then anyway. Archive
+        <dl className="flex flex-col gap-4">
+          <div>
+            <dt className="font-medium">Starting passage</dt>
+            <dd>
+              {study.startingReference ? (
+                <Link
+                  href={bibleHref(study.startingReference.id, study.id)}
+                  className="text-accent underline"
+                >
+                  {study.startingReference.label}
+                </Link>
+              ) : (
+                <span className="text-muted">None yet</span>
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt className="font-medium">Main question</dt>
+            <dd className="break-words whitespace-pre-wrap">
+              {study.mainQuestion ? (
+                study.mainQuestion.text
+              ) : (
+                <span className="text-muted">None yet</span>
+              )}
+            </dd>
+          </div>
+          {showOriginal && study.originalQuestion ? (
+            <div>
+              <dt className="font-medium">Original question</dt>
+              <dd className="break-words whitespace-pre-wrap">{study.originalQuestion.text}</dd>
+            </div>
+          ) : null}
+          <div>
+            <dt className="font-medium">Tags</dt>
+            <dd>
+              {study.tags.length > 0 ? (
+                study.tags.map((tag) => tag.name).join(', ')
+              ) : (
+                <span className="text-muted">None yet</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+        {/* Read-only while archived or in the trash: the server refuses edits then anyway. Archive
           and Move to trash wait while the editor holds unsaved work. */}
-      {study.lifecycle === 'active' ? (
-        <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
-      ) : null}
+        {study.lifecycle === 'active' ? (
+          <StudyEditor study={study} onReload={onReload} onUnsavedChange={setUnsavedEdits} />
+        ) : null}
+      </WorkspacePanel>
       <GraphViewProvider initialSoloBranchId={branchParam}>
         {/* BIB-34: saves the selection and branch the user picks, for Resume. */}
         <ViewStateSaver
@@ -190,23 +216,33 @@ function StudyDetails({
           openedNodeId={uuidOrNull(nodeParam)}
           openedBranchId={branchParam}
         />
-        {/* BIB-63: undo / redo recent graph and content changes, outside the canvas so it stays
-            reachable when the graph is empty or shown as List View. */}
-        <UndoControls studyId={study.id} editable={study.lifecycle === 'active'} />
-        {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide.
-            BIB-29: or the same graph as List View (the default below 900 px). */}
-        <div className="w-[min(72rem,calc(100vw-2rem))] self-center">
-          <GraphSection study={study} onReload={onReload} />
-        </div>
-        {/* BIB-25: the study's typed nodes, readable in every state. */}
-        <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
+        <FollowNodeDetail enabled={narrow} onOpen={openNotes} />
+        <WorkspacePanel {...panel} tab="graph">
+          {/* BIB-63: undo / redo recent graph and content changes, outside the canvas so it stays
+              reachable when the graph is empty or shown as List View. */}
+          <UndoControls studyId={study.id} editable={study.lifecycle === 'active'} />
+          {/* BIB-28: the canvas, wider than the text column; read-only unless active and wide.
+              BIB-29: or the same graph as List View (the default below 900 px). */}
+          <div className="w-[min(72rem,calc(100vw-2rem))] self-center">
+            <GraphSection study={study} onReload={onReload} />
+          </div>
+        </WorkspacePanel>
+        <WorkspacePanel {...panel} tab="notes">
+          {/* BIB-25: the study's typed nodes, readable in every state. Its Add node form is the
+              canvas-free way to capture a question or thought (BIB-38). */}
+          <NodesSection study={study} onReload={onReload} initialNodeId={nodeParam} />
+          <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
+        </WorkspacePanel>
       </GraphViewProvider>
-      <NotesPanel study={study} onReload={onReload} onUnsavedChange={setUnsavedNote} />
-      {/* BIB-32: what happened in this study, newest first. */}
-      <ThreadPanel study={study} />
-      {/* BIB-43: the living summary; BIB-44/45: study-wide AI suggestions (collapsed). */}
-      <StudySummaryPanel studyId={study.id} active={study.lifecycle !== 'trashed'} />
-      <StudyInsights studyId={study.id} active={study.lifecycle === 'active'} />
+      <WorkspacePanel {...panel} tab="thread">
+        {/* BIB-32: what happened in this study, newest first. */}
+        <ThreadPanel study={study} />
+      </WorkspacePanel>
+      <WorkspacePanel {...panel} tab="summary">
+        {/* BIB-43: the living summary; BIB-44/45: study-wide AI suggestions (collapsed). */}
+        <StudySummaryPanel studyId={study.id} active={study.lifecycle !== 'trashed'} />
+        <StudyInsights studyId={study.id} active={study.lifecycle === 'active'} />
+      </WorkspacePanel>
       <nav aria-label="Study" className="flex flex-wrap gap-4">
         {/* BIB-24: the reader with this study's highlights (opaque ids only in the URL). */}
         <Link
