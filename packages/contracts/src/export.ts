@@ -121,6 +121,9 @@ export const exportEdgeSchema = z.object({
   targetNodeId: z.uuid(),
   type: z.string(),
   origin: z.string(),
+  /** BIB-42: the accepted AI suggestion an `ai` edge came from, and who adopted it (FR-AI-013). */
+  suggestionId: z.uuid().nullable(),
+  acceptedBy: z.uuid().nullable(),
   note: z.string().nullable(),
   revision: z.number().int(),
   createdAt: timestamp,

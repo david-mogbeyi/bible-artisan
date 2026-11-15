@@ -165,6 +165,8 @@ export async function readStudyExport(
       targetNodeId: edge.targetNodeId,
       type: edge.type,
       origin: edge.origin,
+      suggestionId: edge.suggestionId,
+      acceptedBy: edge.acceptedBy,
       note: edge.note,
       revision: edge.revision,
       createdAt: iso(edge.createdAt),

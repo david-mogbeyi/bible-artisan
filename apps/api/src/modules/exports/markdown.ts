@@ -126,7 +126,9 @@ export function renderStudyMarkdown(data: StudyExport, exportedAt: string): stri
           const other = nodes.get(outgoing ? edge.targetNodeId : edge.sourceNodeId);
           const arrow = outgoing ? `${words(edge.type)} →` : `← ${words(edge.type)}`;
           const note = edge.note ? ` — ${inline(edge.note)}` : '';
-          out.push(`- ${arrow} ${nodeLabel(other)}${note}`);
+          // AI origin and the user's adoption stay distinct in the export (FR-AI-013).
+          const origin = edge.origin === 'ai' ? ' (origin: AI suggestion; adopted by me)' : '';
+          out.push(`- ${arrow} ${nodeLabel(other)}${origin}${note}`);
         }
         out.push('');
       }
