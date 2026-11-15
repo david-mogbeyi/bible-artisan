@@ -87,6 +87,12 @@ describe('schema (composite-key owner isolation)', () => {
         refs: ['owner_id', 'id'],
       },
       {
+        name: 'ai_suggestion_study_owner_fk',
+        table: 'ai_suggestion',
+        columns: ['owner_id', 'study_id'],
+        refs: ['owner_id', 'id'],
+      },
+      {
         name: 'annotation_study_owner_fk',
         table: 'annotation',
         columns: ['owner_id', 'study_id'],
@@ -830,7 +836,9 @@ describe('schema (composite-key owner isolation)', () => {
            VALUES ($1, $2, $3, $4, 'supports', 'external')`,
           { bind: [studyId, owner, low, high] },
         ),
-      ).rejects.toMatchObject(violation('23514', 'study_edge_origin_check'));
+        // BIB-42's provenance CHECK refuses an unknown origin too; PostgreSQL checks CHECKs in
+        // name order, so it is the one reported.
+      ).rejects.toMatchObject(violation('23514', 'study_edge_ai_provenance_check'));
       // Sorted two-way and both directed directions are fine; a 2,000-character note too.
       await insertEdge({ ...base, source: low, target: high, type: 'related_to' });
       await insertEdge({ ...base, source: high, target: low, note: 'x'.repeat(2000) });
