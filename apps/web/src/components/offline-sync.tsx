@@ -6,8 +6,8 @@ import { useEffect, useState } from 'react';
 import { ApiError } from '@/lib/api-client';
 import { saveNote } from '@/lib/notes';
 import {
-  dropQueuedNote,
   downloadDrafts,
+  dropFailedEntry,
   entryDrafts,
   isNoteClaimed,
   listQueued,
@@ -150,7 +150,7 @@ export function OfflineSync({ accountId }: { accountId: string }) {
             type="button"
             onClick={() => {
               for (const entry of failed) {
-                void dropQueuedNote(entry.noteId, entry.attempt?.key ?? null);
+                void dropFailedEntry(entry.id);
               }
             }}
             className="text-accent underline"

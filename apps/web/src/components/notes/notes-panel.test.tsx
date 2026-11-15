@@ -14,6 +14,7 @@ import {
   listQueued,
   OFFLINE_QUEUE_MAX_PER_STUDY,
   queueNoteSave,
+  replayNoteSave,
 } from '@/lib/offline-queue';
 import { TRANSLATION } from '@/test/bible-fixtures';
 import { studyQueryKey } from '@/lib/studies';
@@ -1389,5 +1390,114 @@ describe('NotesPanel offline queue (BIB-36)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Download draft' }));
     const file = JSON.parse(await created[0]!.text()) as { drafts: { text: string }[] };
     expect(file.drafts.map((d) => d.text)).toStrictEqual(['No room for this']);
+  });
+});
+
+describe('NotesPanel reopening a note whose offline edit is still queued (BIB-36 review)', () => {
+  const ME = {
+    id: '0b7c0a8e-5d7b-4c1e-9a3f-2f7e1c9d4b60',
+    email: 'reader@example.test',
+    displayName: null,
+    timezone: 'UTC',
+  };
+  let online: MockInstance<() => boolean>;
+  beforeEach(async () => {
+    // A previous test's editor may still be writing its last offline snapshot as it unmounts.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await clearOfflineQueue();
+    online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+  });
+  afterEach(() => {
+    online.mockRestore();
+    vi.restoreAllMocks();
+  });
+
+  async function openNote() {
+    reply(`GET ${NOTES}`, jsonResponse(200, { items: [summary()] }));
+    reply(`GET ${NOTE}`, jsonResponse(200, note()));
+    const { queryClient } = renderPanel();
+    queryClient.setQueryData(['me'], ME);
+    fireEvent.click(await screen.findByRole('button', { name: 'First thoughts' }));
+    return noteEditor();
+  }
+
+  it('continues from the queued edit instead of overwriting it, and sends it with its key before the newer text', async () => {
+    // An editor closed while offline left its frozen request in the queue.
+    await queueNoteSave({
+      accountId: ME.id,
+      studyId: STUDY_ID,
+      noteId: NOTE_ID,
+      revision: 1,
+      attempt: {
+        key: 'queued-key',
+        body: { expectedRevision: 1, content: doc('Written on the train') },
+      },
+      draft: null,
+    });
+    const editor = await openNote();
+    // The editor shows the queued text, not the older server copy.
+    await waitFor(() => expect(editor.getText()).toBe('Written on the train'));
+
+    typeText(editor, 'Written on the train, and more');
+    await waitFor(
+      async () => {
+        const [entry] = await listQueued(ME.id);
+        expect([entry?.attempt?.key, entry?.draft]).toStrictEqual([
+          'queued-key',
+          doc('Written on the train, and more'),
+        ]);
+      },
+      { timeout: 2000 },
+    );
+
+    reply(
+      `PATCH ${NOTE}`,
+      jsonResponse(200, mutation({ revision: 2 })),
+      jsonResponse(200, mutation({ revision: 3 })),
+    );
+    online.mockReturnValue(true);
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.saved));
+    expect(
+      requests.filter((r) => r.method === 'PATCH').map((r) => [r.body, r.key === 'queued-key']),
+    ).toStrictEqual([
+      [{ expectedRevision: 1, content: doc('Written on the train') }, true],
+      [{ expectedRevision: 2, content: doc('Written on the train, and more') }, false],
+    ]);
+    await waitFor(async () => expect(await listQueued(ME.id)).toStrictEqual([]));
+  });
+
+  it("keeps an edit that couldn't sync for download when the reopened note is edited offline", async () => {
+    await queueNoteSave({
+      accountId: ME.id,
+      studyId: STUDY_ID,
+      noteId: NOTE_ID,
+      revision: 1,
+      attempt: { key: 'refused-key', body: { expectedRevision: 1, content: doc('Lost?') } },
+      draft: null,
+    });
+    // A replay was refused with 409: the entry is kept for download only.
+    const [queued] = await listQueued(ME.id);
+    await replayNoteSave(queued!, () => Promise.reject(new Error('409')), {
+      isDefinite: () => 'conflict',
+    });
+    const editor = await openNote();
+    expect(editor.getText()).toBe('First thoughts');
+
+    typeText(editor, 'A new offline edit');
+    await waitFor(
+      async () => {
+        const entries = await listQueued(ME.id);
+        expect(
+          entries.map((e) => [e.failed ?? null, e.draft ?? e.attempt?.body.content]),
+        ).toStrictEqual([
+          ['conflict', doc('Lost?')],
+          [null, doc('A new offline edit')],
+        ]);
+      },
+      { timeout: 2000 },
+    );
   });
 });
