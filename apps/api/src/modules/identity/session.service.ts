@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
-import { Op, type Transaction } from 'sequelize';
+import { literal, Op, type Transaction } from 'sequelize';
 import { AuthSession } from '../../database/models/auth-session.model';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -36,7 +36,11 @@ export class SessionService {
     return { token };
   }
 
-  /** The live session for `token`, or null when unknown, revoked, idle > 7 d, or > 30 d old. */
+  /**
+   * The live session for `token`, or null when unknown, revoked, idle > 7 d, or > 30 d old, or
+   * when its account's deletion was confirmed or matches a deletion tombstone (BIB-48: a deleted
+   * account, even one a backup restore brought back with its sessions, is never served).
+   */
   async resolve(token: string, now: Date = new Date()): Promise<ResolvedSession | null> {
     const session = await AuthSession.findOne({
       where: {
@@ -44,6 +48,13 @@ export class SessionService {
         revokedAt: null,
         expiresAt: { [Op.gt]: now },
         lastSeenAt: { [Op.gt]: new Date(now.getTime() - SESSION_IDLE_TTL_MS) },
+        [Op.and]: [
+          literal(`NOT EXISTS (SELECT 1 FROM "user" u
+                                WHERE u.id = "AuthSession".user_id
+                                  AND u.deletion_requested_at IS NOT NULL)`),
+          literal(`NOT EXISTS (SELECT 1 FROM account_deletion d
+                                WHERE d.user_id = "AuthSession".user_id)`),
+        ],
       },
     });
     if (!session) return null;
@@ -51,6 +62,14 @@ export class SessionService {
       await AuthSession.update({ lastSeenAt: now }, { where: { id: session.id } });
     }
     return { sessionId: session.id, userId: session.userId };
+  }
+
+  /** Revokes every live session of the user (BIB-48: account deletion signs out everywhere). */
+  async revokeAll(userId: string, transaction: Transaction, now: Date = new Date()): Promise<void> {
+    await AuthSession.update(
+      { revokedAt: now },
+      { where: { userId, revokedAt: null }, transaction },
+    );
   }
 
   /** Revokes the session for `token` if it exists and is not already revoked. */

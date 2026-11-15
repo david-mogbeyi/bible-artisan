@@ -10,10 +10,12 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadEnv } from '../src/config/env';
 import { createDatabase, type Database } from '../src/database/database';
+import { AccountDeletion } from '../src/database/models/account-deletion.model';
 import { AiJob } from '../src/database/models/ai-job.model';
 import { AiResult } from '../src/database/models/ai-result.model';
 import { Annotation } from '../src/database/models/annotation.model';
 import { ContextManifest } from '../src/database/models/context-manifest.model';
+import { ExportFile } from '../src/database/models/export-file.model';
 import { StudyAiSetting } from '../src/database/models/study-ai-setting.model';
 import { AuthChallenge } from '../src/database/models/auth-challenge.model';
 import { AuthSession } from '../src/database/models/auth-session.model';
@@ -107,8 +109,90 @@ describe('Sequelize models against the real schema', () => {
       aiConsentedAt: null,
       aiSettingsRevision: 1,
       createdAt: expect.any(Date),
+      deletionRequestedAt: null,
     });
     expect(found.id).toBe(user.id);
+  });
+
+  it('creates an ExportFile through the model with the 24-hour expiry default, and the database refuses a study export of another owner or a kind without its study (BIB-47)', async () => {
+    const user = await createUser();
+    const other = await createUser();
+    const study = await createStudy(user.id);
+    const file = await ExportFile.create({
+      ownerId: user.id,
+      studyId: study.id,
+      kind: 'study',
+      format: 'json',
+      fileName: 'bible-artisan-study.json',
+      contentType: 'application/json; charset=utf-8',
+      body: '{}',
+      byteSize: 2,
+    });
+    const found = await ExportFile.findByPk(file.id, { rejectOnEmpty: true });
+    expect(found.get({ plain: true })).toStrictEqual({
+      id: expect.stringMatching(UUID),
+      ownerId: user.id,
+      studyId: study.id,
+      kind: 'study',
+      format: 'json',
+      fileName: 'bible-artisan-study.json',
+      contentType: 'application/json; charset=utf-8',
+      body: '{}',
+      byteSize: 2,
+      createdAt: expect.any(Date),
+      expiresAt: expect.any(Date),
+    });
+    expect(found.expiresAt.getTime() - found.createdAt.getTime()).toBe(24 * 60 * 60 * 1000);
+    const account = await ExportFile.create({
+      ownerId: user.id,
+      studyId: null,
+      kind: 'account',
+      format: 'markdown',
+      fileName: 'bible-artisan-account.md',
+      contentType: 'text/markdown; charset=utf-8',
+      body: '#',
+      byteSize: 1,
+    });
+    expect(account.studyId).toBeNull();
+
+    const crossOwner = await ExportFile.create({
+      ownerId: other.id,
+      studyId: study.id,
+      kind: 'study',
+      format: 'json',
+      fileName: 'x.json',
+      contentType: 'application/json',
+      body: '{}',
+      byteSize: 2,
+    }).catch((e: unknown) => e);
+    expect(crossOwner).toBeInstanceOf(ForeignKeyConstraintError);
+    const studyWithoutId = await ExportFile.create({
+      ownerId: user.id,
+      studyId: null,
+      kind: 'study',
+      format: 'json',
+      fileName: 'x.json',
+      contentType: 'application/json',
+      body: '{}',
+      byteSize: 2,
+    }).catch((e: unknown) => e);
+    expect(studyWithoutId).toBeInstanceOf(DatabaseError);
+    expect((studyWithoutId as DatabaseError).parent).toMatchObject({ code: '23514' });
+  });
+
+  it('creates an AccountDeletion tombstone through the model; it has no foreign key to user and outlives it (BIB-48)', async () => {
+    const user = await createUser();
+    await User.update({ deletionRequestedAt: new Date() }, { where: { id: user.id } });
+    const tombstone = await AccountDeletion.create({ userId: user.id });
+    const found = await AccountDeletion.findByPk(user.id, { rejectOnEmpty: true });
+    expect(found.get({ plain: true })).toStrictEqual({
+      userId: user.id,
+      requestedAt: expect.any(Date),
+      purgedAt: null,
+    });
+    await User.destroy({ where: { id: user.id } });
+    expect(await AccountDeletion.count({ where: { userId: user.id } })).toBe(1);
+    await tombstone.destroy();
   });
 
   it('creates a Study with only required fields and reads it back', async () => {

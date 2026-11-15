@@ -681,6 +681,50 @@ describe('content-redacted operational logs', () => {
     );
   });
 
+  it('logs exports, their downloads and account deletion without file content, link signatures, codes or ids (BIB-47, BIB-48)', async () => {
+    const created = await withPrivateChannels(
+      http().post(`/v1/studies/${studyId}/exports${query()}`),
+      cookie,
+    ).send({ format: 'markdown' });
+    await expectLogged(created, {
+      method: 'POST',
+      route: '/v1/studies/:studyId/exports',
+      status: 201,
+    });
+    const body = created.body as { id: string; downloadUrl: string };
+    track(body.id);
+    track(body.downloadUrl.split('signature=')[1] ?? 'missing-signature');
+
+    // The file holds the owner's own study title, so only the logs are checked for it.
+    const file = await withPrivateChannels(http().get(body.downloadUrl), cookie);
+    expect(file.status).toBe(200);
+    const lines = await linesFor(file);
+    expect(lines.access).toMatchObject({
+      message: 'http_request',
+      method: 'GET',
+      route: '/v1/exports/:exportId/download',
+      status: 200,
+    });
+    expect(lines.errors).toStrictEqual([]);
+    expect(leaks()).toStrictEqual([]);
+
+    const refused = await withPrivateChannels(http().delete('/v1/me'), cookie).send({
+      challengeId: track(randomUUID()),
+      code: '482913',
+    });
+    await expectLogged(
+      refused,
+      { method: 'DELETE', route: '/v1/me', status: 422 },
+      {
+        errorType: 'OtpError',
+        body: envelope({
+          code: 'OTP_EXPIRED',
+          message: 'The code has expired or was already used',
+        }),
+      },
+    );
+  });
+
   it('logs a private path param by its pattern only (404)', async () => {
     const res = await withPrivateChannels(
       http().get(`/v1/__test/studies/${secret('param')}${query()}`),

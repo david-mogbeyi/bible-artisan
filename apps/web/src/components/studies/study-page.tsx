@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import { ProblemAlert, type ProblemCopy } from '@/components/bible/problem-alert';
+import { ExportControls } from '@/components/exports/export-controls';
 import { GraphSection } from '@/components/graph/graph-section';
 import { NodesSection } from '@/components/nodes/nodes-section';
 import { NotesPanel } from '@/components/notes/notes-panel';
@@ -13,6 +14,7 @@ import { RequireAuth } from '@/components/require-auth';
 import { ThreadPanel } from '@/components/thread/thread-panel';
 import { classifyError } from '@/lib/api-errors';
 import { bibleHref } from '@/lib/bible';
+import { createStudyExport } from '@/lib/exports';
 import { GraphViewProvider } from '@/lib/graph-store';
 import { fetchStudy, studyQueryKey } from '@/lib/studies';
 import { StudyEditor } from './study-editor';
@@ -23,6 +25,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function uuidOrNull(value: string | null): string | null {
   return value !== null && UUID.test(value) ? value.toLowerCase() : null;
 }
+
+const EXPORT_COPY: ProblemCopy = {
+  notFound: "This study isn't available.",
+  refused: "Couldn't export this study.",
+  unavailable: "Couldn't export this study.",
+};
 
 const LOAD_COPY: ProblemCopy = {
   notFound: "This study isn't available.",
@@ -111,6 +119,12 @@ function StudyDetails({
         study={study}
         onReload={onReload}
         unsavedEdits={unsavedEdits || unsavedNote}
+      />
+      <ExportControls
+        label="Export this study"
+        description="Saved changes only. The download link works for 15 minutes; the file is kept for 24 hours."
+        create={(format) => createStudyExport(study.id, format)}
+        copy={EXPORT_COPY}
       />
       {study.pinned ? <p className="text-sm text-muted">Pinned study</p> : null}
       {study.description ? (

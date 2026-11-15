@@ -53,6 +53,44 @@ const ROUTES: Record<string, Access> = {
     access: 'private',
     crossUserTest: { file: OWNER_ISOLATION, test: 'GET /v1/me returns only the signed-in user' },
   },
+  // Account deletion (BIB-48) acts only on the session's own account: another user keeps theirs.
+  'DELETE /v1/me': {
+    access: 'private',
+    crossUserTest: {
+      file: 'account-deletion.int-spec.ts',
+      test: "DELETE /v1/me deletes only the signed-in user's account: sign-in and every session stop at once, the purge removes every private row, and another user keeps theirs",
+    },
+  },
+  // Exports (BIB-47, BIB-48): another user's export, study or signed link is the same 404 as an
+  // absent one; an account export holds only the session owner's studies.
+  'POST /v1/me/exports': {
+    access: 'private',
+    crossUserTest: {
+      file: 'exports.int-spec.ts',
+      test: 'exports the account with its profile and every study, and only its own',
+    },
+  },
+  'POST /v1/studies/:studyId/exports': {
+    access: 'private',
+    crossUserTest: {
+      file: 'exports.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/exports, GET /v1/exports/:exportId and its download give another user the same neutral 404 as an absent or malformed id',
+    },
+  },
+  'GET /v1/exports/:exportId': {
+    access: 'private',
+    crossUserTest: {
+      file: 'exports.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/exports, GET /v1/exports/:exportId and its download give another user the same neutral 404 as an absent or malformed id',
+    },
+  },
+  'GET /v1/exports/:exportId/download': {
+    access: 'private',
+    crossUserTest: {
+      file: 'exports.int-spec.ts',
+      test: 'POST /v1/studies/:studyId/exports, GET /v1/exports/:exportId and its download give another user the same neutral 404 as an absent or malformed id',
+    },
+  },
   // Shared corpus data, not owner-scoped: the cross-user test proves another user gets the same
   // shared reference and nothing user-specific.
   'POST /v1/bible/resolve': {

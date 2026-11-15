@@ -108,6 +108,12 @@ import {
 } from './study-library';
 import { updateStudyRequestSchema, updateStudyResponseSchema } from './study-edit';
 import { studyLifecycleRequestSchema } from './study-lifecycle';
+import {
+  createExportRequestSchema,
+  deleteAccountRequestSchema,
+  deleteAccountResponseSchema,
+  exportResponseSchema,
+} from './export';
 
 /** JSON-schema object as emitted by `z.toJSONSchema` (OpenAPI 3.0 target). */
 type SchemaObject = Record<string, unknown>;
@@ -262,6 +268,72 @@ const lifecycleOperation = (description: string): Record<string, unknown> => ({
   },
 });
 
+const ACCOUNT_DELETION_DESCRIPTION =
+  "Deletes the signed-in account (FR-PRIVACY-001). Needs a fresh code sent to the account's own email with POST /auth/otp/start; a challenge for any other email is 422 OTP_EXPIRED. Sign-in (422 ACCOUNT_DELETED) and every session stop at once, the session cookie is cleared, and the account's private data and export files are purged within seven days. A deletion tombstone keeps a restored backup from serving the account again.";
+
+/** What every export route (BIB-47, BIB-48) shares. */
+const EXPORT_RULES =
+  "Exports change no study data: no expectedRevision, no StudyEvent. The file is stored for 24 hours; downloadUrl is signed for the session's owner and expires after 15 minutes (GET /exports/{exportId} gives a fresh one). Another user's, an absent, a malformed and an expired id are the same 404.";
+
+/** Study and account export paths (BIB-47, BIB-48). */
+function exportPaths(): Record<string, Record<string, unknown>> {
+  const created = {
+    201: jsonResponse('The export, ready to download', 'ExportResponse'),
+    default: errorResponse,
+  };
+  return {
+    '/studies/{studyId}/exports': {
+      post: {
+        description: `Exports one owned study as versioned JSON (nodes, edges, branches, conclusion versions with evidence, notes with versions, highlights, Study Thread events, Scripture with attribution, and the basis revision) or a readable Markdown outline. Scripture text is included only where the edition's rights permit export; otherwise the reference stays and the text is labeled as left out. Archived and trashed studies can be exported. ${EXPORT_RULES}`,
+        security: sessionCookie,
+        parameters: [studyIdParam],
+        requestBody: jsonBody('CreateExportRequest'),
+        responses: created,
+      },
+    },
+    '/me/exports': {
+      post: {
+        description: `Exports the whole account: its profile and every study inside its recovery window, in the same versioned structure as a study export. ${EXPORT_RULES}`,
+        security: sessionCookie,
+        requestBody: jsonBody('CreateExportRequest'),
+        responses: created,
+      },
+    },
+    '/exports/{exportId}': {
+      get: {
+        description: `Returns the export's status with a fresh download link. ${EXPORT_RULES}`,
+        security: sessionCookie,
+        parameters: [uuidPathParam('exportId')],
+        responses: {
+          200: jsonResponse('The export', 'ExportResponse'),
+          default: errorResponse,
+        },
+      },
+    },
+    '/exports/{exportId}/download': {
+      get: {
+        description: `Returns the export file as an attachment (application/json or text/markdown). Needs the owner's session and the link's expires and signature; a bad signature is 404, a valid one older than 15 minutes is 422 EXPORT_LINK_EXPIRED. ${EXPORT_RULES}`,
+        security: sessionCookie,
+        parameters: [
+          uuidPathParam('exportId'),
+          queryParam('expires', true, { type: 'string' }),
+          queryParam('signature', true, { type: 'string' }),
+        ],
+        responses: {
+          200: {
+            description: 'The export file',
+            content: {
+              'application/json': { schema: { type: 'object' } },
+              'text/markdown': { schema: { type: 'string' } },
+            },
+          },
+          default: errorResponse,
+        },
+      },
+    },
+  };
+}
+
 function buildDocument(): OpenApiDocument {
   return {
     openapi: '3.0.0',
@@ -340,6 +412,18 @@ function buildDocument(): OpenApiDocument {
           security: sessionCookie,
           responses: {
             200: jsonResponse('Current user', 'MeResponse'),
+            default: errorResponse,
+          },
+        },
+        delete: {
+          description: ACCOUNT_DELETION_DESCRIPTION,
+          security: sessionCookie,
+          requestBody: jsonBody('DeleteAccountRequest'),
+          responses: {
+            202: jsonResponse(
+              'Deletion confirmed; the session cookie is cleared',
+              'DeleteAccountResponse',
+            ),
             default: errorResponse,
           },
         },
@@ -894,6 +978,7 @@ function buildDocument(): OpenApiDocument {
           },
         },
       },
+      ...exportPaths(),
     },
     components: {
       securitySchemes: {
@@ -966,6 +1051,10 @@ function buildDocument(): OpenApiDocument {
         GraphResponse: toSchema(graphResponseSchema),
         SavePositionsRequest: toInputSchema(savePositionsRequestSchema),
         SavePositionsResponse: toSchema(savePositionsResponseSchema),
+        CreateExportRequest: toSchema(createExportRequestSchema),
+        ExportResponse: toSchema(exportResponseSchema),
+        DeleteAccountRequest: toInputSchema(deleteAccountRequestSchema),
+        DeleteAccountResponse: toSchema(deleteAccountResponseSchema),
         // Filled while the entries above were converted.
         ...hoisted,
       },

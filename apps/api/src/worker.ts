@@ -2,6 +2,9 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { loadEnv } from './config/env';
 import { AiJobRunnerService } from './modules/ai/ai-job-runner.service';
+import { ExportPurgeService } from './modules/exports/export-purge.service';
+import { AccountPurgeService } from './modules/identity/account-purge.service';
+import { schedulePrivacyPurge } from './modules/identity/privacy-purge-schedule';
 import { runEntrypoint } from './modules/observability/entrypoint';
 import { createAppLogger } from './modules/observability/logger';
 import { StudyTrashPurgeService } from './modules/study/trash/study-trash-purge.service';
@@ -20,9 +23,16 @@ async function bootstrap(): Promise<void> {
   const stopPurge = scheduleTrashPurge(app.get(StudyTrashPurgeService));
   // BIB-39: leased AI jobs. A job interrupted by shutdown is reclaimed when its lease expires.
   const stopAiJobs = app.get(AiJobRunnerService).start();
-  const stop = () => {
+  // BIB-47 / BIB-48: purges deleted accounts (and reapplies deletion tombstones) and expired
+  // export files, now and hourly.
+  const stopPrivacyPurge = schedulePrivacyPurge({
+    accounts: app.get(AccountPurgeService),
+    exports: app.get(ExportPurgeService),
+  });
+  const stop = (): void => {
     stopPurge();
     stopAiJobs();
+    stopPrivacyPurge();
   };
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);

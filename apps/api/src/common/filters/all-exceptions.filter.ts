@@ -4,6 +4,7 @@ import type { ErrorEnvelope } from '@bible-artisan/contracts';
 import { STATUS_CODES } from 'node:http';
 import { ConnectionError, TimeoutError } from 'sequelize';
 import {
+  AccountDeletedError,
   AiQuotaError,
   AiRuleError,
   AiUnavailableError,
@@ -11,6 +12,7 @@ import {
   AnnotationRuleError,
   BranchRuleError,
   DependencyUnavailableError,
+  ExportLinkExpiredError,
   EdgeRuleError,
   IdempotencyKeyReusedError,
   NotFoundError,
@@ -166,7 +168,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
       exception instanceof NodeRuleError ||
       exception instanceof EdgeRuleError ||
       exception instanceof BranchRuleError ||
-      exception instanceof AiRuleError
+      exception instanceof AiRuleError ||
+      exception instanceof ExportLinkExpiredError ||
+      exception instanceof AccountDeletedError
     ) {
       return {
         status: HttpStatus.UNPROCESSABLE_ENTITY,
