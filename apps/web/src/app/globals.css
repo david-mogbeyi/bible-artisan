@@ -22,6 +22,10 @@
 body {
   background: var(--color-canvas);
   color: var(--color-ink);
+  /* NFR-ACCESS-003 (BIB-38): at 200% text or a phone width, a long unbroken word (a URL, a long
+     name) wraps instead of pushing the page into horizontal scrolling. `break-word` only breaks
+     words that would overflow, so wide layouts are unchanged. */
+  overflow-wrap: break-word;
 }
 
 :focus-visible {
