@@ -16,6 +16,7 @@ import {
   queueNoteSave,
   replayNoteSave,
 } from '@/lib/offline-queue';
+import { expectNoA11yViolations } from '@/test/axe';
 import { TRANSLATION } from '@/test/bible-fixtures';
 import { studyQueryKey } from '@/lib/studies';
 import { captureDownloads } from '@/test/downloads';
@@ -233,6 +234,7 @@ describe('NotesPanel (BIB-23)', () => {
     // Creating a note moved the study's revision; the cached study follows.
     expect(queryClient.getQueryData<StudyResponse>(studyQueryKey(STUDY_ID))?.revision).toBe(5);
     expect(screen.getByText('0 / 50,000 characters')).toBeTruthy();
+    await expectNoA11yViolations(document.body);
 
     typeText(editor, 'Bears witness');
     expect(textOf(saveStatus())).toContain(SAVE_COPY.pending);
@@ -310,6 +312,7 @@ describe('NotesPanel (BIB-23)', () => {
     });
     expect(patches[1]?.key).not.toBe(patches[0]?.key);
     expect(screen.queryByRole('region', { name: 'Resolve conflict' })).toBeNull();
+    await expectNoA11yViolations(document.body);
   });
 
   it('on a conflict, Keep server version shows the server text and sends nothing more', async () => {
@@ -459,6 +462,7 @@ describe('NotesPanel (BIB-23)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply link' }));
     expect(textOf(screen.getByRole('alert'))).toContain('Enter a full web address');
     expect(editor.getHTML()).not.toContain('javascript:');
+    await expectNoA11yViolations(document.body);
   });
 
   it('groups orphaned notes with their deleted target, and restores a note from the note trash', async () => {
@@ -543,6 +547,7 @@ describe('NotesPanel (BIB-23)', () => {
       'noopener noreferrer nofollow',
     );
     expect(screen.queryByRole('textbox', { name: 'Note text' })).toBeNull();
+    await expectNoA11yViolations(document.body);
   });
 
   it('refuses a note whose content fails the allowlist when it arrives from the API', async () => {
@@ -1382,8 +1387,11 @@ describe('NotesPanel offline queue (BIB-36)', () => {
     await waitFor(() => expect(textOf(saveStatus())).toContain(SAVE_COPY.queueFull), {
       timeout: 2000,
     });
-    expect(screen.getByRole('textbox', { name: 'Note text' }).getAttribute('contenteditable')).toBe(
-      'false',
+    // The editor turns read-only in an effect after the status renders, so wait for it under load.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('textbox', { name: 'Note text' }).getAttribute('contenteditable'),
+      ).toBe('false'),
     );
     expect(editor.getText()).toBe('No room for this');
     const created = captureDownloads();

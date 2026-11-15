@@ -134,7 +134,7 @@ export function BranchesMenu({
                         type="button"
                         aria-pressed={collapsed}
                         onClick={() => store.getState().toggleCollapsed(branch.id)}
-                        className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent"
+                        className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent aria-pressed:font-semibold"
                       >
                         Collapse <span className="sr-only">{name}</span>
                       </button>
@@ -142,7 +142,7 @@ export function BranchesMenu({
                         type="button"
                         aria-pressed={solo}
                         onClick={() => store.getState().setSoloBranch(solo ? null : branch.id)}
-                        className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent"
+                        className="rounded border border-muted px-2 py-1 aria-pressed:border-2 aria-pressed:border-accent aria-pressed:font-semibold"
                       >
                         Show only <span className="sr-only">{name}</span>
                       </button>

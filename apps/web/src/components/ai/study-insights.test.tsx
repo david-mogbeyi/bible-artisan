@@ -7,6 +7,7 @@ import type {
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REASONING_COPY, ReasoningPath } from '@/components/nodes/reasoning-path';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { INSIGHTS_COPY, StudyInsights } from './study-insights';
 import { SUMMARY_COPY, StudySummaryPanel } from './study-summary';
@@ -146,6 +147,7 @@ describe('StudySummaryPanel (BIB-43)', () => {
     expect(textOf(article)).toContain('Conscience bears witness. (You)');
     await waitFor(() => expect(textOf(article)).toContain('Evidence: Observation: Witness'));
     expect(screen.getByRole('alert')).toHaveProperty('textContent', SUMMARY_COPY.failed);
+    await expectNoA11yViolations(document.body);
     fireEvent.click(screen.getByRole('button', { name: SUMMARY_COPY.regenerate }));
     await waitFor(() =>
       expect(requests.filter((r) => r.method === 'POST').map((r) => r.path)).toStrictEqual([
@@ -235,6 +237,7 @@ describe('StudyInsights (BIB-44, BIB-45)', () => {
     expect(textOf(card)).toContain('AI suggested Romans 8:16');
     expect(textOf(card)).toContain('Why: This passage may speak about inner witness.');
     expect(within(card).getByRole('link', { name: /^Open in reader/ })).toBeTruthy();
+    await expectNoA11yViolations(document.body);
     fireEvent.click(within(card).getByRole('button', { name: /^Add to study/ }));
     await waitFor(() =>
       expect(requests.filter((r) => r.method === 'POST')).toStrictEqual([
@@ -288,5 +291,6 @@ describe('ReasoningPath (BIB-45)', () => {
       ),
     );
     expect(textOf(region)).toContain('No supporting evidence was recorded with this version.');
+    await expectNoA11yViolations(document.body);
   });
 });

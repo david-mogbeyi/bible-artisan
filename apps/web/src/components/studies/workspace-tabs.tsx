@@ -15,6 +15,9 @@ export const WORKSPACE_TAB_LABELS: Record<WorkspaceTab, string> = {
   graph: 'Graph Preview',
 };
 
+/** The sticky tab list's height, which the page keeps as scroll padding (globals.css). */
+export const STICKY_HEIGHT_VAR = '--workspace-tabs-height';
+
 export const tabId = (base: string, tab: WorkspaceTab) => `${base}-tab-${tab}`;
 export const panelId = (base: string, tab: WorkspaceTab) => `${base}-panel-${tab}`;
 
@@ -35,6 +38,24 @@ export function WorkspaceTabList({
   unsaved: ReadonlySet<WorkspaceTab>;
 }) {
   const refs = useRef(new Map<WorkspaceTab, HTMLButtonElement>());
+  const list = useRef<HTMLDivElement>(null);
+
+  // BIB-53 (WCAG 2.4.11): the tab list sticks to the top, so the page keeps that much scroll
+  // padding (globals.css) and a focused control is never scrolled in under it. It is measured, as
+  // it wraps to more rows at 200% text or on a phone.
+  useEffect(() => {
+    const element = list.current;
+    if (!element) return;
+    const root = document.documentElement;
+    const observer = new ResizeObserver(() => {
+      root.style.setProperty(STICKY_HEIGHT_VAR, `${element.offsetHeight}px`);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty(STICKY_HEIGHT_VAR);
+    };
+  }, []);
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const index = WORKSPACE_TABS.indexOf(selected);
@@ -62,6 +83,7 @@ export function WorkspaceTabList({
 
   return (
     <div
+      ref={list}
       role="tablist"
       aria-label="Study workspace"
       onKeyDown={onKeyDown}

@@ -16,6 +16,7 @@ import {
   TRANSLATION,
   wholeChapterReference,
 } from '@/test/bible-fixtures';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { BiblePage } from './bible-page';
 
@@ -479,6 +480,7 @@ describe('BiblePage in a study (BIB-24)', () => {
     expect(
       requestsTo('/annotations').map(([input]) => new URL(input).searchParams.toString()),
     ).toStrictEqual([`referenceId=${PSALM_3_ID}`]);
+    await expectNoA11yViolations(document.body);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Next chapter: Psalms 4' }));
     await waitFor(() => expect(push).toHaveBeenCalled());

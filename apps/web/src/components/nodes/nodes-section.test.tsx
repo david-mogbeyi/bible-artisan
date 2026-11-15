@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NODE_ADD_COPY } from '@/lib/add-node';
 import { libraryQueryKey, studyQueryKey } from '@/lib/studies';
 import { EDITION_ID, TRANSLATION } from '@/test/bible-fixtures';
+import { expectNoA11yViolations } from '@/test/axe';
 import { jsonResponse, renderWithQuery, textOf } from '@/test/render';
 import { ADD_NODE_COPY } from './add-node-form';
 import { NODE_DETAIL_COPY } from './node-detail';
@@ -262,6 +263,7 @@ describe('NodesSection', () => {
       target: { value: '  Maybe a\nsecond witness ' },
     });
     expect(screen.getByText('22 / 10,000 characters')).toBeTruthy();
+    await expectNoA11yViolations(document.body);
     fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     const heading = await screen.findByRole('heading', { level: 3, name: 'Thought' });
@@ -283,6 +285,7 @@ describe('NodesSection', () => {
     const region = screen.getByRole('region', { name: 'Thought' });
     expect(textOf(region)).toContain('TextMaybe a second witness');
     expect(within(region).getByText('You')).toBeTruthy();
+    await expectNoA11yViolations(document.body);
     // The study moved to the creation's revision.
     expect(queryClient.getQueryData<StudyResponse>(studyQueryKey(STUDY_ID))?.revision).toBe(5);
   });

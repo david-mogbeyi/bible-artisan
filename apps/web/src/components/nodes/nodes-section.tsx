@@ -320,7 +320,7 @@ export function NodesSection({
                   type="button"
                   aria-pressed={shownId === node.id}
                   onClick={() => select(node.id, false)}
-                  className="flex w-full flex-col items-start rounded border border-muted px-3 py-2 text-left aria-pressed:border-accent aria-pressed:font-semibold"
+                  className="flex w-full flex-col items-start rounded border border-muted px-3 py-2 text-left aria-pressed:border-2 aria-pressed:border-accent aria-pressed:font-semibold"
                 >
                   <span className="text-sm">
                     {NODE_TYPE_NAMES[node.type]} · {NODE_ORIGIN_NAMES[node.origin]}
