@@ -57,6 +57,15 @@ export class StudyEdge extends Model {
   @Column({ field: 'deleted_at', type: DataType.DATE, allowNull: true })
   declare deletedAt: Date | null;
 
+  /**
+   * The node whose deletion removed this edge (BIB-31), so its restore brings exactly these back;
+   * null otherwise. FK `study_edge_deleted_with_node_fk` `(owner_id, study_id,
+   * deleted_with_node_id) -> study_node (owner_id, study_id, id)`; CHECK
+   * `study_edge_deleted_with_check`: only on a deleted edge, and only naming one of its endpoints.
+   */
+  @Column({ field: 'deleted_with_node_id', type: DataType.UUID, allowNull: true })
+  declare deletedWithNodeId: string | null;
+
   @CreatedAt
   @Column({ field: 'created_at', type: DataType.DATE, allowNull: false })
   declare createdAt: Date;

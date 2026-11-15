@@ -5,6 +5,7 @@ import { NodeRuleError } from '../../common/errors/domain-errors';
 import type { StudyMutation } from '../../common/mutation/study-mutation';
 import { StudyBranch } from '../../database/models/study-branch.model';
 import { StudyNode } from '../../database/models/study-node.model';
+import { Study } from '../../database/models/study.model';
 
 /** The columns of a new node; study and owner come from the mutation's lock. */
 export type NewNodeValues = Omit<CreationAttributes<StudyNode>, 'studyId' | 'ownerId'>;
@@ -23,11 +24,40 @@ export class StudyGraphService {
    * otherwise. The only way a node is created, whatever the route.
    */
   async addNode(m: StudyMutation, values: NewNodeValues): Promise<StudyNode> {
+    await this.requireRoomForLiveNode(m);
+    return m.createChild(StudyNode, values);
+  }
+
+  /**
+   * 422 `NODE_LIMIT_EXCEEDED` unless the study holds fewer than `MAX_NODES_PER_STUDY` live nodes:
+   * the cap every path that makes a node live shares (a create, and BIB-31's restore).
+   */
+  async requireRoomForLiveNode(m: StudyMutation): Promise<void> {
     const live = await StudyNode.count({
       where: { studyId: m.studyId, ownerId: m.ownerId, deletedAt: null },
     });
     if (live >= MAX_NODES_PER_STUDY) throw new NodeRuleError(NODE_LIMIT_EXCEEDED);
-    return m.createChild(StudyNode, values);
+  }
+
+  /**
+   * When a node is deleted (BIB-31; PRD section 23 "Deleting the main question clears current main
+   * pointer but preserves the original question"): clears `study.main_question_node_id` if it names
+   * that node, moving the study's revision, and says whether it did. The original-question pointer
+   * is never touched. Graph never writes `study` itself.
+   */
+  async clearMainQuestion(m: StudyMutation, nodeId: string): Promise<boolean> {
+    const study = await Study.findOne({
+      where: { id: m.studyId, ownerId: m.ownerId },
+      attributes: ['revision', 'mainQuestionNodeId'],
+      rejectOnEmpty: true,
+    });
+    if (study.mainQuestionNodeId !== nodeId) return false;
+    await m.updateWithExpectedRevision(Study, {
+      id: m.studyId,
+      expectedRevision: study.revision,
+      values: { mainQuestionNodeId: null },
+    });
+    return true;
   }
 
   /**

@@ -668,6 +668,7 @@ describe('NodesSection', () => {
       ...common(),
       text: 'First look',
       observationKind: 'textual_observation',
+      establishedAt: null,
     };
     reply(
       `GET ${NODES}`,
@@ -1017,7 +1018,9 @@ describe('NodesSection', () => {
         screen.getByRole('button', { name: 'Scripture · Scripture Text Romans 9:1' }),
       );
       await screen.findByRole('region', { name: 'Scripture' });
-      expect(screen.queryByRole('button', { name: NODE_ADD_COPY.separateCopy })).toBeNull();
+      // The revisit status stays gone; node detail's own "Add a separate copy" (BIB-61) remains.
+      const said = screen.getAllByText(/is already in this study/);
+      expect(said.map((el) => el.className)).toStrictEqual(['sr-only']);
     });
   });
 });

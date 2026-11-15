@@ -338,43 +338,85 @@ export async function releaseLostEvidence(
   m: StudyMutation,
   before: EdgeBefore,
 ): Promise<{ clearedNodeIds: string[]; lastEventSequence: string | null }> {
-  const none = { clearedNodeIds: [], lastEventSequence: null };
-  let conclusionId: string;
-  if (before.type === 'supports') conclusionId = before.targetNodeId;
-  else if (before.type === 'inference_from') conclusionId = before.sourceNodeId;
-  else return none;
-  const conclusion = await StudyNode.findOne({
+  const conclusionId = supportedConclusionOf(before);
+  if (conclusionId === null) return { clearedNodeIds: [], lastEventSequence: null };
+  return releaseConclusionsWithoutSupport(m, [conclusionId], { edgeId: before.id });
+}
+
+/** The conclusion an edge counts as supporting evidence for, or null when it supports none. */
+export function supportedConclusionOf(edge: EdgeBefore): string | null {
+  if (edge.type === 'supports') return edge.targetNodeId;
+  if (edge.type === 'inference_from') return edge.sourceNodeId;
+  return null;
+}
+
+/**
+ * What took a conclusion's last support away, for `conclusion_establishment_cleared`: an edge's
+ * removal or retype (BIB-30), a node's deletion, or a restore that brought a conclusion back
+ * without some of its relationships (BIB-31). Ids only.
+ */
+export type EvidenceLossCause =
+  { edgeId: string } | { deletedNodeId: string } | { restoredNodeId: string };
+
+/**
+ * The evidence-loss rule for each of these conclusions that is live, established and now has no
+ * live supporting evidence, in id order: clears the marker (a revisioned update), writes an
+ * `evidence_removed` version and appends `conclusion_establishment_cleared` naming the cause
+ * (`edgeId` null unless an edge was the cause). The status is kept.
+ */
+export async function releaseConclusionsWithoutSupport(
+  m: StudyMutation,
+  conclusionIds: readonly string[],
+  cause: EvidenceLossCause,
+): Promise<{ clearedNodeIds: string[]; lastEventSequence: string | null }> {
+  const result: { clearedNodeIds: string[]; lastEventSequence: string | null } = {
+    clearedNodeIds: [],
+    lastEventSequence: null,
+  };
+  if (conclusionIds.length === 0) return result;
+  const conclusions = await StudyNode.findAll({
     where: {
-      id: conclusionId,
+      id: [...new Set(conclusionIds)],
       studyId: m.studyId,
       ownerId: m.ownerId,
       type: 'conclusion',
       deletedAt: null,
       establishedAt: { [Op.ne]: null },
     },
+    order: [['id', 'ASC']],
   });
-  if (!conclusion) return none;
-  const remaining = (await liveEvidence(scopeOf(m), [conclusion.id])).filter(
-    (row) => row.role === 'supporting',
+  if (conclusions.length === 0) return result;
+  const support = supportCounts(
+    await liveEvidence(
+      scopeOf(m),
+      conclusions.map((c) => c.id),
+    ),
+    conclusions.map((c) => c.id),
   );
-  if (remaining.length > 0) return none;
-  const cleared = await m.updateWithExpectedRevision(StudyNode, {
-    id: conclusion.id,
-    expectedRevision: conclusion.revision,
-    values: { establishedAt: null },
-    where: { deletedAt: null },
-  });
-  const version = await writeConclusionVersion(m, cleared, 'evidence_removed', null);
-  const event = await m.appendEvent({
-    eventType: CONCLUSION_EVENTS.establishmentCleared,
-    payload: {
-      nodeId: cleared.id,
-      versionId: version.id,
-      versionNumber: version.versionNumber,
-      edgeId: before.id,
-    },
-  });
-  return { clearedNodeIds: [cleared.id], lastEventSequence: event.sequence };
+  const { edgeId = null, ...rest } = cause as { edgeId?: string };
+  for (const conclusion of conclusions) {
+    if ((support.get(conclusion.id) ?? 0) > 0) continue;
+    const cleared = await m.updateWithExpectedRevision(StudyNode, {
+      id: conclusion.id,
+      expectedRevision: conclusion.revision,
+      values: { establishedAt: null },
+      where: { deletedAt: null },
+    });
+    const version = await writeConclusionVersion(m, cleared, 'evidence_removed', null);
+    const event = await m.appendEvent({
+      eventType: CONCLUSION_EVENTS.establishmentCleared,
+      payload: {
+        nodeId: cleared.id,
+        versionId: version.id,
+        versionNumber: version.versionNumber,
+        edgeId,
+        ...rest,
+      },
+    });
+    result.clearedNodeIds.push(cleared.id);
+    result.lastEventSequence = event.sequence;
+  }
+  return result;
 }
 
 /** `established_at` for a request: the database clock when it becomes established. */

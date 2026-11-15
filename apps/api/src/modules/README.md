@@ -173,6 +173,12 @@ can only _clear_ the marker: it never changes a status. A rule refusal (400/422)
 version, event or receipt. A reason (`changeReason`) and every statement live only in
 `node_version`; events, responses and receipts carry ids, enums, booleans and integers.
 
+BIB-62 extends the marker to observations: only the owner's node PATCH sets an observation's
+`established_at` (no evidence needed); an edit of its text or kind clears it in the same write.
+BIB-31's node delete and restore call `releaseConclusionsWithoutSupport` (the evidence-loss rule
+with a node as the cause); BIB-61's duplicate never copies a marker or a status beyond Open /
+Tentative.
+
 ### Creating a study (BIB-19): `MutationService.create`
 
 A new study has no row to lock and no revision a client could have seen, so creation has its own

@@ -76,14 +76,15 @@ export interface ConnectOptions {
  *
  * 1. Two-way types are normalized to `source < target` (lower-case uuid strings sort as
  *    PostgreSQL's uuid order does), so B→A finds A→B.
- * 2. Dedup: the live edge with these endpoints and type, if any, is returned as `existing` and
+ * 2. Both endpoints must be live nodes of this study and owner (absent, deleted, another study's
+ *    or another owner's: 404; the composite FKs refuse them in SQL too). Checked before dedup
+ *    (BIB-31), so a deleted endpoint is never answered `existing`.
+ * 3. Dedup: the live edge with these endpoints and type, if any, is returned as `existing` and
  *    nothing is written. The caller decides what that means for its mutation (the connect route
  *    declares `m.unchanged()`). The note sent with a duplicate is not applied.
- * 3. `beforeCreate`, then both endpoints must be live nodes of this study and owner (absent,
- *    deleted, another study's or another owner's: 404; the composite FKs refuse them in SQL too),
- *    `answers` / `raises_question` need a Question target (422), and the study holds fewer than
- *    `MAX_EDGES_PER_STUDY` live edges (422).
- * 4. Insert (`origin: 'user'`), content revision +1, one `node_connected` event.
+ * 4. `beforeCreate`, then `answers` / `raises_question` need a Question target (422), and the
+ *    study holds fewer than `MAX_EDGES_PER_STUDY` live edges (422).
+ * 5. Insert (`origin: 'user'`), content revision +1, one `node_connected` event.
  *
  * A malformed id is 404 before any query. A self-edge is the caller's 400 (the request schema);
  * the CHECK is the backstop. The partial
@@ -105,6 +106,20 @@ export async function connectNodes(
       ? [input.targetNodeId, input.sourceNodeId]
       : [input.sourceNodeId, input.targetNodeId];
 
+  // BIB-31: both endpoints must be live before the dedup lookup, so a stale client never gets
+  // `existing` for an edge whose endpoint has been deleted.
+  const endpoints = await StudyNode.findAll({
+    where: {
+      id: [sourceNodeId, targetNodeId],
+      studyId: m.studyId,
+      ownerId: m.ownerId,
+      deletedAt: null,
+    },
+    attributes: ['id', 'type'],
+  });
+  const target = endpoints.find((node) => node.id === targetNodeId);
+  if (!target || !endpoints.some((node) => node.id === sourceNodeId)) throw new NotFoundError();
+
   const existing = await StudyEdge.findOne({
     where: {
       studyId: m.studyId,
@@ -119,17 +134,6 @@ export async function connectNodes(
 
   await beforeCreate?.();
 
-  const endpoints = await StudyNode.findAll({
-    where: {
-      id: [sourceNodeId, targetNodeId],
-      studyId: m.studyId,
-      ownerId: m.ownerId,
-      deletedAt: null,
-    },
-    attributes: ['id', 'type'],
-  });
-  const target = endpoints.find((node) => node.id === targetNodeId);
-  if (!target || !endpoints.some((node) => node.id === sourceNodeId)) throw new NotFoundError();
   if (requiresQuestionTarget(type) && target.type !== 'question') {
     throw new EdgeRuleError(EDGE_TARGET_NOT_QUESTION);
   }

@@ -2,7 +2,17 @@ import {
   type CreateNodeRequest,
   type CreateNodeResponse,
   createNodeResponseSchema,
+  type DeletedNodeListResponse,
+  deletedNodeListResponseSchema,
+  type DuplicateNodeRequest,
+  type DuplicateNodeResponse,
+  duplicateNodeResponseSchema,
   IDEMPOTENCY_KEY_HEADER,
+  type NodeDeleteResponse,
+  nodeDeleteResponseSchema,
+  type NodeRestoreResponse,
+  nodeRestoreResponseSchema,
+  type NodeStateRequest,
   NODE_STATUS_NAMES,
   NODE_TYPE_NAMES,
   type NodeListResponse,
@@ -108,6 +118,57 @@ export function updateNode(
   });
 }
 
+/** `POST /studies/:id/nodes/:nodeId/duplicate` (BIB-61). `expectedRevision` is the study's. */
+export function duplicateNode(
+  studyId: string,
+  nodeId: string,
+  body: DuplicateNodeRequest,
+  idempotencyKey: string,
+): Promise<DuplicateNodeResponse> {
+  return apiFetch(`${nodePath(studyId, nodeId)}/duplicate`, duplicateNodeResponseSchema, {
+    method: 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+    body: JSON.stringify(body),
+  });
+}
+
+/** `DELETE /studies/:id/nodes/:nodeId` (BIB-31). `expectedRevision` is the node's. */
+export function deleteNode(
+  studyId: string,
+  nodeId: string,
+  body: NodeStateRequest,
+  idempotencyKey: string,
+): Promise<NodeDeleteResponse> {
+  return apiFetch(nodePath(studyId, nodeId), nodeDeleteResponseSchema, {
+    method: 'DELETE',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+    body: JSON.stringify(body),
+  });
+}
+
+/** `POST /studies/:id/nodes/:nodeId/restore` (BIB-31). `expectedRevision` is the deleted node's. */
+export function restoreNode(
+  studyId: string,
+  nodeId: string,
+  body: NodeStateRequest,
+  idempotencyKey: string,
+): Promise<NodeRestoreResponse> {
+  return apiFetch(`${nodePath(studyId, nodeId)}/restore`, nodeRestoreResponseSchema, {
+    method: 'POST',
+    headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey },
+    body: JSON.stringify(body),
+  });
+}
+
+/** The study's deleted nodes (BIB-31), under the study's key like every node query. */
+export function deletedNodesQueryKey(studyId: string) {
+  return ['studies', studyId, 'nodes', 'deleted'] as const;
+}
+
+export function listDeletedNodes(studyId: string): Promise<DeletedNodeListResponse> {
+  return apiFetch(`${nodesPath(studyId)}?state=deleted`, deletedNodeListResponseSchema);
+}
+
 export const ESTABLISHED_TEXT = 'Established by me';
 export const EVIDENCE_INCOMPLETE_TEXT = 'Evidence incomplete';
 
@@ -127,7 +188,11 @@ export function nodeStateText(
       .filter(Boolean)
       .join(' · ');
   }
-  if (node.observationKind) return OBSERVATION_KIND_NAMES[node.observationKind];
+  if (node.observationKind) {
+    // BIB-62: an observation can be "Established by me" too.
+    const kind = OBSERVATION_KIND_NAMES[node.observationKind];
+    return node.established ? `${kind} · ${ESTABLISHED_TEXT}` : kind;
+  }
   return null;
 }
 

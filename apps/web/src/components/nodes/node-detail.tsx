@@ -8,6 +8,7 @@ import {
   NODE_STATUS_NAMES,
   NODE_TYPE_NAMES,
   NODE_UNCHANGED,
+  type NodeDeleteResponse,
   type NodeResponse,
   type NodeSummary,
   OBSERVATION_KIND_NAMES,
@@ -16,6 +17,7 @@ import {
   type Source,
   SOURCE_KIND_NAMES,
   STUDY_ARCHIVED,
+  type StudyNodeType,
   STUDY_TRASHED,
   type UpdateNodeRequest,
   updateNodeRequestSchema,
@@ -47,6 +49,14 @@ import {
 } from './node-fields';
 import { Branches } from './branches';
 import { ConclusionActions, QuestionStatusForm } from './conclusion-actions';
+import {
+  DeleteNodeButton,
+  DuplicateButton,
+  EstablishedMarker,
+  NODE_ACTION_COPY,
+  ObservationMarkerButton,
+  ScriptureCopyButton,
+} from './node-actions';
 import { Relationships } from './relationships';
 
 export const NODE_DETAIL_COPY = {
@@ -106,14 +116,33 @@ export function NodeDetail({
   nodes,
   studyRevision,
   onUnsavedChange,
+  mainQuestionNodeId = null,
+  onAnnounce = () => {},
+  onCopied = () => {},
+  onDeleted = () => {},
+  onReload = () => {},
+  hideScriptureCopy = false,
 }: {
   studyId: string;
   nodeId: string;
   editable: boolean;
   focusOnLoad: boolean;
   onFocused: () => void;
-  onSaved: () => void;
+  /** After a save; `text` replaces the default "Saved" announcement. */
+  onSaved: (text?: string) => void;
   onLocked: () => void;
+  /** The study's main question, for the delete dialog's impact (BIB-31). */
+  mainQuestionNodeId?: string | null;
+  /** Says something in the section's live region. */
+  onAnnounce?: (text: string) => void;
+  /** A copy was made (BIB-61): the section selects it and announces it. */
+  onCopied?: (id: string, studyRevision: number, announcement: string) => void;
+  /** This node was deleted (BIB-31): the section clears the selection and offers Restore. */
+  onDeleted?: (result: NodeDeleteResponse, type: StudyNodeType, label: string) => void;
+  /** Reloads the study after a refused copy on a stale revision. */
+  onReload?: () => void;
+  /** The revisit status already offers "Add a separate copy" for this passage. */
+  hideScriptureCopy?: boolean;
   /** Another listed node's label, for "Duplicate of …". */
   labelOf: (nodeId: string) => string | null;
   /** Selects another node and focuses its heading. */
@@ -130,6 +159,8 @@ export function NodeDetail({
   const queryClient = useQueryClient();
   /** The Connect dialog opened from a conclusion's "Connect evidence" (hosted by Relationships). */
   const [connectingEvidence, setConnectingEvidence] = useState(false);
+  /** The edit form is open: duplicate and delete act on what is saved, so they wait. */
+  const [editing, setEditing] = useState(false);
   const node = useQuery({
     queryKey: nodeQueryKey(studyId, nodeId),
     queryFn: () => fetchNode(studyId, nodeId),
@@ -182,6 +213,52 @@ export function NodeDetail({
         <Row label="Created">{formatNodeTime(data.createdAt)}</Row>
         <Row label="Updated">{formatNodeTime(data.updatedAt)}</Row>
       </dl>
+      {data.type === 'observation' && data.establishedAt !== null ? <EstablishedMarker /> : null}
+      {editable && !editing ? (
+        <div className="flex flex-wrap items-start gap-3">
+          {data.type === 'observation' ? (
+            <ObservationMarkerButton
+              key={`${data.id}-marker`}
+              studyId={studyId}
+              node={data}
+              onAnnounce={onAnnounce}
+              onLocked={onLocked}
+              refetch={() => node.refetch()}
+            />
+          ) : null}
+          {data.type === 'scripture' ? (
+            data.reference && !hideScriptureCopy ? (
+              <ScriptureCopyButton
+                studyId={studyId}
+                referenceId={data.reference.id}
+                label={data.reference.label}
+                studyRevision={studyRevision}
+                onCopied={onCopied}
+                onLocked={onLocked}
+                onReload={onReload}
+              />
+            ) : null
+          ) : (
+            <DuplicateButton
+              studyId={studyId}
+              node={data}
+              studyRevision={studyRevision}
+              established={data.type === 'observation' && data.establishedAt !== null}
+              onCopied={onCopied}
+              onLocked={onLocked}
+            />
+          )}
+          <DeleteNodeButton
+            studyId={studyId}
+            node={data}
+            label={labelOf(data.id) ?? NODE_TYPE_NAMES[data.type]}
+            mainQuestionNodeId={mainQuestionNodeId}
+            onDeleted={onDeleted}
+            onLocked={onLocked}
+            refetch={() => node.refetch()}
+          />
+        </div>
+      ) : null}
       {data.type === 'question' ? (
         <QuestionStatusForm
           key={`${data.id}-status`}
@@ -217,6 +294,7 @@ export function NodeDetail({
           onLocked={onLocked}
           refetch={() => node.refetch()}
           onUnsavedChange={onUnsavedChange}
+          onEditingChange={setEditing}
         />
       ) : null}
       <Relationships
@@ -370,13 +448,15 @@ function EditNode({
   onLocked,
   refetch,
   onUnsavedChange,
+  onEditingChange,
 }: {
   studyId: string;
   node: EditableNode;
-  onSaved: () => void;
+  onSaved: (text?: string) => void;
   onLocked: () => void;
   refetch: () => Promise<unknown>;
   onUnsavedChange?: (unsaved: boolean) => void;
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const kindId = useId();
@@ -399,6 +479,9 @@ function EditNode({
     onUnsavedChange?.(unsaved);
   }, [unsaved, onUnsavedChange]);
   useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
+  useEffect(() => {
+    onEditingChange?.(editing);
+  }, [editing, onEditingChange]);
 
   useEffect(() => {
     if (editing || !returnFocus.current) return;
@@ -449,7 +532,7 @@ function EditNode({
     setPending(true);
     setProblem(null);
     try {
-      await updateNode(studyId, node.id, attempt.body, attempt.key);
+      const saved = await updateNode(studyId, node.id, attempt.body, attempt.key);
       frozen.current = null;
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: nodeQueryKey(studyId, node.id) }),
@@ -459,7 +542,11 @@ function EditNode({
         invalidateLibrary(queryClient),
       ]);
       close();
-      onSaved();
+      onSaved(
+        saved.warnings.includes('establishment_cleared')
+          ? NODE_ACTION_COPY.savedCleared
+          : undefined,
+      );
     } catch (error) {
       const definite = error instanceof ApiError && error.status < 500 && error.status !== 429;
       if (definite) frozen.current = null;
@@ -554,6 +641,9 @@ function EditNode({
           error={errors.text}
         />
       )}
+      {base.type === 'observation' && base.establishedAt !== null ? (
+        <p className="text-sm">{NODE_ACTION_COPY.editClears}</p>
+      ) : null}
       {problem ? (
         <div role="alert" className="flex flex-wrap items-center gap-3">
           <p>{problem.text}</p>

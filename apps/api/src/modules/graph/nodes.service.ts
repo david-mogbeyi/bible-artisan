@@ -3,23 +3,36 @@ import { Injectable } from '@nestjs/common';
 import {
   createNodeRequestSchema,
   type CreateNodeResponse,
+  type DeletedNodeListResponse,
+  duplicateNodeRequestSchema,
+  type DuplicateNodeResponse,
+  ESTABLISHMENT_ALONE,
+  listNodesQuerySchema,
+  MAX_EDGES_PER_STUDY,
+  NODE_NOT_DELETED,
+  NODE_NOT_DUPLICABLE,
   NODE_NOT_EDITABLE,
   NODE_UNCHANGED,
+  type NodeDeleteResponse,
   type NodeListResponse,
   type NodeMutationResponse,
   nodeLabel,
   type NodeResponse,
+  type NodeRestoreResponse,
+  nodeStateRequestSchema,
   type NodeSummary,
   type NodeVersionListResponse,
   type NodeWarning,
   QUESTION_STATUSES,
   type QuestionStatus,
   type ScriptureReference,
+  type SkippedEdgeReason,
   type Source,
   type SourceCitation,
   STATUS_NOT_FOR_NODE_TYPE,
   updateNodeRequestSchema,
 } from '@bible-artisan/contracts';
+import { fn, literal, Op } from 'sequelize';
 import type { z } from 'zod';
 import {
   NodeRuleError,
@@ -49,7 +62,9 @@ import {
   isEvidenceIncomplete,
   liveEvidence,
   planConclusionChange,
+  releaseConclusionsWithoutSupport,
   supportCounts,
+  supportedConclusionOf,
   writeConclusionVersion,
 } from './conclusions';
 
@@ -68,6 +83,13 @@ type NodeValues = NewNodeValues;
  * (`branchId`: the initial branch a blank study's first question roots, else null; see
  * `StudyGraphService.ensureInitialBranch`). `source_created`, `thought_updated` and
  * `source_updated` are not in PRD section 13's list and are named by analogy.
+ *
+ * BIB-62: `observation_established {nodeId, observationKind}` (PRD section 13) when the owner marks
+ * an observation; `observation_updated` carries `established` and `previousEstablished` (an edit or
+ * a removal of the marker). BIB-61: a duplicate's created event carries `duplicateOfNodeId` (the
+ * source node); ordinary creates never do. BIB-31: `node_deleted {nodeId, nodeType,
+ * removedEdgeCount, promotedCanonicalNodeId, mainQuestionCleared}` and `node_restored {nodeId,
+ * nodeType, restoredEdgeCount, skippedEdgeCount, canonicalNodeId}`. All thread-visible.
  */
 export const NODE_EVENTS = {
   scripture: 'scripture_added_to_graph',
@@ -79,8 +101,11 @@ export const NODE_EVENTS = {
   questionStatusChanged: 'question_status_changed',
   source: 'source_created',
   observationUpdated: 'observation_updated',
+  observationEstablished: 'observation_established',
   thoughtUpdated: 'thought_updated',
   sourceUpdated: 'source_updated',
+  deleted: 'node_deleted',
+  restored: 'node_restored',
 } as const;
 
 /** The columns of a new node. `origin` comes from the type, never from the client. */
@@ -108,6 +133,44 @@ function newNodeValues(body: CreateNodeBody): NodeValues {
       };
     case 'source':
       return { type: 'source', origin: 'external', ...sourceColumns(body.source) };
+  }
+}
+
+/**
+ * The columns of a duplicate (BIB-61; PRD section 12): the source's current content and origin from
+ * an explicit column list (never a row spread), with a fresh status. Nothing else: no marker,
+ * canonical id, position, membership or version history. A Scripture node is refused.
+ */
+function duplicateValues(source: StudyNode): NodeValues {
+  const { origin } = source;
+  switch (source.type) {
+    case 'observation':
+      return {
+        type: 'observation',
+        origin,
+        body: required(source.body),
+        observationKind: required(source.observationKind),
+      };
+    case 'thought':
+      return { type: 'thought', origin, body: required(source.body) };
+    case 'question':
+      return { type: 'question', origin, title: required(source.title), questionStatus: 'open' };
+    case 'conclusion':
+      return {
+        type: 'conclusion',
+        origin,
+        title: required(source.title),
+        conclusionStatus: 'tentative',
+      };
+    case 'source':
+      return {
+        type: 'source',
+        origin,
+        title: required(source.title),
+        payloadJson: required(source.payloadJson),
+      };
+    case 'scripture':
+      throw new NodeRuleError(NODE_NOT_DUPLICABLE);
   }
 }
 
@@ -263,18 +326,10 @@ export class NodesService {
       work: async (m) => {
         const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
         if (body.type === 'scripture') return this.addScripture(m, body, studyRevision);
-        const node = await this.graph.addNode(m, newNodeValues(body));
-        m.bumpContentRevision();
-        const branchId = node.type === 'question' ? await this.graph.ensureInitialBranch(m) : null;
-        // A conclusion is born with version 1 (BIB-30), in the same transaction as the node.
-        const first =
-          node.type === 'conclusion'
-            ? await writeConclusionVersion(m, node, 'created', null)
-            : null;
-        const event = await m.appendEvent(createdEvent(node, branchId, first?.id ?? null));
+        const { node, event, versionId } = await this.insertNode(m, newNodeValues(body));
         const response: CreateNodeResponse = {
           ...mutationBody(node, event.sequence, {
-            versionId: first?.id ?? null,
+            versionId,
             previousVersionId: null,
             warnings: [],
           }),
@@ -283,6 +338,224 @@ export class NodesService {
           canonicalNodeId: null,
         };
         return { status: 201, body: response };
+      },
+    });
+  }
+
+  /**
+   * The insert step `create` and `duplicate` share, so the two cannot drift: the node (under the
+   * live-node cap), content revision +1, a question's initial branch on a blank study, a
+   * conclusion's version 1 (BIB-30), then the created event (with `extra` keys, e.g. a duplicate's
+   * `duplicateOfNodeId`).
+   */
+  private async insertNode(m: StudyMutation, values: NodeValues, extra: object = {}) {
+    const node = await this.graph.addNode(m, values);
+    m.bumpContentRevision();
+    const branchId = node.type === 'question' ? await this.graph.ensureInitialBranch(m) : null;
+    const first =
+      node.type === 'conclusion' ? await writeConclusionVersion(m, node, 'created', null) : null;
+    const created = createdEvent(node, branchId, first?.id ?? null);
+    const event = await m.appendEvent({
+      eventType: created.eventType,
+      payload: { ...created.payload, ...extra },
+    });
+    return { node, event, versionId: first?.id ?? null };
+  }
+
+  /**
+   * `POST /studies/:studyId/nodes/:nodeId/duplicate` (BIB-61; PRD section 12): a new node of the
+   * source's type with its current content and origin (`duplicateValues`), through the same insert
+   * step as `create`. `expectedRevision` is the study's. Under the study lock, in order: the source
+   * must be a live node of this study (404), the study revision (409), a Scripture source is 422
+   * `NODE_NOT_DUPLICABLE`, then the node cap. The source is never modified.
+   */
+  async duplicate(
+    ownerId: string,
+    studyId: string,
+    nodeId: string,
+    mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    parseBody(duplicateNodeRequestSchema, mutation.body);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: false,
+      work: async (m) => {
+        if (!isResourceId(nodeId)) throw new NotFoundError();
+        const source = await StudyNode.findOne({
+          where: { id: nodeId, studyId: m.studyId, ownerId: m.ownerId, deletedAt: null },
+        });
+        if (!source) throw new NotFoundError();
+        const studyRevision = await this.studyRevisions.checkStudyRevision(m, expectedRevision);
+        const values = duplicateValues(source);
+        const { node, event, versionId } = await this.insertNode(m, values, {
+          duplicateOfNodeId: source.id,
+        });
+        const response: DuplicateNodeResponse = {
+          ...mutationBody(node, event.sequence, {
+            versionId,
+            previousVersionId: null,
+            warnings: [],
+          }),
+          studyRevision,
+          duplicateOfNodeId: source.id,
+        };
+        return { status: 201, body: response };
+      },
+    });
+  }
+
+  /**
+   * `DELETE /studies/:studyId/nodes/:nodeId` (BIB-31; PRD section 23 "Integrity and deletion
+   * rules"; FR-GRAPH-010). `expectedRevision` is the node's. In one transaction, in order: the node
+   * is soft-deleted; every live edge touching it is soft-deleted with `deleted_with_node_id` naming
+   * it (one UPDATE; edges removed earlier are untouched); a canonical Scripture node's oldest live
+   * duplicate becomes canonical and every other row naming the deleted node is re-pointed to it
+   * (after the node's own delete, so the partial unique index never sees two live canonicals); the
+   * study's main-question pointer is cleared if it names the node; then every other conclusion that
+   * lost its last live support through a removed edge goes through the evidence-loss rule (BIB-30:
+   * only the marker is cleared). Notes, positions, branches, versions and events stay.
+   */
+  async delete(
+    ownerId: string,
+    studyId: string,
+    nodeId: string,
+    mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    parseBody(nodeStateRequestSchema, mutation.body);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: true,
+      work: async (m) => {
+        const current = await lockedNode(m, nodeId, expectedRevision);
+        const deleted = await m.updateWithExpectedRevision(StudyNode, {
+          id: current.id,
+          expectedRevision,
+          values: { deletedAt: fn('now') },
+          where: { deletedAt: null },
+        });
+        const [, removed] = await StudyEdge.update(
+          {
+            deletedAt: fn('now'),
+            deletedWithNodeId: current.id,
+            revision: NEXT_REVISION,
+          },
+          {
+            where: {
+              studyId: m.studyId,
+              ownerId: m.ownerId,
+              deletedAt: null,
+              [Op.or]: [{ sourceNodeId: current.id }, { targetNodeId: current.id }],
+            },
+            returning: true,
+          },
+        );
+        const promotedCanonicalNodeId = await promoteCanonical(m, current);
+        const mainQuestionCleared = await this.graph.clearMainQuestion(m, current.id);
+        const nodeEvent = await m.appendEvent({
+          eventType: NODE_EVENTS.deleted,
+          payload: {
+            nodeId: current.id,
+            nodeType: current.type,
+            removedEdgeCount: removed.length,
+            promotedCanonicalNodeId,
+            mainQuestionCleared,
+          },
+        });
+        const affected = removed.flatMap((edge) => {
+          const conclusionId = supportedConclusionOf(edge);
+          return conclusionId && conclusionId !== current.id ? [conclusionId] : [];
+        });
+        const released = await releaseConclusionsWithoutSupport(m, affected, {
+          deletedNodeId: current.id,
+        });
+        const response: NodeDeleteResponse = {
+          id: deleted.id,
+          studyId: deleted.studyId,
+          type: deleted.type,
+          revision: deleted.revision,
+          removedEdgeCount: removed.length,
+          promotedCanonicalNodeId,
+          mainQuestionCleared,
+          establishmentClearedNodeIds: released.clearedNodeIds,
+          lastEventSequence: released.lastEventSequence ?? nodeEvent.sequence,
+        };
+        return { status: 200, body: response };
+      },
+    });
+  }
+
+  /**
+   * `POST /studies/:studyId/nodes/:nodeId/restore` (BIB-31). `expectedRevision` is the deleted
+   * node's. Under the study lock, in order: 404 (absent or foreign), 409, 422 `NODE_NOT_DELETED`,
+   * 422 `NODE_LIMIT_EXCEEDED`; then the node comes back. A Scripture node whose passage has a live
+   * canonical node returns as its duplicate (rows naming it are re-pointed first), otherwise as the
+   * canonical node. Each edge its deletion removed, oldest first, is restored under the same id when
+   * the other end is live, no identical live edge exists and the edge cap has room; otherwise it
+   * stays deleted (`endpoint_deleted` hands `deleted_with_node_id` to the other end, so restoring
+   * that one brings it back). An established conclusion left without live support loses its marker.
+   * Never changes a status, a marker (except that clearing), the main question or branches.
+   */
+  async restore(
+    ownerId: string,
+    studyId: string,
+    nodeId: string,
+    mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    const expectedRevision = requireExpectedRevision(mutation.body);
+    parseBody(nodeStateRequestSchema, mutation.body);
+    return this.mutations.execute(ownerId, mutation, {
+      studyId,
+      bumpsContentRevision: true,
+      work: async (m) => {
+        if (!isResourceId(nodeId)) throw new NotFoundError();
+        const current = await StudyNode.findOne({
+          where: { id: nodeId, studyId: m.studyId, ownerId: m.ownerId },
+        });
+        if (!current) throw new NotFoundError();
+        if (current.revision !== expectedRevision) {
+          throw new RevisionConflictError(current.revision);
+        }
+        if (current.deletedAt === null) throw new NodeRuleError(NODE_NOT_DELETED);
+        await this.graph.requireRoomForLiveNode(m);
+
+        const canonicalNodeId = await restoredCanonical(m, current);
+        let node = await m.updateWithExpectedRevision(StudyNode, {
+          id: current.id,
+          expectedRevision,
+          values: { deletedAt: null, canonicalNodeId },
+        });
+        const { restoredEdgeIds, skippedEdges } = await restoreEdges(m, current.id);
+        const event = await m.appendEvent({
+          eventType: NODE_EVENTS.restored,
+          payload: {
+            nodeId: node.id,
+            nodeType: node.type,
+            restoredEdgeCount: restoredEdgeIds.length,
+            skippedEdgeCount: skippedEdges.length,
+            canonicalNodeId,
+          },
+        });
+        const released =
+          node.type === 'conclusion' && node.establishedAt !== null
+            ? await releaseConclusionsWithoutSupport(m, [node.id], { restoredNodeId: node.id })
+            : { clearedNodeIds: [], lastEventSequence: null };
+        if (released.clearedNodeIds.length > 0) {
+          node = await StudyNode.findByPk(node.id, { rejectOnEmpty: true });
+        }
+        const response: NodeRestoreResponse = {
+          ...mutationBody(node, released.lastEventSequence ?? event.sequence, {
+            versionId: null,
+            previousVersionId: null,
+            warnings: released.clearedNodeIds.length > 0 ? ['establishment_cleared'] : [],
+          }),
+          canonicalNodeId,
+          restoredEdgeIds,
+          skippedEdges,
+          establishmentClearedNodeIds: released.clearedNodeIds,
+        };
+        return { status: 200, body: response };
       },
     });
   }
@@ -368,7 +641,7 @@ export class NodesService {
         const current = await lockedNode(m, nodeId, expectedRevision);
         if (current.type === 'question') return this.changeQuestionStatus(m, current, body);
         if (current.type === 'conclusion') return this.changeConclusion(m, current, body);
-        const { values, eventType, payload } = editOf(current, body);
+        const { values, eventType, payload, warnings } = editOf(current, body);
         const updated = await m.updateWithExpectedRevision(StudyNode, {
           id: current.id,
           expectedRevision,
@@ -379,7 +652,10 @@ export class NodesService {
           eventType,
           payload: { nodeId: updated.id, ...payload },
         });
-        return { status: 200, body: mutationBody(updated, event.sequence) };
+        return {
+          status: 200,
+          body: mutationBody(updated, event.sequence, { ...NO_VERSION, warnings }),
+        };
       },
     });
   }
@@ -486,9 +762,30 @@ export class NodesService {
    * still lists all of its nodes rather than silently dropping the newest. Archived and trashed
    * studies stay readable.
    */
-  async list(ownerId: string, studyId: string): Promise<NodeListResponse> {
+  async list(
+    ownerId: string,
+    studyId: string,
+    query: unknown,
+  ): Promise<NodeListResponse | DeletedNodeListResponse> {
     await this.access.requireOwnedStudy(ownerId, studyId);
-    return { items: await this.liveSummaries(ownerId, studyId) };
+    const { state } = parseBody(listNodesQuerySchema, query);
+    if (state === 'live') return { items: await this.liveSummaries(ownerId, studyId) };
+    // BIB-31: the deleted nodes, newest deletion first (ties by id), unpaginated like the note
+    // trash: bounded by what the study ever held.
+    const deleted = await StudyNode.findAll({
+      where: { studyId, ownerId, deletedAt: { [Op.ne]: null } },
+      order: [
+        ['deletedAt', 'DESC'],
+        ['id', 'ASC'],
+      ],
+    });
+    const summaries = await this.summaries({ studyId, ownerId }, deleted);
+    return {
+      items: summaries.map((summary, index) => ({
+        ...summary,
+        deletedAt: required(deleted[index]?.deletedAt ?? null).toISOString(),
+      })),
+    };
   }
 
   /**
@@ -505,14 +802,19 @@ export class NodesService {
         ['id', 'ASC'],
       ],
     });
+    return this.summaries({ studyId, ownerId }, nodes);
+  }
+
+  /** These nodes of one study as list items, in the given order (labels in one batched lookup). */
+  private async summaries(
+    scope: { studyId: string; ownerId: string },
+    nodes: StudyNode[],
+  ): Promise<NodeSummary[]> {
     const references = await this.references.storedReferences(
       nodes.flatMap((node) => (node.scriptureReferenceId ? [node.scriptureReferenceId] : [])),
     );
     const conclusionIds = nodes.filter((node) => node.type === 'conclusion').map((n) => n.id);
-    const support = supportCounts(
-      await liveEvidence({ studyId, ownerId }, conclusionIds),
-      conclusionIds,
-    );
+    const support = supportCounts(await liveEvidence(scope, conclusionIds), conclusionIds);
     return nodes.map((node) => ({
       id: node.id,
       type: node.type,
@@ -562,6 +864,7 @@ export class NodesService {
           ...common,
           text: required(node.body),
           observationKind: required(node.observationKind),
+          establishedAt: node.establishedAt?.toISOString() ?? null,
         };
       case 'thought':
         return { type: 'thought', ...common, text: required(node.body) };
@@ -684,38 +987,36 @@ export class NodesService {
 function editOf(
   node: StudyNode,
   body: UpdateNodeBody,
-): { values: Partial<NodeValues>; eventType: string; payload: Record<string, unknown> } {
+): {
+  values: Partial<NodeValues>;
+  eventType: string;
+  payload: Record<string, unknown>;
+  warnings: NodeWarning[];
+} {
   const { text, observationKind, source } = body;
   if (
     body.status !== undefined ||
-    body.establishment !== undefined ||
-    body.changeReason !== undefined
+    body.changeReason !== undefined ||
+    (body.establishment !== undefined && node.type !== 'observation')
   ) {
-    // Statuses, the marker and reasons belong to questions and conclusions.
+    // Statuses and reasons belong to questions and conclusions; the marker to conclusions and
+    // observations (BIB-62).
     throw new NodeRuleError(NODE_NOT_EDITABLE);
   }
   switch (node.type) {
-    case 'observation': {
-      if (source !== undefined) throw new NodeRuleError(NODE_NOT_EDITABLE);
-      const values = {
-        body: text ?? node.body,
-        observationKind: observationKind ?? node.observationKind,
-      };
-      if (values.body === node.body && values.observationKind === node.observationKind) {
-        throw new NodeRuleError(NODE_UNCHANGED);
-      }
-      return {
-        values,
-        eventType: NODE_EVENTS.observationUpdated,
-        payload: { observationKind: values.observationKind },
-      };
-    }
+    case 'observation':
+      return observationEditOf(node, body);
     case 'thought': {
       if (observationKind !== undefined || source !== undefined || text === undefined) {
         throw new NodeRuleError(NODE_NOT_EDITABLE);
       }
       if (text === node.body) throw new NodeRuleError(NODE_UNCHANGED);
-      return { values: { body: text }, eventType: NODE_EVENTS.thoughtUpdated, payload: {} };
+      return {
+        values: { body: text },
+        eventType: NODE_EVENTS.thoughtUpdated,
+        payload: {},
+        warnings: [],
+      };
     }
     case 'source': {
       if (text !== undefined || observationKind !== undefined || source === undefined) {
@@ -729,6 +1030,7 @@ function editOf(
         values,
         eventType: NODE_EVENTS.sourceUpdated,
         payload: { sourceKind: source.kind },
+        warnings: [],
       };
     }
     default:
@@ -736,6 +1038,182 @@ function editOf(
       // identity is immutable.
       throw new NodeRuleError(NODE_NOT_EDITABLE);
   }
+}
+
+/**
+ * An Observation's PATCH (BIB-25; BIB-62): `establishment` alone marks or unmarks "Established by
+ * me" (no evidence needed: an observation is the user's own statement); an edit of `text` and/or
+ * `observationKind` saves and clears the marker in the same write (`establishment_cleared`),
+ * because the owner established that exact statement and kind. Both together is 400.
+ */
+function observationEditOf(node: StudyNode, body: UpdateNodeBody): ReturnType<typeof editOf> {
+  const { text, observationKind, source, establishment } = body;
+  if (source !== undefined) throw new NodeRuleError(NODE_NOT_EDITABLE);
+  const established = node.establishedAt !== null;
+  if (establishment !== undefined) {
+    if (text !== undefined || observationKind !== undefined) {
+      throw new ValidationError('Invalid request', { establishment: [ESTABLISHMENT_ALONE] });
+    }
+    const set = establishment === 'set';
+    if (set === established) throw new NodeRuleError(NODE_UNCHANGED);
+    if (set) {
+      return {
+        values: { establishedAt: fn('now') },
+        eventType: NODE_EVENTS.observationEstablished,
+        payload: { observationKind: node.observationKind },
+        warnings: [],
+      };
+    }
+    return {
+      values: { establishedAt: null },
+      eventType: NODE_EVENTS.observationUpdated,
+      payload: {
+        observationKind: node.observationKind,
+        established: false,
+        previousEstablished: true,
+      },
+      warnings: [],
+    };
+  }
+  const values = {
+    body: text ?? node.body,
+    observationKind: observationKind ?? node.observationKind,
+  };
+  if (values.body === node.body && values.observationKind === node.observationKind) {
+    throw new NodeRuleError(NODE_UNCHANGED);
+  }
+  return {
+    values: { ...values, establishedAt: null },
+    eventType: NODE_EVENTS.observationUpdated,
+    payload: {
+      observationKind: values.observationKind,
+      established: false,
+      previousEstablished: established,
+    },
+    warnings: established ? ['establishment_cleared'] : [],
+  };
+}
+
+/** `revision + 1` in an UPDATE's values (bulk updates outside `updateWithExpectedRevision`). */
+const NEXT_REVISION = literal('revision + 1') as unknown as number;
+
+/**
+ * BIB-31, after `node` (already soft-deleted) when it was a canonical Scripture node with live
+ * duplicates: its oldest live duplicate (created_at, then id) becomes canonical, then every other
+ * row naming the deleted node, live or deleted, names the promoted one. Each changed row's revision
+ * moves, so a client holding an old copy gets 409. Returns the promoted node's id, or null.
+ */
+async function promoteCanonical(m: StudyMutation, node: StudyNode): Promise<string | null> {
+  if (node.type !== 'scripture' || node.canonicalNodeId !== null) return null;
+  const scope = { studyId: m.studyId, ownerId: m.ownerId };
+  const oldest = await StudyNode.findOne({
+    where: { ...scope, canonicalNodeId: node.id, deletedAt: null },
+    order: [
+      ['createdAt', 'ASC'],
+      ['id', 'ASC'],
+    ],
+  });
+  if (!oldest) return null;
+  await m.updateWithExpectedRevision(StudyNode, {
+    id: oldest.id,
+    expectedRevision: oldest.revision,
+    values: { canonicalNodeId: null },
+  });
+  await StudyNode.update(
+    { canonicalNodeId: oldest.id, revision: NEXT_REVISION },
+    { where: { ...scope, canonicalNodeId: node.id } },
+  );
+  return oldest.id;
+}
+
+/**
+ * BIB-31: the canonical node a restored Scripture node must name. When its passage already has a
+ * live canonical node C, every row naming the restored node is re-pointed to C first (so the
+ * canonical-target trigger never sees a chain) and C is returned: it comes back as C's duplicate.
+ * Otherwise null: it comes back canonical. Any other type: null.
+ */
+async function restoredCanonical(m: StudyMutation, node: StudyNode): Promise<string | null> {
+  if (node.type !== 'scripture') return null;
+  const scope = { studyId: m.studyId, ownerId: m.ownerId };
+  const live = await StudyNode.findOne({
+    where: {
+      ...scope,
+      type: 'scripture',
+      scriptureReferenceId: node.scriptureReferenceId,
+      canonicalNodeId: null,
+      deletedAt: null,
+    },
+    attributes: ['id'],
+  });
+  if (!live) return null;
+  await StudyNode.update(
+    { canonicalNodeId: live.id, revision: NEXT_REVISION },
+    { where: { ...scope, canonicalNodeId: node.id } },
+  );
+  return live.id;
+}
+
+/**
+ * BIB-31: brings back the edges `nodeId`'s deletion removed (now that it is live again), oldest
+ * first, under their own ids. Each one is restored, or stays deleted with a reason:
+ * `endpoint_deleted` (the other end is deleted; `deleted_with_node_id` is handed to it so its own
+ * restore brings the edge back), `duplicate` (an identical live edge exists: the user's newer edge
+ * wins) or `limit` (the study's edge cap).
+ */
+async function restoreEdges(m: StudyMutation, nodeId: string) {
+  const scope = { studyId: m.studyId, ownerId: m.ownerId };
+  const edges = await StudyEdge.findAll({
+    where: { ...scope, deletedWithNodeId: nodeId },
+    order: [
+      ['createdAt', 'ASC'],
+      ['id', 'ASC'],
+    ],
+  });
+  const restoredEdgeIds: string[] = [];
+  const skippedEdges: { edgeId: string; reason: SkippedEdgeReason }[] = [];
+  if (edges.length === 0) return { restoredEdgeIds, skippedEdges };
+  const otherIds = edges.map((e) => (e.sourceNodeId === nodeId ? e.targetNodeId : e.sourceNodeId));
+  const liveOthers = new Set(
+    (
+      await StudyNode.findAll({
+        where: { ...scope, id: [...new Set(otherIds)], deletedAt: null },
+        attributes: ['id'],
+      })
+    ).map((n) => n.id),
+  );
+  let liveEdges = await StudyEdge.count({ where: { ...scope, deletedAt: null } });
+  for (const [index, edge] of edges.entries()) {
+    const otherId = otherIds[index] as string;
+    let reason: SkippedEdgeReason | null = null;
+    if (!liveOthers.has(otherId)) reason = 'endpoint_deleted';
+    else {
+      const twin = await StudyEdge.findOne({
+        where: {
+          ...scope,
+          sourceNodeId: edge.sourceNodeId,
+          targetNodeId: edge.targetNodeId,
+          type: edge.type,
+          deletedAt: null,
+        },
+        attributes: ['id'],
+      });
+      if (twin) reason = 'duplicate';
+      else if (liveEdges >= MAX_EDGES_PER_STUDY) reason = 'limit';
+    }
+    const values =
+      reason === null
+        ? { deletedAt: null, deletedWithNodeId: null }
+        : { deletedWithNodeId: reason === 'endpoint_deleted' ? otherId : null };
+    await StudyEdge.update(
+      { ...values, revision: NEXT_REVISION },
+      { where: { ...scope, id: edge.id } },
+    );
+    if (reason === null) {
+      restoredEdgeIds.push(edge.id);
+      liveEdges += 1;
+    } else skippedEdges.push({ edgeId: edge.id, reason });
+  }
+  return { restoredEdgeIds, skippedEdges };
 }
 
 /**

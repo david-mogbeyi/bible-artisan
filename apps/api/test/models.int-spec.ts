@@ -874,6 +874,7 @@ describe('Sequelize models against the real schema', () => {
       origin: 'user',
       revision: 1,
       deletedAt: null,
+      deletedWithNodeId: null,
       createdAt: expect.any(Date),
       updatedAt: expect.any(Date),
     });
@@ -894,6 +895,59 @@ describe('Sequelize models against the real schema', () => {
         DatabaseError,
       );
     }
+    await Study.destroy({ where: { id: study.id } });
+    expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
+  });
+
+  it("writes StudyEdge.deletedWithNodeId and an observation's StudyNode.establishedAt through the models; deletedWithNodeId needs a deleted edge and one of its own endpoints, and a study delete still purges (BIB-31, BIB-62)", async () => {
+    const owner = await createUser();
+    const study = await createStudy(owner.id);
+    const other = await createStudy(owner.id);
+    const scope = { studyId: study.id, ownerId: owner.id };
+    const observation = await StudyNode.create({
+      ...scope,
+      type: 'observation',
+      origin: 'user',
+      body: 'O',
+      observationKind: 'textual_observation',
+      establishedAt: new Date('2026-11-15T10:00:00.000Z'),
+    });
+    expect(
+      (await StudyNode.findByPk(observation.id, { rejectOnEmpty: true })).establishedAt,
+    ).toStrictEqual(new Date('2026-11-15T10:00:00.000Z'));
+    const a = await StudyNode.create({ ...scope, ...THOUGHT });
+    const b = await StudyNode.create({ ...scope, ...THOUGHT });
+    const c = await StudyNode.create({ ...scope, ...THOUGHT });
+    const elsewhere = await StudyNode.create({ studyId: other.id, ownerId: owner.id, ...THOUGHT });
+    const edge = await StudyEdge.create({
+      ...scope,
+      sourceNodeId: a.id,
+      targetNodeId: b.id,
+      type: 'explains',
+      origin: 'user',
+      deletedAt: new Date(),
+      deletedWithNodeId: a.id,
+    });
+    expect((await StudyEdge.findByPk(edge.id, { rejectOnEmpty: true })).deletedWithNodeId).toBe(
+      a.id,
+    );
+    const base = { ...scope, sourceNodeId: b.id, targetNodeId: c.id, origin: 'user' as const };
+    for (const bad of [
+      { type: 'explains', deletedWithNodeId: b.id },
+      { type: 'explains', deletedAt: new Date(), deletedWithNodeId: a.id },
+    ]) {
+      await expect(StudyEdge.create({ ...base, ...bad } as never)).rejects.toBeInstanceOf(
+        DatabaseError,
+      );
+    }
+    await expect(
+      StudyEdge.create({
+        ...base,
+        type: 'explains',
+        deletedAt: new Date(),
+        deletedWithNodeId: elsewhere.id,
+      }),
+    ).rejects.toBeInstanceOf(DatabaseError);
     await Study.destroy({ where: { id: study.id } });
     expect(await StudyEdge.count({ where: { studyId: study.id } })).toBe(0);
   });

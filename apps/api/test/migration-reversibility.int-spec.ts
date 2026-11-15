@@ -49,6 +49,14 @@ const THREAD_REFUSED =
 /** BIB-39/40's AI migration. */
 const AI_MIGRATION = '20261115020000_add_ai_jobs_and_consent.ts';
 const AI_REFUSED = 'AI data drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-62's established observations migration. */
+const ESTABLISHED_OBSERVATIONS_MIGRATION = '20261115120001_allow_established_observations.ts';
+const ESTABLISHED_OBSERVATIONS_REFUSED =
+  'established observations drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
+/** BIB-31's edge deleted-with migration. */
+const DELETED_WITH_MIGRATION = '20261115120002_add_edge_deleted_with_node.ts';
+const DELETED_WITH_REFUSED =
+  'edge deleted-with drop refused: study data exists (set ALLOW_STUDY_DATA_DROP=1)';
 
 const DOMAIN_TABLES = [
   'ai_job',
@@ -269,12 +277,12 @@ describe('migration reversibility', () => {
         { bind: [userId] },
       );
 
-      // No opt-in at all: the newest migration (BIB-39/40's AI tables) is the first `down`
+      // No opt-in at all: the newest migration (BIB-31's edge deleted-with) is the first `down`
       // toward the corpus and refuses before anything commits.
       const error = await migrator.down({ to: CORPUS_MIGRATION }).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
       expect((error as { cause?: unknown }).cause).toMatchObject({
-        message: AI_REFUSED,
+        message: DELETED_WITH_REFUSED,
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(before);
@@ -296,6 +304,10 @@ describe('migration reversibility', () => {
     const aiUserColumns = async () =>
       (await columns(['user'])).filter((column) => column.startsWith('user.ai_'));
     try {
+      // Later migrations (BIB-62's and BIB-31's) step down first.
+      await withStudyDataDropAllowed(() =>
+        migrator.down({ to: ESTABLISHED_OBSERVATIONS_MIGRATION }),
+      );
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(AI_MIGRATION);
       const refused = await migrator.down().catch((e: unknown) => e);
@@ -507,7 +519,7 @@ describe('migration reversibility', () => {
       await withStudyDataDropAllowed(() => migrator.down({ to: AI_MIGRATION }));
       const schemaBefore = await versionSchema();
       expect(schemaBefore.map((row) => row.name)).toContain('node_version_evidence_edge_fk');
-      // Later migrations (BIB-55's) step down first.
+      // Later migrations (BIB-55's, BIB-62's and BIB-31's) step down first.
       await withStudyDataDropAllowed(() => migrator.down({ to: THREAD_MIGRATION }));
       const before = await recordedMigrations(db);
       expect(before.at(-1)).toBe(VERSIONS_MIGRATION);
@@ -553,6 +565,57 @@ describe('migration reversibility', () => {
         },
       ]);
       expect(await versionSchema()).toStrictEqual(schemaBefore);
+    } finally {
+      await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
+      await migrator.up();
+    }
+  });
+
+  it('reverts and re-applies the edge deleted-with column (BIB-31) and established observations (BIB-62) only with the study-data opt-in; the observation markers are cleared and the narrower CHECK comes back', async () => {
+    const userId = await seedStudyData();
+    const migrator = createMigrator(db);
+    try {
+      const before = await recordedMigrations(db);
+      expect(before.at(-1)).toBe(DELETED_WITH_MIGRATION);
+      const refused = await migrator.down().catch((e: unknown) => e);
+      expect((refused as { cause?: unknown }).cause).toMatchObject({
+        message: DELETED_WITH_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(await columns(['study_edge'])).not.toContain('study_edge.deleted_with_node_id');
+
+      await db.query(
+        `INSERT INTO study_node (study_id, owner_id, type, origin, body, observation_kind, established_at)
+         SELECT id, owner_id, 'observation', 'user', 'Seeded', 'textual_observation', now()
+           FROM study WHERE owner_id = $1`,
+        { bind: [userId] },
+      );
+      const refusedToo = await migrator.down().catch((e: unknown) => e);
+      expect((refusedToo as { cause?: unknown }).cause).toMatchObject({
+        message: ESTABLISHED_OBSERVATIONS_REFUSED,
+        parent: expect.objectContaining({ code: '23000' }),
+      });
+      await withStudyDataDropAllowed(() => migrator.down());
+      expect(
+        await db.query(
+          `SELECT established_at FROM study_node WHERE owner_id = $1 AND type = 'observation'`,
+          { bind: [userId], type: QueryTypes.SELECT },
+        ),
+      ).toStrictEqual([{ established_at: null }]);
+      const narrower = await db
+        .query(
+          `UPDATE study_node SET established_at = now()
+            WHERE owner_id = $1 AND type = 'observation'`,
+          { bind: [userId] },
+        )
+        .catch((e: unknown) => e);
+      expect(narrower).toMatchObject({ parent: expect.objectContaining({ code: '23514' }) });
+
+      await migrator.up();
+      expect(await recordedMigrations(db)).toStrictEqual(before);
+      expect(await columns(['study_edge'])).toContain('study_edge.deleted_with_node_id');
     } finally {
       await db.query(`DELETE FROM "user" WHERE id = $1`, { bind: [userId] });
       await migrator.up();
@@ -650,6 +713,9 @@ describe('migration reversibility', () => {
       );
       const schemaBefore = await edgeSchema();
       expect(schemaBefore.map((row) => row.name)).toStrictEqual([
+        'study_edge_deleted_with_check',
+        'study_edge_deleted_with_idx',
+        'study_edge_deleted_with_node_fk',
         'study_edge_identity_immutable',
         'study_edge_identity_immutable',
         'study_edge_live_key',
@@ -1013,18 +1079,8 @@ describe('migration reversibility', () => {
         parent: expect.objectContaining({ code: '23000' }),
       });
       expect(await recordedMigrations(db)).toStrictEqual(
-        before.filter(
-          (name) =>
-            name !== ANNOTATION_MIGRATION &&
-            name !== TYPED_NODES_MIGRATION &&
-            name !== CANONICAL_MIGRATION &&
-            name !== EDGE_MIGRATION &&
-            name !== LAYOUT_MIGRATION &&
-            name !== MEMBERSHIP_MIGRATION &&
-            name !== VERSIONS_MIGRATION &&
-            name !== THREAD_MIGRATION &&
-            name !== AI_MIGRATION,
-        ),
+        // Every migration from BIB-24's on was reverted.
+        before.filter((name) => name < ANNOTATION_MIGRATION),
       );
       expect(
         await db.query('SELECT 1 FROM note_version', { type: QueryTypes.SELECT }),

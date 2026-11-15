@@ -73,6 +73,10 @@ export const NODE_UNCHANGED = 'NODE_UNCHANGED';
 export const CONCLUSION_EVIDENCE_REQUIRED = 'CONCLUSION_EVIDENCE_REQUIRED';
 /** 422: only a supported conclusion can be marked established. */
 export const CONCLUSION_NOT_SUPPORTED = 'CONCLUSION_NOT_SUPPORTED';
+/** 422: a Scripture node is duplicated through `POST /nodes` `explicit_duplicate` (BIB-61). */
+export const NODE_NOT_DUPLICABLE = 'NODE_NOT_DUPLICABLE';
+/** 422: restoring a node that is not deleted (BIB-31). */
+export const NODE_NOT_DELETED = 'NODE_NOT_DELETED';
 
 export const NODE_ERROR_CODES = [
   NODE_LIMIT_EXCEEDED,
@@ -80,6 +84,8 @@ export const NODE_ERROR_CODES = [
   NODE_UNCHANGED,
   CONCLUSION_EVIDENCE_REQUIRED,
   CONCLUSION_NOT_SUPPORTED,
+  NODE_NOT_DUPLICABLE,
+  NODE_NOT_DELETED,
 ] as const;
 export type NodeErrorCode = (typeof NODE_ERROR_CODES)[number];
 
@@ -91,6 +97,8 @@ export const NODE_ERROR_MESSAGES: Record<NodeErrorCode, string> = {
   [CONCLUSION_EVIDENCE_REQUIRED]:
     'Connect supporting evidence first: a relationship that supports this conclusion, or one this conclusion is inferred from.',
   [CONCLUSION_NOT_SUPPORTED]: 'Only a supported conclusion can be marked established',
+  [NODE_NOT_DUPLICABLE]: 'Use Add a separate copy to duplicate a passage.',
+  [NODE_NOT_DELETED]: "This node isn't deleted.",
 };
 
 /** The most characters of a conclusion's reason for a change (an assumption: the PRD sets none). */
@@ -122,6 +130,8 @@ export const CONCLUSION_REVISED_NEEDS_TEXT = 'A revised conclusion needs its new
 export const CONCLUSION_TEXT_NEEDS_REVISED = 'A new statement makes the conclusion Revised';
 export const ESTABLISHMENT_NEEDS_SUPPORTED = 'Only a supported conclusion can be established';
 export const STATUS_NOT_FOR_NODE_TYPE = 'This status does not belong to this kind of node';
+/** BIB-62: an observation's marker is set or removed on its own, never with an edit. */
+export const ESTABLISHMENT_ALONE = "Mark or remove 'Established by me' separately from an edit.";
 export const CONCLUSION_TEXT_TOO_LONG = `Use at most ${MAX_QUESTION_LENGTH.toLocaleString('en-US')} characters`;
 
 /**
@@ -450,6 +460,72 @@ export const createNodeResponseSchema = nodeMutationResponseSchema.extend({
 
 export type CreateNodeResponse = z.infer<typeof createNodeResponseSchema>;
 
+/**
+ * `POST /v1/studies/:studyId/nodes/:nodeId/duplicate` (BIB-61): the study's revision, as for every
+ * node create. The copy's content is the source's as stored; the client sends nothing else.
+ */
+export const duplicateNodeRequestSchema = z.strictObject({
+  expectedRevision: expectedRevisionSchema,
+});
+
+export type DuplicateNodeRequest = z.input<typeof duplicateNodeRequestSchema>;
+
+/** 201 from a duplicate: the new node's fields, the study revision, and the source node's id. */
+export const duplicateNodeResponseSchema = nodeMutationResponseSchema.extend({
+  studyRevision: z.number().int().positive(),
+  duplicateOfNodeId: z.uuid(),
+});
+
+export type DuplicateNodeResponse = z.infer<typeof duplicateNodeResponseSchema>;
+
+/** `DELETE /nodes/:nodeId` and `POST /nodes/:nodeId/restore` (BIB-31): the node's revision. */
+export const nodeStateRequestSchema = z.strictObject({ expectedRevision: expectedRevisionSchema });
+
+export type NodeStateRequest = z.input<typeof nodeStateRequestSchema>;
+
+/** 200 from a node delete: what the deletion did, ids and counts only (stored on the receipt). */
+export const nodeDeleteResponseSchema = z.object({
+  id: z.uuid(),
+  studyId: z.uuid(),
+  type: z.enum(STUDY_NODE_TYPES),
+  revision: z.number().int().positive(),
+  removedEdgeCount: z.number().int().nonnegative(),
+  /** The duplicate that became the passage's canonical node, when the deleted node was it. */
+  promotedCanonicalNodeId: z.uuid().nullable(),
+  mainQuestionCleared: z.boolean(),
+  /** Conclusions whose "Established by me" was cleared because they lost their last evidence. */
+  establishmentClearedNodeIds: z.array(z.uuid()),
+  lastEventSequence: eventSequenceSchema,
+});
+
+export type NodeDeleteResponse = z.infer<typeof nodeDeleteResponseSchema>;
+
+/** Why a relationship deleted with a node did not come back with it (BIB-31). */
+export const SKIPPED_EDGE_REASONS = ['endpoint_deleted', 'duplicate', 'limit'] as const;
+export type SkippedEdgeReason = (typeof SKIPPED_EDGE_REASONS)[number];
+
+/** 200 from a node restore. */
+export const nodeRestoreResponseSchema = nodeMutationResponseSchema.extend({
+  /** The live canonical node it was restored as a duplicate of, else null. */
+  canonicalNodeId: z.uuid().nullable(),
+  restoredEdgeIds: z.array(z.uuid()),
+  skippedEdges: z.array(z.object({ edgeId: z.uuid(), reason: z.enum(SKIPPED_EDGE_REASONS) })),
+  establishmentClearedNodeIds: z.array(z.uuid()),
+});
+
+export type NodeRestoreResponse = z.infer<typeof nodeRestoreResponseSchema>;
+
+export const NODE_LIST_STATES = ['live', 'deleted'] as const;
+export type NodeListState = (typeof NODE_LIST_STATES)[number];
+
+/**
+ * `GET /v1/studies/:studyId/nodes?state=`: live nodes (default) or the deleted ones (BIB-31). Other
+ * query keys are ignored, as they were before `state` existed; an unknown `state` is 400.
+ */
+export const listNodesQuerySchema = z.object({
+  state: z.enum(NODE_LIST_STATES).default('live'),
+});
+
 /** One live node in the study's list: compact, with its label and no full text. */
 export const nodeSummarySchema = z.object({
   id: z.uuid(),
@@ -461,7 +537,7 @@ export const nodeSummarySchema = z.object({
   referenceId: z.uuid().nullable(),
   /** A duplicate Scripture node's canonical node (BIB-26), else null. */
   canonicalNodeId: z.uuid().nullable(),
-  /** "Established by me" (a conclusion the owner established; false for every other node). */
+  /** "Established by me": a conclusion or an observation (BIB-62) the owner established. */
   established: z.boolean(),
   /** A supported conclusion with no live supporting evidence (BIB-30). */
   evidenceIncomplete: z.boolean(),
@@ -476,6 +552,18 @@ export type NodeSummary = z.infer<typeof nodeSummarySchema>;
 export const nodeListResponseSchema = z.object({ items: z.array(nodeSummarySchema) });
 
 export type NodeListResponse = z.infer<typeof nodeListResponseSchema>;
+
+/** A deleted node in `GET /nodes?state=deleted` (BIB-31), with when it was deleted. */
+export const deletedNodeSummarySchema = nodeSummarySchema.extend({ deletedAt: z.iso.datetime() });
+
+export type DeletedNodeSummary = z.infer<typeof deletedNodeSummarySchema>;
+
+/** Newest deletion first (ties by id), unpaginated like the note trash. */
+export const deletedNodeListResponseSchema = z.object({
+  items: z.array(deletedNodeSummarySchema),
+});
+
+export type DeletedNodeListResponse = z.infer<typeof deletedNodeListResponseSchema>;
 
 const nodeCommon = {
   id: z.uuid(),
@@ -510,6 +598,8 @@ export const nodeResponseSchema = z.discriminatedUnion('type', [
     ...nodeCommon,
     text: z.string(),
     observationKind: z.enum(OBSERVATION_KINDS),
+    /** When the owner marked it "Established by me" (BIB-62), else null. */
+    establishedAt: z.iso.datetime().nullable(),
   }),
   z.object({ type: z.literal('thought'), ...nodeCommon, text: z.string() }),
   z.object({

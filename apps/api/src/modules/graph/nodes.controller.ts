@@ -1,5 +1,6 @@
-import { Controller, Get, Header, Param, Patch, Post } from '@nestjs/common';
+import { Controller, Delete, Get, Header, Param, Patch, Post, Query } from '@nestjs/common';
 import type {
+  DeletedNodeListResponse,
   NodeListResponse,
   NodeResponse,
   NodeVersionListResponse,
@@ -29,13 +30,15 @@ export class NodesController {
     return this.nodes.create(ownerId, studyId, mutation);
   }
 
+  /** `?state=live` (default) or `deleted` (BIB-31). */
   @Get()
   @Header('Cache-Control', 'no-store')
   list(
     @CurrentUserId() ownerId: string,
     @Param('studyId', ParseResourceIdPipe) studyId: string,
-  ): Promise<NodeListResponse> {
-    return this.nodes.list(ownerId, studyId);
+    @Query() query: unknown,
+  ): Promise<NodeListResponse | DeletedNodeListResponse> {
+    return this.nodes.list(ownerId, studyId, query);
   }
 
   @Get(':nodeId')
@@ -66,5 +69,38 @@ export class NodesController {
     @MutationRequest() mutation: MutationRequestInfo,
   ): Promise<MutationResult> {
     return this.nodes.update(ownerId, studyId, nodeId, mutation);
+  }
+
+  /** BIB-31: soft-deletes the node and its live relationships. */
+  @Delete(':nodeId')
+  delete(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('nodeId', ParseResourceIdPipe) nodeId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.nodes.delete(ownerId, studyId, nodeId, mutation);
+  }
+
+  /** BIB-31: brings a deleted node back with the relationships its deletion removed. */
+  @Post(':nodeId/restore')
+  restore(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('nodeId', ParseResourceIdPipe) nodeId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.nodes.restore(ownerId, studyId, nodeId, mutation);
+  }
+
+  /** BIB-61: a new node with this one's current content and nothing else. */
+  @Post(':nodeId/duplicate')
+  duplicate(
+    @CurrentUserId() ownerId: string,
+    @Param('studyId', ParseResourceIdPipe) studyId: string,
+    @Param('nodeId', ParseResourceIdPipe) nodeId: string,
+    @MutationRequest() mutation: MutationRequestInfo,
+  ): Promise<MutationResult> {
+    return this.nodes.duplicate(ownerId, studyId, nodeId, mutation);
   }
 }

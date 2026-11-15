@@ -427,6 +427,7 @@ describe('typed graph nodes (BIB-25)', () => {
             ...common(2, 'user'),
             text: 'Paul appeals to his\nconscience as a witness.',
             observationKind: 'textual_observation',
+            establishedAt: null,
           },
         ],
         [
@@ -1107,12 +1108,22 @@ describe('typed graph nodes (BIB-25)', () => {
           {
             sequence: '5',
             eventType: 'observation_updated',
-            payload: { nodeId: observation.id, observationKind: 'interpretation' },
+            payload: {
+              nodeId: observation.id,
+              observationKind: 'interpretation',
+              established: false,
+              previousEstablished: false,
+            },
           },
           {
             sequence: '6',
             eventType: 'observation_updated',
-            payload: { nodeId: observation.id, observationKind: 'textual_observation' },
+            payload: {
+              nodeId: observation.id,
+              observationKind: 'textual_observation',
+              established: false,
+              previousEstablished: false,
+            },
           },
           { sequence: '7', eventType: 'thought_updated', payload: { nodeId: thought.id } },
           {

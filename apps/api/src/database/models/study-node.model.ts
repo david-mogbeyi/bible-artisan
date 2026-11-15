@@ -93,9 +93,10 @@ export class StudyNode extends Model {
   declare canonicalNodeId: string | null;
 
   /**
-   * When the owner marked this conclusion "Established by me" (BIB-30; database clock), else NULL.
-   * CHECK `study_node_established_check`: only a supported conclusion carries it. Only the owner's
-   * PATCH sets it; the evidence-loss rule only clears it.
+   * When the owner marked this conclusion (BIB-30) or observation (BIB-62) "Established by me"
+   * (database clock), else NULL. CHECK `study_node_established_check` (widened by BIB-62): only an
+   * observation or a supported conclusion carries it. Only the owner's PATCH sets it; the
+   * evidence-loss rule and an observation edit only clear it.
    */
   @Column({ field: 'established_at', type: DataType.DATE, allowNull: true })
   declare establishedAt: Date | null;

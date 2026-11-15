@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   createNodeRequestSchema,
   createNodeResponseSchema,
+  duplicateNodeRequestSchema,
+  listNodesQuerySchema,
   NODE_EDIT_EMPTY,
+  nodeStateRequestSchema,
   NODE_ORIGIN_NAMES,
   NODE_ORIGINS,
   nodeLabel,
@@ -349,5 +352,23 @@ describe('conclusion and question actions on PATCH (BIB-30)', () => {
       expect(parse({ status: 'challenged', ...extra }).success).toBe(false);
     }
     expect(failures(parse({ status: 'archived' }))).toStrictEqual(['status']);
+  });
+});
+
+describe('duplicate, delete and restore contracts (BIB-61, BIB-31)', () => {
+  it('takes only expectedRevision for a duplicate or a node state change', () => {
+    expect(duplicateNodeRequestSchema.safeParse({ expectedRevision: 3 }).success).toBe(true);
+    expect(duplicateNodeRequestSchema.safeParse({ expectedRevision: 3, text: 'x' }).success).toBe(
+      false,
+    );
+    expect(nodeStateRequestSchema.safeParse({ expectedRevision: 1, type: 'x' }).success).toBe(
+      false,
+    );
+  });
+
+  it('lists live nodes by default and refuses an unknown state', () => {
+    expect(listNodesQuerySchema.parse({})).toStrictEqual({ state: 'live' });
+    expect(listNodesQuerySchema.parse({ state: 'deleted' })).toStrictEqual({ state: 'deleted' });
+    expect(listNodesQuerySchema.safeParse({ state: 'gone' }).success).toBe(false);
   });
 });
